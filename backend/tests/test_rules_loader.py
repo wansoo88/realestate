@@ -13,14 +13,40 @@ import yaml
 from app.domain.rules.loader import Provenance, RuleValidationError, load_rules
 
 
-def test_템플릿은_로딩이_거부된다(production_rules_path):
-    """config/tax_rules.yaml 은 값이 비어 있으므로 절대 로딩되면 안 된다."""
-    with pytest.raises(RuleValidationError) as exc:
-        load_rules(production_rules_path)
+def test_운영_세율은_검증본으로_로딩된다(production_rules_path):
+    """config/tax_rules.yaml 은 공식 출처로 채워진 검증본이어야 한다.
 
-    problems = "\n".join(exc.value.problems)
-    assert "unverified" in problems, "status 검증이 동작해야 한다"
-    assert "rate_pct" in problems, "빈 세율을 잡아내야 한다"
+    (과거엔 빈 템플릿이라 로딩 거부를 검증했으나, ORDER 2026-07-25-04-data 로
+     지방세법·공인중개사법 시행규칙·금융위 자료를 확인해 채웠다.
+     실제값 회귀 검증은 test_tax_rules_real.py 가 담당한다.)
+    """
+    rules = load_rules(production_rules_path)
+    assert rules.status == "verified"
+    # 빈 값(null rate)이 하나라도 있으면 load_rules 가 예외를 던지므로, 여기 도달했다는
+    # 것 자체가 모든 구간에 세율이 채워졌다는 뜻이다.
+    assert rules.acquisition_tax and rules.brokerage_fee
+
+
+def test_빈_세율은_여전히_거부된다(tmp_path):
+    """가드레일 회귀 방지: rate_pct 가 비면 status 와 무관하게 거부돼야 한다."""
+    bad = {
+        "version": "x", "status": "verified",
+        "acquisition_tax": [{"id": "a", "when": {}, "rate_pct": None,
+                             "source": "s", "source_url": "u", "as_of": "2026-01-01"}],
+        "brokerage_fee": [{"id": "b", "when": {}, "rate_pct": 0.4,
+                           "source": "s", "source_url": "u", "as_of": "2026-01-01"}],
+        "lending": {
+            "ltv": {"rate_pct": 70, "source": "s", "source_url": "u", "as_of": "2026-01-01"},
+            "dsr": {"rate_pct": 40, "source": "s", "source_url": "u", "as_of": "2026-01-01"},
+        },
+        "fixed_costs": {"registration_krw": 0, "moving_reserve_krw": 0,
+                        "source": "s", "source_url": "u", "as_of": "2026-01-01"},
+    }
+    p = tmp_path / "empty_rate.yaml"
+    p.write_text(yaml.safe_dump(bad), encoding="utf-8")
+    with pytest.raises(RuleValidationError) as exc:
+        load_rules(p)
+    assert any("rate_pct" in x for x in exc.value.problems)
 
 
 def test_픽스처는_정상_로딩된다(test_rules):

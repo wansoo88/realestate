@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>와이어프레임 — 근거 리포트 상세 · 부동산 AI 자문</title>
+<link rel="stylesheet" href="wireframe.css">
+</head>
+<body>
+
+<header class="wf-head">
+  <h1>와이어프레임 — 근거 리포트 상세</h1>
+  <p>근거: <a href="../README.md">ux/README.md</a> §6(결론 먼저) §7(불확실성) §8(비동기 대기) ·
+     <a href="../../api-spec.md">api-spec.md</a> §5(<code>GET /recommendations/{job_id}</code>)</p>
+  <p><strong>이 화면이 제품의 전부다.</strong> 지도는 어느 앱에나 있다.
+     이 서비스가 파는 건 <b>"왜 이 매물인가"</b>와 <b>"무엇이 확실하지 않은가"</b>다.
+     따라서 설계 원칙은 하나 — <b>결론은 항상 보이고, 근거는 접히되 존재는 숨기지 않는다.</b></p>
+</header>
+
+<nav class="wf-nav" aria-label="와이어프레임 목록">
+  <a href="index.html">전체</a>
+  <a href="login.html">로그인</a>
+  <a href="onboarding.html">조건 입력 3단계</a>
+  <a href="report-detail.html" aria-current="page">리포트 상세</a>
+</nav>
+
+<!-- ══════════════════ 0. 분석 대기 ══════════════════ -->
+<section class="wf-section">
+  <h2>0. 분석 대기 — 45초를 버티게</h2>
+  <p class="wf-why"><b>왜 빈 스피너를 금지하나:</b> 에이전트 5종이 Claude API를 왕복하면 수십 초가 걸린다(architecture.md §2.2).
+     모바일에서 45초짜리 스피너는 "멈춤"으로 읽힌다. <b>완료된 에이전트부터 순차 노출</b>하면
+     같은 45초가 "일하는 중"으로 읽힌다.</p>
+
+  <div class="wf-row">
+    <figure class="wf-frame">
+      <figcaption>모바일 390×760</figcaption>
+      <div class="wf-phone">
+        <div class="scr">
+          <div class="scr__top"><h2>분석 중…</h2></div>
+          <div class="scr__body">
+            <div class="bar" aria-hidden="true"><i style="width:60%"></i></div>
+            <p class="num" style="margin:8px 0 16px" role="status" aria-live="polite">3 / 5 단계</p>
+
+            <ul class="progress">
+              <li class="done"><span aria-hidden="true">✓</span> 자금 한도 계산 완료 <span class="badge">8.5억</span></li>
+              <li class="done"><span aria-hidden="true">✓</span> 후보 34건 선별 완료</li>
+              <li class="now"><span aria-hidden="true">⟳</span> 시세 분석 중…</li>
+              <li class="wait"><span aria-hidden="true">·</span> 입지 분석</li>
+              <li class="wait"><span aria-hidden="true">·</span> 종합 정리</li>
+            </ul>
+
+            <h3 style="font-size:16px;margin:24px 0 8px;padding-top:16px;border-top:1px solid var(--border)">
+              먼저 나온 결과
+            </h3>
+            <div style="border:1px solid var(--border);border-radius:12px;padding:12px">
+              <div style="display:flex;align-items:center;gap:8px">
+                <span class="rep__rank">1</span>
+                <b>○○아파트 84A</b>
+                <span class="rep__score num">82</span>
+              </div>
+              <p class="rep__price num estimated" style="margin:8px 0 0">
+                <span aria-hidden="true">~</span>13.95억
+                <span class="badge badge--estimated">추정</span>
+              </p>
+            </div>
+          </div>
+          <div class="scr__foot">
+            <button class="btn btn--block">백그라운드에서 계속하기</button>
+            <p class="disclaimer" style="margin:0;text-align:center">
+              화면을 벗어나도 분석은 계속됩니다.
+            </p>
+          </div>
+        </div>
+      </div>
+    </figure>
+
+    <figure class="wf-frame">
+      <figcaption>데스크톱 1280×800 (0.5배 축소)</figcaption>
+      <div class="wf-desk">
+        <div class="wf-desk__inner">
+          <div class="desk2">
+            <div class="desk2__side">
+              <h2 style="margin:0 0 16px;font-size:20px">분석 중…</h2>
+              <div class="bar"><i style="width:60%"></i></div>
+              <p class="num" style="margin:8px 0 24px">3 / 5 단계</p>
+              <ul class="progress">
+                <li class="done">✓ 자금 한도 계산 완료</li>
+                <li class="done">✓ 후보 34건 선별 완료</li>
+                <li class="now">⟳ 시세 분석 중…</li>
+                <li class="wait">· 입지 분석</li>
+                <li class="wait">· 종합 정리</li>
+              </ul>
+            </div>
+            <div class="desk2__main">
+              <h3 style="margin:0 0 16px">먼저 나온 결과</h3>
+              <div style="border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:12px">
+                <div style="display:flex;align-items:center;gap:8px">
+                  <span class="rep__rank">1</span><b>○○아파트 84A</b><span class="rep__score num">82</span>
+                </div>
+              </div>
+              <div style="border:1px dashed var(--border);border-radius:12px;padding:16px;color:var(--text-estimated)">
+                다음 결과를 기다리는 중…
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </figure>
+  </div>
+
+  <div class="wf-note">
+    <strong>구현 요건 (re-fe)</strong>
+    <ul>
+      <li>SSE(<code>/recommendations/{id}/stream</code>) 우선, <b>폴링 폴백 필수</b>.
+        모바일 백그라운드 전환 시 SSE는 끊긴다(api-spec §9 A1). 복귀 시 <code>GET</code>으로 상태를 다시 맞춘다.</li>
+      <li>진행률 텍스트에 <code>role="status" aria-live="polite"</code>. 진행 바(<code>.bar</code>)는 <code>aria-hidden</code> —
+        같은 정보를 두 번 읽으면 방해가 된다.</li>
+      <li>단계 이름은 <b>에이전트 ID가 아니라 사용자 언어</b>로. <code>valuation-trader</code> → "시세 분석".</li>
+      <li>완료 단계에 <b>산출된 값을 즉시 붙인다</b>("8.5억"). 진행률만 도는 것보다 체감 대기가 훨씬 짧다.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ══════════════════ 1. 리포트 상세 ══════════════════ -->
+<section class="wf-section">
+  <h2>1. 근거 리포트 상세</h2>
+  <p class="wf-why"><b>왜 "확인할 점"을 접어두면서 개수는 보여주나:</b> 다 펼치면 아무도 안 읽고,
+     그냥 접으면 리스크를 숨긴 게 된다(다크패턴). <b>접되 <code>3건</code> 배지로 존재를 알린다</b> —
+     읽을지 말지는 사용자가 정하되, 있다는 사실은 감추지 않는다.</p>
+
+  <div class="wf-row">
+    <figure class="wf-frame">
+      <figcaption>모바일 390×760</figcaption>
+      <div class="wf-phone">
+        <div class="scr">
+          <div class="scr__top">
+            <button class="btn btn--ghost" aria-label="뒤로">←</button>
+            <h1 style="font-size:16px">추천 리포트</h1>
+          </div>
+
+          <div class="scr__body" style="padding-bottom:0">
+            <!-- 결론: 항상 보임 -->
+            <div style="display:flex;align-items:center;gap:8px">
+              <span class="rep__rank">1</span>
+              <h2 style="margin:0;font-size:18px">○○아파트 84A</h2>
+              <span class="rep__score num">82<span style="font-size:13px;font-weight:400">점</span></span>
+            </div>
+
+            <p class="rep__price num" style="margin:12px 0 4px">
+              <span class="estimated" aria-hidden="true">~</span>
+              <span class="estimated">13.95억</span>
+              <span class="badge badge--estimated">추정</span>
+            </p>
+            <p class="disclaimer" style="margin:0 0 4px">
+              호가 <span class="num">14.8억</span> · 실거래 중위 <span class="num">14.0억</span>
+              <span class="badge">실거래 37건</span>
+            </p>
+            <p class="disclaimer" style="margin:0 0 12px">2026년 6월 30일 기준</p>
+
+            <p style="margin:0 0 12px;font-size:14px">
+              101동 9층 <span class="badge badge--estimated">동 추정</span>
+              <span class="conf-dots" aria-label="신뢰도 5단계 중 2단계">●●○○○</span>
+            </p>
+
+            <p class="rep__headline">
+              "예산 내에서 학군·역세권을 모두 만족하는 후보입니다."
+            </p>
+
+            <!-- 좋은 점: 기본 펼침 -->
+            <details class="sec" open>
+              <summary><span aria-hidden="true">✅</span> 좋은 점 <span class="badge badge--count">3</span></summary>
+              <div style="padding-bottom:12px">
+                <div class="ev">
+                  <p class="ev__claim">○○초 학구도 안, 정문까지 <span class="num">340m</span></p>
+                  <p class="ev__src">근거: 학교알리미 학구도 (2026-03-01 기준) · <span class="ev__by">지역 분석</span></p>
+                </div>
+                <div class="ev">
+                  <p class="ev__claim">동일 타입 중위 <span class="num">14.0억</span> 대비 호가 <span class="num">+5.7%</span> → 협상 여지</p>
+                  <p class="ev__src">근거: 국토부 실거래 37건 (2026-01~06) · <span class="ev__by">시세 분석</span> · 신뢰도 0.80</p>
+                </div>
+                <div class="ev">
+                  <p class="ev__claim">취득비용 포함 총 필요자금 <span class="num">8.42억</span> — 한도 <span class="num">8.5억</span> 이내</p>
+                  <p class="ev__src">근거: 취득세 1.1% (지방세법 §11, 2026-07-24 기준) · <span class="ev__by">세금·대출</span></p>
+                </div>
+              </div>
+            </details>
+
+            <!-- 확인할 점: 접힘 + 개수 배지 -->
+            <details class="sec">
+              <summary><span aria-hidden="true">⚠️</span> 확인할 점 <span class="badge badge--warn">3</span></summary>
+              <div style="padding-bottom:12px">
+                <div class="ev ev--risk">
+                  <p class="ev__claim">용적률 <span class="num">249%</span>로 재건축 사업성 낮음</p>
+                  <p class="ev__src">근거: 건축물대장 · <span class="ev__by">리스크 검증</span> · 심각도 중</p>
+                </div>
+                <div class="ev ev--risk">
+                  <p class="ev__claim">동(棟)별 가격 차이는 <b>추정</b>입니다 — 실거래 데이터에 동 정보가 없습니다</p>
+                  <p class="ev__src">근거: 국토부 공개 항목 한계 · <span class="ev__by">시세 분석</span></p>
+                </div>
+              </div>
+            </details>
+
+            <!-- 다음에 할 일 -->
+            <details class="sec">
+              <summary><span aria-hidden="true">📋</span> 다음에 할 일 <span class="badge badge--count">2</span></summary>
+              <div style="padding-bottom:12px">
+                <div class="ev">
+                  <p class="ev__claim">등기부등본으로 근저당 확인</p>
+                </div>
+              </div>
+            </details>
+
+            <details class="sec">
+              <summary><span aria-hidden="true">🧾</span> 이 판단의 조건 <span class="badge badge--count">보기</span></summary>
+              <div style="padding-bottom:12px" class="disclaimer">
+                예산 8.5억 · 0주택 · 실거주 목적 · 가중치(가격 30 / 입지 30 / 시세 25 / 리스크 15)<br>
+                분석 시각 2026-07-25 14:02
+              </div>
+            </details>
+
+            <p class="disclaimer" style="margin:16px 0;padding:12px;border:1px solid var(--border);border-radius:8px">
+              실거래는 신고까지 최대 30일 걸립니다. 최근 거래는 반영되지 않았을 수 있습니다.<br><br>
+              <b>투자 권유가 아니며 개인 판단을 돕는 참고 자료입니다.</b>
+            </p>
+          </div>
+
+          <div class="scr__foot">
+            <div style="display:flex;gap:8px">
+              <button class="btn btn--block">지도에서 보기</button>
+              <button class="btn btn--primary btn--block">단지 상세</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </figure>
+
+    <figure class="wf-frame">
+      <figcaption>데스크톱 1280×800 — 좌 결론 고정 / 우 근거 전문</figcaption>
+      <div class="wf-desk">
+        <div class="wf-desk__inner">
+          <div class="desk2">
+            <!-- 좌: 결론 (스크롤해도 고정) -->
+            <div class="desk2__side">
+              <div style="display:flex;align-items:center;gap:8px">
+                <span class="rep__rank">1</span>
+                <h2 style="margin:0;font-size:20px">○○아파트 84A</h2>
+                <span class="rep__score num">82점</span>
+              </div>
+              <p class="rep__price num" style="margin:16px 0 4px">
+                <span class="estimated">~13.95억</span> <span class="badge badge--estimated">추정</span>
+              </p>
+              <p class="disclaimer" style="margin:0 0 4px">
+                호가 14.8억 · 실거래 중위 14.0억 <span class="badge">실거래 37건</span>
+              </p>
+              <p class="disclaimer" style="margin:0 0 16px">2026년 6월 30일 기준</p>
+              <p style="margin:0 0 16px;font-size:14px">
+                101동 9층 <span class="badge badge--estimated">동 추정</span>
+                <span class="conf-dots">●●○○○</span>
+              </p>
+              <p class="rep__headline" style="margin-top:0">
+                "예산 내에서 학군·역세권을 모두 만족하는 후보입니다."
+              </p>
+              <div style="display:flex;gap:8px;margin-top:24px">
+                <button class="btn">지도에서 보기</button>
+                <button class="btn btn--primary">단지 상세</button>
+              </div>
+              <p class="disclaimer" style="margin-top:24px;padding-top:16px;border-top:1px solid var(--border)">
+                실거래는 신고까지 최대 30일 걸립니다.<br>
+                <b>투자 권유가 아닌 참고 자료입니다.</b>
+              </p>
+            </div>
+
+            <!-- 우: 근거 전문 (데스크톱은 자리가 있으니 리스크도 펼쳐 둔다) -->
+            <div class="desk2__main">
+              <details class="sec" open style="border-top:0">
+                <summary>✅ 좋은 점 <span class="badge badge--count">3</span></summary>
+                <div style="padding-bottom:16px">
+                  <div class="ev">
+                    <p class="ev__claim">○○초 학구도 안, 정문까지 340m</p>
+                    <p class="ev__src">근거: 학교알리미 학구도 (2026-03-01) · 지역 분석</p>
+                  </div>
+                  <div class="ev">
+                    <p class="ev__claim">동일 타입 중위 14.0억 대비 호가 +5.7% → 협상 여지</p>
+                    <p class="ev__src">근거: 국토부 실거래 37건 (2026-01~06) · 시세 분석 · 신뢰도 0.80</p>
+                  </div>
+                  <div class="ev">
+                    <p class="ev__claim">취득비용 포함 총 필요자금 8.42억 — 한도 8.5억 이내</p>
+                    <p class="ev__src">근거: 취득세 1.1% (지방세법 §11, 2026-07-24) · 세금·대출</p>
+                  </div>
+                </div>
+              </details>
+
+              <details class="sec" open>
+                <summary>⚠️ 확인할 점 <span class="badge badge--warn">3</span></summary>
+                <div style="padding-bottom:16px">
+                  <div class="ev ev--risk">
+                    <p class="ev__claim">용적률 249%로 재건축 사업성 낮음</p>
+                    <p class="ev__src">근거: 건축물대장 · 리스크 검증 · 심각도 중</p>
+                  </div>
+                  <div class="ev ev--risk">
+                    <p class="ev__claim">동별 가격 차이는 추정입니다 — 실거래에 동 정보가 없습니다</p>
+                    <p class="ev__src">근거: 국토부 공개 항목 한계 · 시세 분석</p>
+                  </div>
+                </div>
+              </details>
+
+              <details class="sec">
+                <summary>📋 다음에 할 일 <span class="badge badge--count">2</span></summary>
+              </details>
+              <details class="sec">
+                <summary>🧾 이 판단의 조건 <span class="badge badge--count">보기</span></summary>
+              </details>
+            </div>
+          </div>
+        </div>
+      </div>
+    </figure>
+  </div>
+
+  <div class="wf-note">
+    <strong>구현 요건 (re-fe) — 이 화면은 G2(근거 감사) 대상이다</strong>
+    <ul>
+      <li><b>접기는 네이티브 <code>&lt;details&gt;/&lt;summary&gt;</code>로 구현한다.</b>
+        키보드·스크린리더·브라우저 찾기(Ctrl+F)가 전부 공짜로 따라온다. 커스텀 아코디언은 셋 다 잃는다.</li>
+      <li><code>summary</code> 높이 <b>44px 이상</b>. 접기 화살표만 누르게 만들면 안 된다 — 줄 전체가 타깃이다.</li>
+      <li><b>"확인할 점"은 절대 조건부 렌더링으로 사라지지 않게</b> 한다. 0건이면 "확인할 점 없음"을 명시.
+        섹션이 사라지면 사용자는 리스크를 검토했는지 안 했는지 알 수 없다.</li>
+      <li>각 근거에 <b>어느 에이전트의 판단인지</b>(<code>findings[].agent_id</code>)와
+        <b>출처·기준일</b>(<code>evidence.source</code>, <code>as_of</code>)을 반드시 붙인다.
+        출처 없는 <code>evidence</code>가 오면 <b>그 항목을 렌더링하지 않는다</b>(CHARTER §5-2).</li>
+      <li>가격 표기 규칙은 <a href="../components.md">components.md</a> §3 <code>&lt;Price&gt;</code> 단일 컴포넌트로만.
+        화면마다 다르게 표기하면 추정치가 확정치로 새어 나간다.</li>
+      <li><b>순위 배지 ①은 "가장 좋은 매물"이 아니라 "입력한 조건에서의 1순위"다.</b>
+        조건 스냅샷(<code>criteria_snapshot</code>)을 항상 열람 가능하게 둔다 — 접힌 "이 판단의 조건" 섹션이 그것.</li>
+      <li>모바일은 리스크를 접고, <b>데스크톱은 펼친다</b>. 자리가 있는데 접는 건 숨기는 것에 가깝다.</li>
+      <li>⛔ 긴급성 문구·카운트다운·"오늘의 추천" 배너 금지(README §12).</li>
+    </ul>
+  </div>
+</section>
+
+</body>
+</html>

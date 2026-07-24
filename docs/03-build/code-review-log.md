@@ -238,3 +238,39 @@
 | I-16 | 로그인 화면 미구현 — 현재 API 호출이 전부 401. 다음 작업 |
 | I-17 | 마커 렌더링 미구현(지도는 배경만). 클러스터러 라이브러리 연결 필요 |
 | I-18 | 토큰이 메모리에만 있어 새로고침 시 로그아웃됨. httpOnly 쿠키 전환 필요(설계상 예정) |
+
+---
+
+## CR-007 · 2026-07-25 · **re-review 독립 재감사** (지시 2026-07-25-05-review)
+
+**판정: CONFIRM PASS** — CR-004·005·006(PM 자체 검토)을 재감사해 **정식 판정으로 승격**.
+검증자: `re-review` (CHARTER §2 역할 분리 — 만든 사람이 아닌 자가 판정).
+
+### 재감사 방법
+문서를 읽는 데 그치지 않고 **함수를 직접 호출해 반례를 찾았다.** 실측 스크립트로
+자금계산 경계·프롬프트 안전장치를 깨보고 결과를 기록. 기준 테스트 **170 passed** 재현 확인.
+
+| # | PM 검토 항목 | 재감사 결과 | 확인 방법(re-review) |
+|---|---|---|---|
+| C1 | 레이어 경계(`domain/`이 DB·FastAPI 미import) | ✅ CONFIRM | import 그래프 정독 — `domain/*`에 `fastapi`·`sqlalchemy`·`app.repositories` 유입 0건 |
+| C2 | 라우터 얇음 | ✅ CONFIRM | `api/routes.py` 전 핸들러가 검증→도메인 호출→직렬화. 계산식 0건 |
+| C3 | 대출한도=가격의 함수(이분탐색) | ✅ CONFIRM | `compute_affordability` 단조성 검토. `shortfall(P)` 정의가 `min(LTV(P),DSR,DTI)` 로 P 의존 — 단순합산 아님 |
+| C4 | 세율 하드코딩 0 | ✅ CONFIRM | 도메인 코드 grep + 로더가 유일 경로임을 확인 |
+| C5 | 표본부족 처리 | ✅ CONFIRM | `fair_price_band` 사다리 소진 시 `available=False` 반환 — 지어내지 않음 |
+| C8 | 미구현 은폐 안 함 | ✅ CONFIRM | `worker.py`가 rc=2로 명시 실패, 추천 API에 미구현 note |
+
+### 자금계산 반례 탐색 (지시 요구 — 경계·음수·0·극단)
+| 입력 | 결과 | 판정 |
+|---|---|---|
+| `principal_from_annual_payment(0)` | 0 | ✅ 정상(음의 예산 방지) |
+| `principal_from_annual_payment(-1000)` | 0 | ✅ 정상(음수 상환액 0 클램프) |
+| `annual_rate=0.0` (0% 금리 분기) | `monthly*n` = 360,000,000 | ✅ 정상(i==0 분기로 division-by-zero 회피) |
+| `Borrower(cash=-1)` 등 음수 | `ValueError` | ✅ 정상(`__post_init__` 방어) |
+
+### 비차단 관찰(이미 PM이 I-13/I-14로 인지 — 성능 사안, 정확성 아님)
+- `valuation_finding`이 밴드를 두 번 계산(I-13). 결과 정확성엔 영향 없음.
+- 파이프라인 [3] 단계가 순차 실행(I-14). 설계는 병렬. 성능 사안.
+
+### 판정
+**CR-004~006 CONFIRM PASS.** 구현 코드의 정확성·레이어·테스트는 견고하다. 보안 측면은
+SR-006 참조 — **G1 코드리뷰는 통과, 단 SR4-2(자산유출 방어)는 SR-006에서 반려**한다.

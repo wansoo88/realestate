@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -21,20 +22,30 @@ SENSITIVE_PATHS = ("/api/v1/me/profile", "/api/v1/affordability", "/api/v1/auth"
 def create_app(*, repo=None) -> FastAPI:
     settings = get_settings()
 
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        # 리포지토리는 **기동 시점**에 만든다. import 시점에 DB 에 붙으면
+        # 테스트·도구가 모듈을 읽기만 해도 연결을 시도하게 된다.
+        # 테스트가 넣어준 구현이 이미 있으면 건드리지 않는다.
+        if app.state.repo is None:  # pragma: no cover - 운영 경로
+            from app.repositories.factory import build_repository
+            app.state.repo = build_repository(settings)
+        try:
+            yield
+        finally:  # pragma: no cover - 운영 경로
+            close = getattr(app.state.repo, "close", None)
+            if callable(close):
+                close()
+
     app = FastAPI(
         title="부동산 AI 자문 시스템",
         version="0.1.0",
         docs_url="/api/docs" if settings.debug else None,   # 운영에서는 스키마 비공개
         redoc_url=None,
         openapi_url="/api/openapi.json" if settings.debug else None,
+        lifespan=lifespan,
     )
 
-    if repo is None:  # pragma: no cover - 운영 경로
-        from app.repositories.memory import InMemoryRepository
-        repo = InMemoryRepository()
-        logger.warning(
-            "인메모리 리포지토리로 기동합니다. PostGIS 구현 연결 전까지 데이터가 보존되지 않습니다."
-        )
     app.state.repo = repo
 
     app.include_router(router)

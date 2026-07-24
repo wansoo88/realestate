@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>와이어프레임 목록 — 부동산 AI 자문</title>
+<link rel="stylesheet" href="wireframe.css">
+</head>
+<body>
+
+<header class="wf-head">
+  <h1>와이어프레임 — 미구현 화면</h1>
+  <p>지시서 <code>team/orders/2026-07-25-07-ux.md</code> 산출물 · 작성 2026-07-25 · re-ux</p>
+  <p>브라우저에서 그냥 열면 됩니다(<code>file://</code> 가능). 외부 CDN·유료 툴 의존 없음.
+     라이트/다크는 <b>OS 설정을 따릅니다</b> — 다크로 바꿔서도 한 번 확인하세요.</p>
+</header>
+
+<section class="wf-section">
+  <h2>화면 목록</h2>
+  <div class="wf-row">
+    <div style="flex:1 1 300px;border:1px solid var(--border);border-radius:12px;padding:16px;background:var(--bg)">
+      <h3 style="margin:0 0 8px"><a href="login.html">1. 로그인 / 계정 만들기</a></h3>
+      <p class="disclaimer" style="margin:0">공개 엔드포인트가 없어 첫 화면이 곧 첫인상.
+        "내 소득을 넣어도 되는 서비스인가"가 여기서 정해진다.</p>
+    </div>
+    <div style="flex:1 1 300px;border:1px solid var(--border);border-radius:12px;padding:16px;background:var(--bg)">
+      <h3 style="margin:0 0 8px"><a href="onboarding.html">2. 점진적 조건 입력 3단계</a></h3>
+      <p class="disclaimer" style="margin:0">온보딩(지역·예산) → 첫 추천 직전(소득·대출·주택수) → 사용 중(기피·가중치).
+        <b>어느 단계에서 멈춰도 동작한다.</b></p>
+    </div>
+    <div style="flex:1 1 300px;border:1px solid var(--border);border-radius:12px;padding:16px;background:var(--bg)">
+      <h3 style="margin:0 0 8px"><a href="report-detail.html">3. 근거 리포트 상세</a></h3>
+      <p class="disclaimer" style="margin:0">분석 대기(SSE 순차 노출) + 리포트.
+        결론은 항상 보이고, 근거는 접히되 <b>존재는 숨기지 않는다.</b></p>
+    </div>
+  </div>
+</section>
+
+<section class="wf-section">
+  <h2>함께 보는 문서</h2>
+  <ul>
+    <li><a href="../README.md">ux/README.md</a> — UX 설계 원칙(3단 바텀시트·마커 드릴다운·불확실성 표기)</li>
+    <li><a href="../components.md">ux/components.md</a> — 컴포넌트 명세 (re-fe 구현 입력)</li>
+    <li><a href="../audit-frontend.md">ux/audit-frontend.md</a> — 기존 프론트 3종 UX 감사 결과</li>
+  </ul>
+</section>
+
+<section class="wf-section">
+  <h2>이 목업에 적용된 수정안</h2>
+  <p class="wf-why">목업의 토큰 값은 <code>frontend/src/styles/tokens.css</code> 와 다르다.
+     <b>감사에서 지적한 대비 미달 값이 고쳐진 상태</b>이기 때문이다 — 목업이 곧 목표 상태다.</p>
+  <div class="wf-note">
+    <ul>
+      <li><code>--text-estimated</code> 라이트 <code>#98a2b3</code> → <code>#667085</code> (2.58:1 → 4.97:1)</li>
+      <li><code>--warn-text: #b54708</code> 신설 — 배지 텍스트용 (2.25:1 → 5.19:1)</li>
+      <li><code>--fs-caption</code> 13px → 14px</li>
+    </ul>
+    자세한 근거는 <a href="../audit-frontend.md">audit-frontend.md</a> F-01 · F-02 · F-07.
+  </div>
+</section>
+
+</body>
+</html>

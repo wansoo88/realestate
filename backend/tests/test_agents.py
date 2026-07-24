@@ -17,6 +17,7 @@ from app.agents.base import (
     Risk,
     assert_no_secrets,
     data_block,
+    extract_amounts,
     insufficient,
     scan_injection,
     validate_finding,
@@ -194,7 +195,7 @@ def test_시세에이전트는_신고지연을_항상_경고한다():
 
 def test_입지데이터가_없으면_지어내지_않는다():
     from app.agents.orchestrator import location_finding
-    f = location_finding(_candidate(), None, TODAY)
+    f = location_finding(_candidate(), TODAY)   # candidate.location 이 None
     assert f.verdict == "판단 보류"
     assert "미수집" in f.missing[0]
 
@@ -209,7 +210,8 @@ def test_LLM이_단점을_빼먹으면_우리가_채운다():
                         risks=[Risk("medium", "신고 지연 위험")])]
     llm = FakeLLM([{"headline": "좋은 매물", "why": ["싸다"], "why_not": []}])
 
-    out = portfolio_summary(findings, llm, [])
+    # llm != None 경로는 tripwire 무장이 필수(fail-loud) — 검사값을 넘긴다.
+    out = portfolio_summary(findings, llm, [300_000_000])
     assert out["why_not"], "단점이 빈 리포트를 내보내면 안 된다"
     assert "신고 지연 위험" in out["why_not"]
 
@@ -218,7 +220,7 @@ def test_LLM이_실패해도_규칙기반으로_대체한다():
     findings = [Finding(agent_id="x", verdict="v", rationale="근거 문장",
                         evidence=[Evidence(claim="c", source="s")],
                         risks=[Risk("low", "리스크")])]
-    out = portfolio_summary(findings, FakeLLM([]), [])   # 응답 없음 → LLMError
+    out = portfolio_summary(findings, FakeLLM([]), [300_000_000])   # 응답 없음 → LLMError
 
     assert out["generated_by"] == "fallback"
     assert "근거 문장" in out["why"]
@@ -228,7 +230,7 @@ def test_LLM이_스키마를_벗어나면_폐기한다():
     findings = [Finding(agent_id="x", verdict="v", rationale="r",
                         evidence=[Evidence(claim="c", source="s")])]
     llm = FakeLLM([{"nonsense": True}])
-    assert portfolio_summary(findings, llm, [])["generated_by"] == "fallback"
+    assert portfolio_summary(findings, llm, [300_000_000])["generated_by"] == "fallback"
 
 
 def test_LLM_없이도_동작한다():
@@ -299,3 +301,109 @@ def test_JSON이_없으면_예외():
 def test_배열이_최상위면_거부():
     with pytest.raises(LLMError):
         parse_json_object("[1,2,3]")
+
+
+# ---------------------------------------------------------------------------
+# SR4-2 재감사 대응 (ORDER 2026-07-25-08-domain)
+# re-review 가 깬 5가지 우회 + 오차단 회귀 + fail-loud + G2 basis 접두매칭
+# ---------------------------------------------------------------------------
+
+def test_A1_억단위_표기를_잡는다():
+    """'3억' 처럼 단위로 적어도 300,000,000 으로 정규화해 차단한다."""
+    with pytest.raises(PromptSafetyError):
+        assert_no_secrets("자기자본은 3억입니다", [300_000_000])
+
+
+def test_A2_만원단위_표기를_잡는다():
+    """'30000만원' → 300,000,000."""
+    with pytest.raises(PromptSafetyError):
+        assert_no_secrets("보유 현금 30000만원", [300_000_000])
+
+
+def test_A3_한글수사를_잡는다():
+    """'삼억' 같은 한글 수사도 값으로 정규화해 차단한다."""
+    with pytest.raises(PromptSafetyError):
+        assert_no_secrets("보유 현금은 삼억원", [300_000_000])
+
+
+def test_합성표기_3억5000만도_잡는다():
+    with pytest.raises(PromptSafetyError):
+        assert_no_secrets("자기자본 3억5000만원", [350_000_000])
+
+
+def test_A7_정상시세_13억은_오차단하지_않는다():
+    """13억(1,300,000,000)이 자산 3억(300,000,000)으로 substring 오차단되면 안 된다."""
+    assert_no_secrets("실거래 중위 13억(1,300,000,000원)", [300_000_000])   # 예외 없음
+    assert_no_secrets("호가 1,300,000,000원", [300_000_000])                # 예외 없음
+
+
+def test_extract_amounts_값비교_정규화():
+    got = extract_amounts("현금 3억, 시세 1,300,000,000원, 30000만원")
+    assert 300_000_000 in got          # 3억 = 30000만원
+    assert 1_300_000_000 in got        # 13억 — 별개 값으로 분리
+    # substring 방식이었다면 13억 안에 3억이 '섞여' 있었겠지만, 값 비교라 분리된다.
+
+
+def test_A5_빈_forbidden_은_fail_loud():
+    """llm != None 인데 검사값이 비면 조용히 통과가 아니라 예외."""
+    findings = [Finding(agent_id="x", verdict="v", rationale="r",
+                        evidence=[Evidence(claim="c", source="s")])]
+    llm = FakeLLM([{"headline": "h", "why": ["w"], "why_not": ["n"]}])
+    with pytest.raises(PromptSafetyError):
+        portfolio_summary(findings, llm, [])
+    with pytest.raises(PromptSafetyError):
+        portfolio_summary(findings, llm, [500])       # 임계값 미만만 있으면 무장 안 된 것
+    assert not llm.calls, "무장 실패인데 LLM 이 호출됐다"
+
+
+def test_A4_finding에_원본자산이_섞이면_LLM도달_전_차단():
+    """미래 개발자가 UX 목적으로 finding 에 원본 자산을 넣어도 LLM 전에 잡힌다."""
+    leaky = Finding(agent_id="finance-tax-advisor", verdict="v",
+                    rationale="자기자본 3억을 넣으면 유리합니다",   # 원본 자산 유입
+                    evidence=[Evidence(claim="c", source="s")])
+    llm = FakeLLM([{"headline": "h", "why": ["w"], "why_not": ["n"]}])
+    with pytest.raises(PromptSafetyError):
+        portfolio_summary([leaky], llm, [300_000_000])
+    assert not llm.calls, "원본 자산이 섞였는데 LLM 에 도달했다"
+
+
+def test_파이프라인은_forbidden을_affordability에서_보강한다():
+    """호출자가 forbidden 을 안 넘겨도(A5) usable_cash 파생으로 tripwire 가 무장된다."""
+    from app.domain.rules.loader import load_rules
+    from pathlib import Path
+    from app.agents.orchestrator import _derive_forbidden
+    rules = load_rules(Path(__file__).parent / "fixtures" / "tax_rules_test.yaml")
+    afford = compute_affordability(
+        Borrower(cash_krw=300_000_000, annual_income_krw=200_000_000), rules,
+        prop=PropertyFacts(area_m2=84.0))
+    ctx = AnalysisContext(affordability=afford, candidates=[], forbidden_amounts=[])
+    derived = _derive_forbidden(ctx)
+    assert derived, "affordability 파생으로 검사값이 보강돼야 한다"
+    assert afford.usable_cash_krw in derived
+
+    # 실제 파이프라인: forbidden 을 안 넘겨도 fail-loud 로 죽지 않는다(파생 무장).
+    cand = _candidate(ask_oku=8.0, trades=_trades(price_oku=8.0))
+    llm = FakeLLM([{"headline": "h", "why": ["w"], "why_not": ["n"]}])
+    out = run_mvp_pipeline(
+        AnalysisContext(affordability=afford, candidates=[cand], as_of=TODAY), llm=llm)
+    assert out["items"], "파생 무장 실패로 후보가 사라졌다"
+
+
+# ---------------------------------------------------------------------------
+# G2 경미 hardening — basis 접두 매칭
+# ---------------------------------------------------------------------------
+
+def test_추정라벨_변형도_신뢰도가_캡된다():
+    """'estimated_from_location' 정확일치가 아니라 'estimated…' 접두면 전부 캡."""
+    f = Finding(agent_id="x", verdict="v", rationale="r",
+                evidence=[Evidence(claim="c", source="s")],
+                confidence=0.95, basis="estimated_by_coords")
+    assert validate_finding(f).confidence == 0.6
+
+
+def test_추정이_아닌_basis는_캡되지_않는다():
+    """호가 표기 동(listing_reported) 등 추정 아님은 신뢰도를 낮추지 않는다."""
+    f = Finding(agent_id="x", verdict="v", rationale="r",
+                evidence=[Evidence(claim="c", source="s")],
+                confidence=0.9, basis="listing_reported")
+    assert validate_finding(f).confidence == 0.9

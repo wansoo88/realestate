@@ -1,130 +1,308 @@
-# tax_rules.yaml — 세율·대출한도 설정
+# tax_rules.yaml — 세율·대출한도 설정 (검증본)
 #
-# ⚠️ 이 파일은 **템플릿이며 아직 사용할 수 없습니다.**
-#    `status: unverified` 이므로 로더가 프로덕션에서 거부합니다.
+# ✅ status: verified — 아래 값은 공식 출처에서 확인해 채웠습니다(2026-07-25 확인).
+#    re-data 가 지방세법·공인중개사법 시행규칙·금융위 자료로 대조했습니다.
 #
-# 왜 값이 비어 있나
-# -----------------
-# 부동산 세제·대출 규제는 자주 바뀝니다. 여기에 제가 기억하는 숫자를 적어 넣으면
-# 그 숫자가 근거처럼 굳어버리고, 틀렸을 때 사용자 예산이 수천만 원 어긋납니다.
-# 그래서 **공식 출처에서 확인한 값만** 채우도록 비워 두었습니다.
+# ⚠️ 세제·대출 규제는 자주 바뀝니다. 이 파일의 as_of(확인일)가 오래되면 로더가
+#    갱신 경고를 냅니다(STALE_AFTER_DAYS=180). 재확인 후 as_of 를 갱신하세요.
 #
-# 채우는 방법
-# -----------
-# 1. 아래 각 항목의 `rate_pct` 를 공식 출처에서 확인해 입력
-# 2. `source` / `source_url` / `as_of` 를 실제 근거로 채움
-# 3. 위택스·국세청 계산기와 대조 (backend/tests/test_affordability.py 참고)
-# 4. 검증이 끝나면 `status: verified` 로 변경
+# 퍼센트 규약 (engine/loader 와 동일)
+# -----------------------------------
+# 모든 rate_pct 와 extras.*_pct 는 **거래금액 대비 %** 입니다.
+#   취득세 본세 rate_pct + 지방교육세 local_education_pct + 농특세 rural_special_pct
+#   = 실효 취득 세율. (예: 1.0 + 0.1 + 0.0 = 1.1%)
 #
-# 퍼센트 규약
-# -----------
-# 모든 `rate_pct` 와 `extras.*_pct` 는 **거래금액 대비 퍼센트**입니다.
-# (취득세 본세 1.0% + 지방교육세 0.1% → 합계 1.1%)
-# 이 규약을 어기면 계산이 조용히 틀어집니다.
+# ─────────────────────────────────────────────────────────────────────────
+# ⚑ 알려진 한계 (re-review·re-pm 검토 필요 — 로더 스키마 확장 후 해소)
+# ─────────────────────────────────────────────────────────────────────────
+# L1. 6~9억 취득세는 **누진 산식**(세율% = 취득가액(억)×2/3 − 3)이라 연속 함수다.
+#     현재 로더는 구간별 고정요율만 지원하므로 0.5억 서브밴드(중간값 기준)로 근사했다.
+#     → 밴드 내 최대 오차 ±0.2%p(예: 7억에서 약 ±0.14백만원). UI 면책고지로 완화됨.
+#     → 정확 계산하려면 re-arch 가 로더에 '누진 산식 밴드' 타입을 추가해야 한다(에스컬레이션).
+# L2. 대출규제(LTV/DSR/DTI)는 지역·주택수·목적·생애최초 여부로 크게 갈리고,
+#     6.27 대책(2025)의 **수도권 주담대 6억원 절대한도**와 **스트레스 DSR 가산금리**가 있다.
+#     현재 로더는 단일 ltv/dsr/dti 요율만 받으므로 아래 값은 '무주택·실거주·비규제' 기준
+#     대표값이다. 규제지역·다주택·6억캡·스트레스DSR은 미반영 → re-arch 스키마 확장 필요.
+# L3. 조정 일시적 2주택 특례, 지방 저가주택(공시 2억↓) 중과배제, 생애최초 취득세 감면 등
+#     감면·특례는 미반영. 보수적으로 표준세율을 적용(세금을 낮게 잡지 않음).
+# ─────────────────────────────────────────────────────────────────────────
 
-version: "template-2026-07-24"
-status: unverified          # verified 로 바꾸기 전까지 프로덕션에서 로딩 거부
+version: "2026-07-25"
+status: verified
 
-# --------------------------------------------------------------------------
-# 취득세 (거래금액 대비 %)
-# 위에서부터 먼저 매칭되는 구간이 적용됩니다. 순서가 중요합니다.
-#   when 접미사:  _max = 이하,  _min = 이상,  그 외 = 완전일치
-# --------------------------------------------------------------------------
+# ==========================================================================
+# 취득세 (지방세법 §11 주택 유상거래 / §13의2 다주택 중과)
+#   지방교육세 = 취득세율 × 1/10   (지방세법 §151)
+#   농어촌특별세 = 전용 85㎡ 초과분만 0.2%, 85㎡ 이하(국민주택규모) 비과세 (농특세법)
+#   위에서부터 먼저 매칭되는 구간 적용 — 순서 중요.
+#   when 접미사: _max=이하, _min=이상, 그 외=완전일치. 없는 사실은 매칭 실패(추정 안 함).
+#   facts: houses_owned(취득 후 주택수) · price(원) · area(전용 ㎡) · regulated(조정대상지역 bool)
+# ==========================================================================
 acquisition_tax:
-  - id: first_home_under_600m_small
-    when: { houses_owned_max: 1, price_max: 600000000, area_max: 85 }
-    rate_pct: null            # TODO 지방세법에서 확인
-    extras:
-      local_education_pct: null
-      rural_special_pct: 0.0  # 85㎡ 이하 농특세 비과세
-    source: "지방세법 제11조"
-    source_url: ""            # TODO
-    as_of: null               # TODO YYYY-MM-DD
 
-  - id: first_home_under_600m_large
-    when: { houses_owned_max: 1, price_max: 600000000 }
-    rate_pct: null
-    extras: { local_education_pct: null, rural_special_pct: null }
-    source: "지방세법 제11조"
-    source_url: ""
-    as_of: null
+  # ── 조정대상지역 다주택 중과 (§13의2) ────────────────────────────────
+  - id: adj_3plus_small          # 조정 3주택 이상 · 85㎡ 이하
+    when: { regulated: true, houses_owned_min: 3, area_max: 85 }
+    rate_pct: 12.0
+    extras: { local_education_pct: 0.4, rural_special_pct: 0.0 }
+    source: "지방세법 §13의2 (다주택 중과 12%) · 조정대상지역 3주택↑, 2020.8.12 시행체계"
+    source_url: "https://www.law.go.kr/법령/지방세법/제13조의2"
+    as_of: "2026-07-25"
+  - id: adj_3plus_large          # 조정 3주택 이상 · 85㎡ 초과 (농특세 1.0%)
+    when: { regulated: true, houses_owned_min: 3 }
+    rate_pct: 12.0
+    extras: { local_education_pct: 0.4, rural_special_pct: 1.0 }
+    source: "지방세법 §13의2 + 농특세법 (85㎡ 초과 농특세 1.0%)"
+    source_url: "https://www.law.go.kr/법령/지방세법/제13조의2"
+    as_of: "2026-07-25"
+  - id: adj_2_small              # 조정 2주택 · 85㎡ 이하
+    when: { regulated: true, houses_owned_min: 2, area_max: 85 }
+    rate_pct: 8.0
+    extras: { local_education_pct: 0.4, rural_special_pct: 0.0 }
+    source: "지방세법 §13의2 (조정대상지역 2주택 8%)"
+    source_url: "https://www.law.go.kr/법령/지방세법/제13조의2"
+    as_of: "2026-07-25"
+  - id: adj_2_large              # 조정 2주택 · 85㎡ 초과 (농특세 0.6%)
+    when: { regulated: true, houses_owned_min: 2 }
+    rate_pct: 8.0
+    extras: { local_education_pct: 0.4, rural_special_pct: 0.6 }
+    source: "지방세법 §13의2 + 농특세법 (85㎡ 초과 농특세 0.6%)"
+    source_url: "https://www.law.go.kr/법령/지방세법/제13조의2"
+    as_of: "2026-07-25"
 
-  - id: first_home_600m_to_900m
-    when: { houses_owned_max: 1, price_max: 900000000 }
-    rate_pct: null            # 6~9억 구간은 누진 산식이 별도 — 확인 필요
-    extras: { local_education_pct: null, rural_special_pct: null }
-    source: "지방세법 제11조"
-    source_url: ""
-    as_of: null
+  # ── 비조정지역 다주택 중과 (§13의2) ──────────────────────────────────
+  - id: nonadj_4plus_small       # 비조정 4주택 이상 · 85㎡ 이하
+    when: { houses_owned_min: 4, area_max: 85 }
+    rate_pct: 12.0
+    extras: { local_education_pct: 0.4, rural_special_pct: 0.0 }
+    source: "지방세법 §13의2 (비조정 4주택↑ 12%)"
+    source_url: "https://www.law.go.kr/법령/지방세법/제13조의2"
+    as_of: "2026-07-25"
+  - id: nonadj_4plus_large       # 비조정 4주택 이상 · 85㎡ 초과
+    when: { houses_owned_min: 4 }
+    rate_pct: 12.0
+    extras: { local_education_pct: 0.4, rural_special_pct: 1.0 }
+    source: "지방세법 §13의2 + 농특세법"
+    source_url: "https://www.law.go.kr/법령/지방세법/제13조의2"
+    as_of: "2026-07-25"
+  - id: nonadj_3_small           # 비조정 3주택 · 85㎡ 이하
+    when: { houses_owned_min: 3, area_max: 85 }
+    rate_pct: 8.0
+    extras: { local_education_pct: 0.4, rural_special_pct: 0.0 }
+    source: "지방세법 §13의2 (비조정 3주택 8%)"
+    source_url: "https://www.law.go.kr/법령/지방세법/제13조의2"
+    as_of: "2026-07-25"
+  - id: nonadj_3_large           # 비조정 3주택 · 85㎡ 초과
+    when: { houses_owned_min: 3 }
+    rate_pct: 8.0
+    extras: { local_education_pct: 0.4, rural_special_pct: 0.6 }
+    source: "지방세법 §13의2 + 농특세법"
+    source_url: "https://www.law.go.kr/법령/지방세법/제13조의2"
+    as_of: "2026-07-25"
 
-  - id: first_home_over_900m
-    when: { houses_owned_max: 1 }
-    rate_pct: null
-    extras: { local_education_pct: null, rural_special_pct: null }
-    source: "지방세법 제11조"
-    source_url: ""
-    as_of: null
+  # ── 일반세율: 무주택→1주택 취득, 또는 비조정 2주택 (§11) ──────────────
+  #    houses_owned_max: 2 로 1주택·비조정2주택을 함께 처리. 조정 2주택은 위에서 이미 매칭됨.
+  #    [85㎡ 이하 그룹 — 농특세 비과세]
+  - id: std_le6_small            # 6억 이하 · 85㎡ 이하 → 1.1%
+    when: { houses_owned_max: 2, price_max: 600000000, area_max: 85 }
+    rate_pct: 1.0
+    extras: { local_education_pct: 0.1, rural_special_pct: 0.0 }
+    source: "지방세법 §11①8 (6억 이하 1%) + §151 지방교육세 0.1%"
+    source_url: "https://www.law.go.kr/법령/지방세법/제11조"
+    as_of: "2026-07-25"
+  # 6~9억 누진 근사 (L1 참조): 세율%=가액(억)×2/3−3, 0.5억밴드 중간값. 지교=본세×0.1.
+  - id: std_6_0_6_5_small        # 6.0~6.5억 · 85㎡ 이하 (mid 6.25 → 1.17%)
+    when: { houses_owned_max: 2, price_max: 650000000, area_max: 85 }
+    rate_pct: 1.17
+    extras: { local_education_pct: 0.12, rural_special_pct: 0.0 }
+    source: "지방세법 §11①8 6~9억 누진산식(가액×2/3−3) 근사 · 6.0~6.5억 중간값"
+    source_url: "https://www.law.go.kr/법령/지방세법/제11조"
+    as_of: "2026-07-25"
+  - id: std_6_5_7_0_small        # 6.5~7.0억 · 85㎡ 이하 (mid 6.75 → 1.50%)
+    when: { houses_owned_max: 2, price_max: 700000000, area_max: 85 }
+    rate_pct: 1.50
+    extras: { local_education_pct: 0.15, rural_special_pct: 0.0 }
+    source: "지방세법 §11①8 6~9억 누진산식 근사 · 6.5~7.0억 중간값"
+    source_url: "https://www.law.go.kr/법령/지방세법/제11조"
+    as_of: "2026-07-25"
+  - id: std_7_0_7_5_small        # 7.0~7.5억 · 85㎡ 이하 (mid 7.25 → 1.83%)
+    when: { houses_owned_max: 2, price_max: 750000000, area_max: 85 }
+    rate_pct: 1.83
+    extras: { local_education_pct: 0.18, rural_special_pct: 0.0 }
+    source: "지방세법 §11①8 6~9억 누진산식 근사 · 7.0~7.5억 중간값"
+    source_url: "https://www.law.go.kr/법령/지방세법/제11조"
+    as_of: "2026-07-25"
+  - id: std_7_5_8_0_small        # 7.5~8.0억 · 85㎡ 이하 (mid 7.75 → 2.17%)
+    when: { houses_owned_max: 2, price_max: 800000000, area_max: 85 }
+    rate_pct: 2.17
+    extras: { local_education_pct: 0.22, rural_special_pct: 0.0 }
+    source: "지방세법 §11①8 6~9억 누진산식 근사 · 7.5~8.0억 중간값"
+    source_url: "https://www.law.go.kr/법령/지방세법/제11조"
+    as_of: "2026-07-25"
+  - id: std_8_0_8_5_small        # 8.0~8.5억 · 85㎡ 이하 (mid 8.25 → 2.50%)
+    when: { houses_owned_max: 2, price_max: 850000000, area_max: 85 }
+    rate_pct: 2.50
+    extras: { local_education_pct: 0.25, rural_special_pct: 0.0 }
+    source: "지방세법 §11①8 6~9억 누진산식 근사 · 8.0~8.5억 중간값"
+    source_url: "https://www.law.go.kr/법령/지방세법/제11조"
+    as_of: "2026-07-25"
+  - id: std_8_5_9_0_small        # 8.5~9.0억 · 85㎡ 이하 (mid 8.75 → 2.83%)
+    when: { houses_owned_max: 2, price_max: 900000000, area_max: 85 }
+    rate_pct: 2.83
+    extras: { local_education_pct: 0.28, rural_special_pct: 0.0 }
+    source: "지방세법 §11①8 6~9억 누진산식 근사 · 8.5~9.0억 중간값"
+    source_url: "https://www.law.go.kr/법령/지방세법/제11조"
+    as_of: "2026-07-25"
+  - id: std_over9_small          # 9억 초과 · 85㎡ 이하 → 3.3%
+    when: { houses_owned_max: 2, area_max: 85 }
+    rate_pct: 3.0
+    extras: { local_education_pct: 0.3, rural_special_pct: 0.0 }
+    source: "지방세법 §11①8 (9억 초과 3%) + §151 지방교육세 0.3%"
+    source_url: "https://www.law.go.kr/법령/지방세법/제11조"
+    as_of: "2026-07-25"
 
-  - id: multi_home
-    when: {}                  # 그 외 전부 (다주택)
-    rate_pct: null            # 조정대상지역 여부에 따라 크게 달라짐 — 확인 필요
-    extras: { local_education_pct: null, rural_special_pct: null }
-    source: "지방세법 제13조의2"
-    source_url: ""
-    as_of: null
+  #    [85㎡ 초과 그룹 — 농특세 0.2% 가산]
+  - id: std_le6_large            # 6억 이하 · 85㎡ 초과 → 1.3%
+    when: { houses_owned_max: 2, price_max: 600000000 }
+    rate_pct: 1.0
+    extras: { local_education_pct: 0.1, rural_special_pct: 0.2 }
+    source: "지방세법 §11①8 (6억↓ 1%) + 지교 0.1% + 농특 0.2%(85㎡초과)"
+    source_url: "https://www.law.go.kr/법령/지방세법/제11조"
+    as_of: "2026-07-25"
+  - id: std_6_0_6_5_large        # 6.0~6.5억 · 85㎡ 초과
+    when: { houses_owned_max: 2, price_max: 650000000 }
+    rate_pct: 1.17
+    extras: { local_education_pct: 0.12, rural_special_pct: 0.2 }
+    source: "지방세법 §11①8 6~9억 누진산식 근사 · 6.0~6.5억 + 농특 0.2%"
+    source_url: "https://www.law.go.kr/법령/지방세법/제11조"
+    as_of: "2026-07-25"
+  - id: std_6_5_7_0_large        # 6.5~7.0억 · 85㎡ 초과
+    when: { houses_owned_max: 2, price_max: 700000000 }
+    rate_pct: 1.50
+    extras: { local_education_pct: 0.15, rural_special_pct: 0.2 }
+    source: "지방세법 §11①8 6~9억 누진산식 근사 · 6.5~7.0억 + 농특 0.2%"
+    source_url: "https://www.law.go.kr/법령/지방세법/제11조"
+    as_of: "2026-07-25"
+  - id: std_7_0_7_5_large        # 7.0~7.5억 · 85㎡ 초과
+    when: { houses_owned_max: 2, price_max: 750000000 }
+    rate_pct: 1.83
+    extras: { local_education_pct: 0.18, rural_special_pct: 0.2 }
+    source: "지방세법 §11①8 6~9억 누진산식 근사 · 7.0~7.5억 + 농특 0.2%"
+    source_url: "https://www.law.go.kr/법령/지방세법/제11조"
+    as_of: "2026-07-25"
+  - id: std_7_5_8_0_large        # 7.5~8.0억 · 85㎡ 초과
+    when: { houses_owned_max: 2, price_max: 800000000 }
+    rate_pct: 2.17
+    extras: { local_education_pct: 0.22, rural_special_pct: 0.2 }
+    source: "지방세법 §11①8 6~9억 누진산식 근사 · 7.5~8.0억 + 농특 0.2%"
+    source_url: "https://www.law.go.kr/법령/지방세법/제11조"
+    as_of: "2026-07-25"
+  - id: std_8_0_8_5_large        # 8.0~8.5억 · 85㎡ 초과
+    when: { houses_owned_max: 2, price_max: 850000000 }
+    rate_pct: 2.50
+    extras: { local_education_pct: 0.25, rural_special_pct: 0.2 }
+    source: "지방세법 §11①8 6~9억 누진산식 근사 · 8.0~8.5억 + 농특 0.2%"
+    source_url: "https://www.law.go.kr/법령/지방세법/제11조"
+    as_of: "2026-07-25"
+  - id: std_8_5_9_0_large        # 8.5~9.0억 · 85㎡ 초과
+    when: { houses_owned_max: 2, price_max: 900000000 }
+    rate_pct: 2.83
+    extras: { local_education_pct: 0.28, rural_special_pct: 0.2 }
+    source: "지방세법 §11①8 6~9억 누진산식 근사 · 8.5~9.0억 + 농특 0.2%"
+    source_url: "https://www.law.go.kr/법령/지방세법/제11조"
+    as_of: "2026-07-25"
+  - id: std_over9_large          # 9억 초과 · 85㎡ 초과 → 3.5%
+    when: { houses_owned_max: 2 }
+    rate_pct: 3.0
+    extras: { local_education_pct: 0.3, rural_special_pct: 0.2 }
+    source: "지방세법 §11①8 (9억↑ 3%) + 지교 0.3% + 농특 0.2%(85㎡초과)"
+    source_url: "https://www.law.go.kr/법령/지방세법/제11조"
+    as_of: "2026-07-25"
 
-# --------------------------------------------------------------------------
-# 중개보수 (거래금액 대비 % · 상한요율). cap_krw 로 한도액 지정 가능.
-# --------------------------------------------------------------------------
-brokerage_fee:
-  - id: under_200m
-    when: { price_max: 200000000 }
-    rate_pct: null
-    extras: { cap_krw: null }
-    source: "공인중개사법 시행규칙 별표"
-    source_url: ""
-    as_of: null
-
-  - id: under_900m
-    when: { price_max: 900000000 }
-    rate_pct: null
-    source: "공인중개사법 시행규칙 별표"
-    source_url: ""
-    as_of: null
-
-  - id: over_900m
+  # ── 최종 안전망: 위 어느 구간도 안 맞으면(예: 취득후 주택수 미상) 보수적 중과 ──
+  #    로더는 매칭 실패 시 예외를 던지지만, 다주택 상한(12.4%)을 명시적 fallback 로 둬
+  #    '세금을 낮게 잡는' 실수를 원천 차단한다(높게 잡히면 예산이 보수적으로 나옴).
+  - id: fallback_conservative
     when: {}
-    rate_pct: null
-    source: "공인중개사법 시행규칙 별표"
-    source_url: ""
-    as_of: null
+    rate_pct: 12.0
+    extras: { local_education_pct: 0.4, rural_special_pct: 0.0 }
+    source: "안전망: 구간 미상 시 다주택 상한(12.4%) 적용 — 실제 세율은 더 낮을 수 있음, 재확인 필요"
+    source_url: "https://www.law.go.kr/법령/지방세법/제13조의2"
+    as_of: "2026-07-25"
 
-# --------------------------------------------------------------------------
-# 대출 규제
-# --------------------------------------------------------------------------
+# ==========================================================================
+# 중개보수 (공인중개사법 시행규칙 §20 별표1 · 주택 매매 상한요율)
+#   실제 보수는 상한요율 이내에서 협의. 여기서는 '상한'(최대비용)을 써서 예산을 보수적으로 잡음.
+#   5천만↓·5천~2억 구간만 한도액(cap) 존재. 2억 이상은 한도액 없음.
+#   지자체 조례로 세부는 달라질 수 있음(수도권 표준 기준).
+# ==========================================================================
+brokerage_fee:
+  - id: brk_under_50m            # 5천만원 미만 0.6% (한도 25만)
+    when: { price_max: 49999999 }
+    rate_pct: 0.6
+    extras: { cap_krw: 250000 }
+    source: "공인중개사법 시행규칙 §20 별표1 (5천만↓ 0.6%, 한도 25만원)"
+    source_url: "https://www.law.go.kr/법령/공인중개사법 시행규칙"
+    as_of: "2026-07-25"
+  - id: brk_50m_200m             # 5천만~2억 미만 0.5% (한도 80만)
+    when: { price_max: 199999999 }
+    rate_pct: 0.5
+    extras: { cap_krw: 800000 }
+    source: "공인중개사법 시행규칙 §20 별표1 (5천만~2억 0.5%, 한도 80만원)"
+    source_url: "https://www.law.go.kr/법령/공인중개사법 시행규칙"
+    as_of: "2026-07-25"
+  - id: brk_200m_900m            # 2억~9억 미만 0.4% (한도 없음)
+    when: { price_max: 899999999 }
+    rate_pct: 0.4
+    source: "공인중개사법 시행규칙 §20 별표1 (2억~9억 0.4%)"
+    source_url: "https://www.law.go.kr/법령/공인중개사법 시행규칙"
+    as_of: "2026-07-25"
+  - id: brk_900m_1200m           # 9억~12억 미만 0.5%
+    when: { price_max: 1199999999 }
+    rate_pct: 0.5
+    source: "공인중개사법 시행규칙 §20 별표1 (9억~12억 0.5%)"
+    source_url: "https://www.law.go.kr/법령/공인중개사법 시행규칙"
+    as_of: "2026-07-25"
+  - id: brk_1200m_1500m          # 12억~15억 미만 0.6%
+    when: { price_max: 1499999999 }
+    rate_pct: 0.6
+    source: "공인중개사법 시행규칙 §20 별표1 (12억~15억 0.6%)"
+    source_url: "https://www.law.go.kr/법령/공인중개사법 시행규칙"
+    as_of: "2026-07-25"
+  - id: brk_over_1500m           # 15억 이상 0.7%
+    when: {}
+    rate_pct: 0.7
+    source: "공인중개사법 시행규칙 §20 별표1 (15억↑ 0.7%)"
+    source_url: "https://www.law.go.kr/법령/공인중개사법 시행규칙"
+    as_of: "2026-07-25"
+
+# ==========================================================================
+# 대출 규제 (L2 참조 — '무주택·실거주·비규제' 기준 대표값. 규제지역·다주택·6억캡·
+#            스트레스DSR 미반영. 로더 확장 전까지 단일값.)
+# ==========================================================================
 lending:
   ltv:
-    rate_pct: null            # 지역·주택수·목적별로 다름. 규제지역이면 별도 항목 필요
-    source: ""
-    source_url: ""
-    as_of: null
+    rate_pct: 70.0              # 비규제지역·무주택 실거주 기준. 규제지역은 40%로 별도 필요.
+    source: "금융위 6.27 대책(2025) 및 은행업감독규정 — 비규제 무주택 실거주 LTV 70% 기준"
+    source_url: "https://www.fsc.go.kr/no010101/84824"
+    as_of: "2026-07-25"
   dsr:
-    rate_pct: null
-    source: ""
-    source_url: ""
-    as_of: null
+    rate_pct: 40.0             # 은행권 차주단위 DSR 40%. 스트레스 가산금리는 terms 금리에 별도 반영 권장.
+    source: "금융위 차주단위 DSR(은행 40%) · 스트레스 DSR 3단계(2025.7 시행) 미반영"
+    source_url: "https://www.fsc.go.kr/no010101/84824"
+    as_of: "2026-07-25"
   dti:
-    rate_pct: null            # 적용 지역만
-    source: ""
-    source_url: ""
-    as_of: null
+    rate_pct: 60.0             # 적용 지역만. DSR 도입 후 실효성 낮음 — 참고용 상한.
+    source: "금융위 DTI 60%(적용지역 한정) — 통상 DSR 이 실질 한도를 결정"
+    source_url: "https://www.fsc.go.kr/no010101/84824"
+    as_of: "2026-07-25"
 
-# --------------------------------------------------------------------------
-# 정액 비용 (원). 추정치이며 그렇게 표기해야 함.
-# --------------------------------------------------------------------------
+# ==========================================================================
+# 정액 비용 (원) — 추정치. 사용자가 조정 가능. 세금이 아님.
+# ==========================================================================
 fixed_costs:
-  registration_krw: null      # 등기·법무 대행 추정
-  moving_reserve_krw: null    # 이사·수리 예비비 (가용현금에서 차감)
-  source: "추정치 — 사용자 조정 가능"
-  source_url: ""
-  as_of: null
+  registration_krw: 1500000    # 소유권이전등기 신청수수료 + 법무사 대행보수 추정(누진 구간 평균)
+  moving_reserve_krw: 20000000 # 이사·수리 예비비 — 가용현금에서 차감(사용자 조정 가능)
+  source: "등기신청수수료 + 대한법무사협회 보수기준(누진) 기반 추정 · 예비비는 사용자 기본값"
+  source_url: "https://www.easylaw.go.kr/CSP/CnpClsMain.laf?csmSeq=649&ccfNo=4&cciNo=3&cnpClsNo=2"
+  as_of: "2026-07-25"

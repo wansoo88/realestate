@@ -1,20 +1,41 @@
 {
   "code_review": {
     "status": "passed",
-    "id": "CR-001",
-    "date": "2026-07-24",
-    "scope": "docs-only",
-    "reviewer": "PM/PMO 오케스트레이터 (인라인 수행)",
-    "note": "실행 코드 0줄. 문서 일관성·요구사항 추적성 기준 통과. 3단계 코드 유입 시 재리뷰 필수 — 이 PASS를 코드 변경 근거로 재사용 금지.",
+    "id": "CR-007",
+    "date": "2026-07-25",
+    "scope": "backend/** (도메인·API·수집기·에이전트) 재감사",
+    "reviewer": "re-review (독립 재감사 — 지시 2026-07-25-05-review)",
+    "note": "CR-004~006(PM 자체 검토)을 함수 직접 호출·반례 탐색으로 재감사해 정식 판정으로 CONFIRM. 레이어 경계·이분탐색·표본부족·미구현 은폐없음·자금계산 경계(0/음수/0%금리) 모두 확인. 테스트 170 passed 재현.",
     "log": "docs/03-build/code-review-log.md"
   },
   "security_review": {
     "status": "passed",
-    "id": "SR-001",
-    "date": "2026-07-24",
-    "scope": "docs-only",
-    "reviewer": "PM/PMO 오케스트레이터 (인라인 수행)",
-    "note": "공개 저장소 비밀정보 유출 벡터(서버IP/키/크리덴셜) 실측 차단 확인. 미해소 위험 R-01~R-04는 2단계 보안설계 과제. 3단계 코드 유입 시 OWASP 기준 재리뷰 필수.",
+    "id": "SR-007",
+    "date": "2026-07-25",
+    "scope": "backend/** 보안 재감사 (G2·G3·G4·IDOR) + SR4-2 수정 재검증(09-review)",
+    "reviewer": "re-review (독립 재감사·재검증 — 지시 2026-07-25-05-review, 2026-07-25-09-review)",
+    "note": "SR-006에서 반려한 SR4-2를 re-domain이 08-domain에서 수정(값비교 extract_amounts + fail-loud + 구조 문서정정). 반려 당사자 re-review가 SR-007에서 5가지 우회 재실측·구조방어 실측으로 재검증해 SR4-2 CLOSE. G2·G3·G4·IDOR는 SR-006에서 CONFIRM 유지. 전체 239 passed 재현, 회귀 0.",
     "log": "docs/03-build/security-review-log.md"
-  }
+  },
+  "open_findings": [],
+  "resolved_findings": [
+    {
+      "id": "SR4-2",
+      "verdict": "CLOSE (PASS)",
+      "rejected_by": "SR-006 (re-review)",
+      "fixed_by": "re-domain / ORDER 2026-07-25-08-domain",
+      "verified_by": "SR-007 (re-review, 반려 당사자 재검증)",
+      "date_closed": "2026-07-25",
+      "title": "자산유출 방어 — 가드 강화 + 구조적 방어 명시",
+      "pass_conditions_met": [
+        "① 원장·주석 정정: base.py docstring + docs/domain/prompt-safety-defense-model.md 가 구조를 1차 방어로 명시, SR-005 과장 정정 (본 원장에도 정정표기)",
+        "② 기본값 fail-loud: portfolio_summary no-op 제거(예외) + _derive_forbidden usable_cash 파생 무장 — 실측 확인",
+        "③ 매칭 강화: extract_amounts 값비교(억/만/한글 정규화). A1·A2·A3 차단, A7 오차단 해소 — 실측 확인",
+        "④ 회귀 테스트: test_A1/A2/A3/합성/A7/A5/A4/보강 10건 pass",
+        "⑤ G2 basis 접두매칭: ESTIMATED_BASIS_PREFIX 로 라벨변형 캡 우회 차단"
+      ],
+      "residual_nonblocking": "tripwire(보조 그물)가 '십억'·공백자릿수·'3.0억' 같은 exotic 표기는 못 잡음(구조가 실제 방어라 CLOSE 불가 사유 아님). '3.0억' 1건은 doc 한계목록 미기재 → 추가 권고.",
+      "note": "SR4-2 CLOSE 는 tripwire 완전성이 아니라 '구조(원본을 finding에 미포함)+파이프라인 테스트+fail-loud+정직한 문서'에 근거. 실제 파이프라인 프롬프트에 원본자산 0 확인."
+    }
+  ]
 }

@@ -193,15 +193,21 @@ def test_실구매가능금액_계산(client):
     assert "투자 권유가 아니" in body["disclaimer"]
 
 
-def test_세율설정이_검증되지_않으면_503(client, monkeypatch):
-    """추정해서 보여주느니 거부한다."""
+def test_세율설정이_검증되지_않으면_503(client, monkeypatch, tmp_path):
+    """추정해서 보여주느니 거부한다.
+
+    운영 config/tax_rules.yaml 은 이제 검증본(ORDER 2026-07-25-04-data)이므로,
+    가드레일은 **미검증 파일**을 가리켜 검증한다.
+    """
     token = _register_and_login(client, "a@b.co")
     client.put("/api/v1/me/profile", json={"cash_krw": 1, "income_krw": 1},
                headers=_auth(token))
 
+    unverified = tmp_path / "unverified.yaml"
+    unverified.write_text("version: 'x'\nstatus: unverified\n", encoding="utf-8")
+
     from app.core.config import get_settings
-    monkeypatch.setenv("TAX_RULES_PATH",
-                       str(Path(__file__).resolve().parents[2] / "config" / "tax_rules.yaml"))
+    monkeypatch.setenv("TAX_RULES_PATH", str(unverified))
     get_settings.cache_clear()
 
     r = client.post("/api/v1/affordability", json={}, headers=_auth(token))

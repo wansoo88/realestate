@@ -85,3 +85,12 @@
 - [ ] 기피 조건이 가점 상쇄가 아니라 제외/경고로 처리되는가
 - [ ] 학업성취도에 기준연도·출처가 있는가
 - [ ] 직선거리를 도보 시간으로 단정하지 않는가
+
+## 구현 상태 (2026-07-25 · ORDER 2026-07-25-06-domain)
+- 순수 계산 로직: `backend/app/domain/location/{models,analysis}.py`
+- 테스트: `backend/tests/test_location.py` (22건 — 위 검증 포인트를 그대로 고정)
+- 파이프라인 연결: `orchestrator.py::location_finding` — `Candidate.location`(=`LocationFacts`)이
+  있으면 실제 근거를, 없으면 판단 보류를 낸다. 기피 해당 후보는 예산 초과와 동일하게 하드 제외.
+- 스코어링·신뢰도 정책 근거: `docs/domain/location-scoring.md`
+- ⚠️ **미결**: `LocationRepository`(학구도 포함 판정·역/POI/유해요소 최단거리 → `LocationFacts` 조립)가
+  아직 없어 실데이터로는 아직 동작하지 않는다(항상 판단 보류). re-arch 요청 대상 — PM 경유.

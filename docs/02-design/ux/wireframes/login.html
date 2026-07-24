@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>와이어프레임 — 로그인 · 부동산 AI 자문</title>
+<link rel="stylesheet" href="wireframe.css">
+</head>
+<body>
+
+<header class="wf-head">
+  <h1>와이어프레임 — 로그인 / 회원가입</h1>
+  <p>근거: <a href="../README.md">ux/README.md</a> §1(설계 기준) §5(신뢰 표시) ·
+     <a href="../../api-spec.md">api-spec.md</a> §1 · <a href="../../security.md">security.md</a></p>
+  <p><strong>왜 로그인이 첫 화면인가:</strong> 이 서비스는 공개 엔드포인트가 없다(api-spec §0).
+     개인 자산 기반 판단이라 비로그인 상태로는 보여줄 게 없다. 그래서 로그인 화면이 곧 첫인상이고,
+     <b>여기서 "내 소득을 넣어도 되는 서비스인가"가 결정된다.</b></p>
+</header>
+
+<nav class="wf-nav" aria-label="와이어프레임 목록">
+  <a href="index.html">전체</a>
+  <a href="login.html" aria-current="page">로그인</a>
+  <a href="onboarding.html">조건 입력 3단계</a>
+  <a href="report-detail.html">리포트 상세</a>
+</nav>
+
+<!-- ══════════════════════════ 1. 로그인 ══════════════════════════ -->
+<section class="wf-section">
+  <h2>1. 로그인</h2>
+  <p class="wf-why"><b>왜 이 배치인가:</b> 입력 필드는 위, <b>실행 버튼은 하단</b>에 둔다.
+     폰을 한 손으로 쥔 상태에서 엄지가 닿는 곳은 화면 하단 1/3뿐이다(README §1).
+     제출 버튼이 폼 바로 밑에 붙어 있으면 화면 중앙이라 엄지가 닿지 않는다.</p>
+
+  <div class="wf-row">
+
+    <!-- 모바일 -->
+    <figure class="wf-frame">
+      <figcaption>모바일 390×760</figcaption>
+      <div class="wf-phone">
+        <div class="scr">
+          <div class="scr__body">
+            <h1 style="font-size:22px;margin:24px 0 4px">부동산 AI 자문</h1>
+            <p class="disclaimer" style="margin:0 0 24px">
+              내 자산 기준으로 후보를 좁히고 <b>근거</b>를 함께 보여줍니다.
+            </p>
+
+            <div class="field">
+              <label for="m-email">이메일</label>
+              <input class="input" id="m-email" type="email" inputmode="email"
+                     autocomplete="username" placeholder="me@example.com" value="me@example.com">
+            </div>
+
+            <div class="field">
+              <label for="m-pw">비밀번호</label>
+              <div style="display:flex;gap:8px">
+                <input class="input" id="m-pw" type="password" autocomplete="current-password"
+                       value="••••••••" aria-describedby="m-pw-err">
+                <button class="btn" type="button" aria-pressed="false" aria-label="비밀번호 표시">👁</button>
+              </div>
+              <p class="field__err" id="m-pw-err" role="alert">
+                이메일 또는 비밀번호가 올바르지 않습니다.
+              </p>
+            </div>
+
+            <div class="trust">
+              <span aria-hidden="true">🔒</span>
+              <span><b>자산·소득 정보는 암호화해 저장</b>하며,
+                    외부 AI에는 금액이 전송되지 않습니다.</span>
+            </div>
+          </div>
+
+          <div class="scr__foot">
+            <button class="btn btn--primary btn--block" type="submit">로그인</button>
+            <button class="btn btn--ghost btn--block" type="button">계정 만들기</button>
+            <p class="disclaimer" style="margin:4px 0 0;text-align:center">
+              투자 권유가 아닌 개인 판단 보조 도구입니다.
+            </p>
+          </div>
+        </div>
+      </div>
+    </figure>
+
+    <!-- 데스크톱 -->
+    <figure class="wf-frame">
+      <figcaption>데스크톱 1280×800 (0.5배 축소)</figcaption>
+      <div class="wf-desk">
+        <div class="wf-desk__inner">
+          <div class="desk-center">
+            <div class="desk-card">
+              <h1 style="font-size:24px;margin:0 0 4px">부동산 AI 자문</h1>
+              <p class="disclaimer" style="margin:0 0 24px">
+                내 자산 기준으로 후보를 좁히고 <b>근거</b>를 함께 보여줍니다.
+              </p>
+
+              <div class="field">
+                <label for="d-email">이메일</label>
+                <input class="input" id="d-email" type="email" autocomplete="username" value="me@example.com">
+              </div>
+              <div class="field">
+                <label for="d-pw">비밀번호</label>
+                <div style="display:flex;gap:8px">
+                  <input class="input" id="d-pw" type="password" autocomplete="current-password" value="••••••••">
+                  <button class="btn" type="button" aria-label="비밀번호 표시">👁</button>
+                </div>
+              </div>
+
+              <div class="trust">
+                <span aria-hidden="true">🔒</span>
+                <span><b>자산·소득 정보는 암호화해 저장</b>하며, 외부 AI에는 금액이 전송되지 않습니다.</span>
+              </div>
+
+              <button class="btn btn--primary btn--block" type="submit">로그인</button>
+              <div style="text-align:center;margin-top:8px">
+                <button class="btn btn--ghost" type="button">계정 만들기</button>
+              </div>
+              <p class="disclaimer" style="margin:16px 0 0;text-align:center">
+                투자 권유가 아닌 개인 판단 보조 도구입니다.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </figure>
+  </div>
+
+  <div class="wf-note">
+    <strong>구현 요건 (re-fe)</strong>
+    <ul>
+      <li>제출 버튼은 <code>scr__foot</code>에 고정. 키보드가 올라와도 가려지지 않게 —
+        iOS Safari는 <code>position:fixed</code>가 키보드와 겹친다. <b>플렉스 레이아웃 + <code>100dvh</code></b>를 쓴다.</li>
+      <li><code>autocomplete="username"</code> / <code>"current-password"</code> 필수 —
+        비밀번호 관리자가 못 채우면 사용자는 짧은 비밀번호를 쓴다(보안 UX).</li>
+      <li>오류는 <b>필드 아래 + <code>role="alert"</code></b>. 상단 토스트는 폼을 보는 눈높이에서 벗어나 놓친다.</li>
+      <li>오류 문구는 <b>"이메일 또는 비밀번호"</b>로 합친다 — 어느 쪽이 틀렸는지 알려주면 계정 존재 여부가 새어나간다(security.md).</li>
+      <li>비밀번호 표시 토글은 44×44px, <code>aria-pressed</code>로 상태 노출.</li>
+      <li>확대 금지(<code>maximum-scale</code>) 하지 않는다 — 이미 지켜지고 있음(<code>frontend/index.html</code>).</li>
+      <li>🔒 신뢰 문구는 <b>로그인 화면에도</b> 둔다. 자산 입력 화면에서 처음 보면 그때 이탈한다.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ══════════════════════════ 2. 회원가입 ══════════════════════════ -->
+<section class="wf-section">
+  <h2>2. 계정 만들기</h2>
+  <p class="wf-why"><b>왜 최소 필드인가:</b> 사용자는 1명(본인)이다. 이름·전화·약관 동의를 받을 이유가 없다.
+     받지 않은 개인정보는 유출될 수 없다(security.md 데이터 최소화).</p>
+
+  <div class="wf-row">
+    <figure class="wf-frame">
+      <figcaption>모바일 390×760</figcaption>
+      <div class="wf-phone">
+        <div class="scr">
+          <div class="scr__top">
+            <button class="btn btn--ghost" type="button" aria-label="뒤로">←</button>
+            <h1>계정 만들기</h1>
+          </div>
+          <div class="scr__body">
+            <div class="field">
+              <label for="s-email">이메일</label>
+              <input class="input" id="s-email" type="email" autocomplete="username">
+              <p class="field__hint">로그인에만 사용합니다. 메일을 보내지 않습니다.</p>
+            </div>
+            <div class="field">
+              <label for="s-pw">비밀번호</label>
+              <input class="input" id="s-pw" type="password" autocomplete="new-password" aria-describedby="s-pw-rule">
+              <ul id="s-pw-rule" class="field__hint" style="padding-left:1.2em;margin-top:8px">
+                <li>10자 이상 <span class="badge badge--ok">충족</span></li>
+                <li>영문·숫자·기호 중 2종 이상 <span class="badge">미충족</span></li>
+              </ul>
+            </div>
+            <div class="trust">
+              <span aria-hidden="true">🔒</span>
+              <span>비밀번호는 <b>Argon2id</b>로 해시해 저장합니다. 저장된 원문은 없습니다.</span>
+            </div>
+          </div>
+          <div class="scr__foot">
+            <button class="btn btn--primary btn--block" type="submit">계정 만들기</button>
+          </div>
+        </div>
+      </div>
+    </figure>
+
+    <figure class="wf-frame">
+      <figcaption>데스크톱 1280×800 (0.5배 축소)</figcaption>
+      <div class="wf-desk">
+        <div class="wf-desk__inner">
+          <div class="desk-center">
+            <div class="desk-card">
+              <h1 style="font-size:24px;margin:0 0 24px">계정 만들기</h1>
+              <div class="field">
+                <label for="ds-email">이메일</label>
+                <input class="input" id="ds-email" type="email">
+                <p class="field__hint">로그인에만 사용합니다. 메일을 보내지 않습니다.</p>
+              </div>
+              <div class="field">
+                <label for="ds-pw">비밀번호</label>
+                <input class="input" id="ds-pw" type="password">
+                <ul class="field__hint" style="padding-left:1.2em;margin-top:8px">
+                  <li>10자 이상 <span class="badge badge--ok">충족</span></li>
+                  <li>영문·숫자·기호 중 2종 이상 <span class="badge">미충족</span></li>
+                </ul>
+              </div>
+              <button class="btn btn--primary btn--block" type="submit">계정 만들기</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </figure>
+  </div>
+
+  <div class="wf-note">
+    <strong>구현 요건 (re-fe)</strong>
+    <ul>
+      <li>비밀번호 규칙은 <b>입력 전부터 보이게</b> 한다. 제출 후 빨간 글씨로 알려주는 건 최악의 순서다.</li>
+      <li>규칙 충족 여부를 <b>색뿐 아니라 텍스트 배지</b>("충족/미충족")로 — 색만으로 정보 전달 금지(README §11).</li>
+      <li>규칙 목록은 <code>aria-describedby</code>로 비밀번호 입력과 연결해 스크린리더가 함께 읽게 한다.</li>
+      <li>가입 성공 → 자동 로그인 → <b>온보딩 1단계로 직행</b>. 로그인 화면으로 되돌리지 않는다.</li>
+    </ul>
+  </div>
+</section>
+
+</body>
+</html>

@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>와이어프레임 — 점진적 조건 입력 3단계 · 부동산 AI 자문</title>
+<link rel="stylesheet" href="wireframe.css">
+</head>
+<body>
+
+<header class="wf-head">
+  <h1>와이어프레임 — 점진적 조건 입력 3단계</h1>
+  <p>근거: <a href="../README.md">ux/README.md</a> §5(점진적 입력) ·
+     <a href="../../api-spec.md">api-spec.md</a> §2(<code>/me/profile</code>, <code>/me/preferences</code>) §3(<code>/affordability</code>)</p>
+  <p><strong>이 화면의 원칙 — 어느 단계에서 멈춰도 서비스가 동작해야 한다.</strong>
+     자산·소득·기존대출·주택수·선호·기피를 온보딩에서 한 번에 물으면 거기서 끝난다.
+     그래서 <b>묻는 시점을 "그 값이 실제로 필요해지는 순간"까지 미룬다.</b></p>
+</header>
+
+<nav class="wf-nav" aria-label="와이어프레임 목록">
+  <a href="index.html">전체</a>
+  <a href="login.html">로그인</a>
+  <a href="onboarding.html" aria-current="page">조건 입력 3단계</a>
+  <a href="report-detail.html">리포트 상세</a>
+</nav>
+
+<!-- ══════════════════ 1단계 ══════════════════ -->
+<section class="wf-section">
+  <h2>1단계 — 온보딩 30초 · 지역 + 대략 예산만</h2>
+  <p class="wf-why"><b>왜 두 개만 묻나:</b> 지도를 띄우려면 <b>어디</b>와 <b>얼마</b>만 있으면 된다.
+     소득·대출은 "정확한 실구매 가능 금액"을 계산할 때 필요한 값이고, 그건 아직 필요하지 않다.
+     여기서 받은 예산은 <code>GET /map/complexes?max_price_krw=</code> 로 바로 쓰인다.</p>
+
+  <div class="wf-row">
+    <figure class="wf-frame">
+      <figcaption>모바일 390×760</figcaption>
+      <div class="wf-phone">
+        <div class="scr">
+          <div class="scr__top">
+            <div class="stepper" aria-label="3단계 중 1단계">
+              <i class="on"></i><i></i><i></i> <span>1 / 3</span>
+            </div>
+          </div>
+          <div class="scr__body">
+            <h1 style="font-size:22px;margin:8px 0 4px">어디를 보시나요?</h1>
+            <p class="disclaimer" style="margin:0 0 16px">나중에 언제든 바꿀 수 있습니다.</p>
+
+            <div class="field">
+              <fieldset style="border:0;padding:0;margin:0">
+                <legend class="field__hint" style="margin-bottom:8px">지역 (복수 선택)</legend>
+                <div style="display:flex;gap:8px;flex-wrap:wrap">
+                  <button class="chip" aria-pressed="true">서울 강남구</button>
+                  <button class="chip" aria-pressed="true">성남 분당구</button>
+                  <button class="chip" aria-pressed="false">서울 송파구</button>
+                  <button class="chip" aria-pressed="false">과천시</button>
+                  <button class="chip" aria-pressed="false">+ 지역 추가</button>
+                </div>
+              </fieldset>
+            </div>
+
+            <div class="field">
+              <label for="b1">예산은 대략 얼마인가요?</label>
+              <p class="rep__price num" style="margin:8px 0">
+                8억 ~ 12억
+                <span class="badge badge--estimated">대략</span>
+              </p>
+              <input id="b1" type="range" min="3" max="30" value="12" step="1" style="width:100%;min-height:44px">
+              <p class="field__hint">
+                정확한 한도는 소득·대출을 넣으면 계산됩니다. <b>지금은 대략이면 충분합니다.</b>
+              </p>
+            </div>
+
+            <div class="trust">
+              <span aria-hidden="true">🔒</span>
+              <span>이 단계에서는 <b>소득·자산을 묻지 않습니다.</b></span>
+            </div>
+          </div>
+          <div class="scr__foot">
+            <button class="btn btn--primary btn--block">시작하기</button>
+            <button class="btn btn--ghost btn--block">건너뛰고 지도 보기</button>
+          </div>
+        </div>
+      </div>
+    </figure>
+
+    <figure class="wf-frame">
+      <figcaption>데스크톱 1280×800 (0.5배 축소)</figcaption>
+      <div class="wf-desk">
+        <div class="wf-desk__inner">
+          <div class="desk-center">
+            <div class="desk-card" style="width:640px">
+              <div class="stepper" style="margin-bottom:16px"><i class="on"></i><i></i><i></i> <span>1 / 3</span></div>
+              <h1 style="font-size:26px;margin:0 0 24px">어디를 보시나요?</h1>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px">
+                <div>
+                  <p class="field__hint" style="margin-bottom:8px">지역 (복수 선택)</p>
+                  <div style="display:flex;gap:8px;flex-wrap:wrap">
+                    <button class="chip" aria-pressed="true">서울 강남구</button>
+                    <button class="chip" aria-pressed="true">성남 분당구</button>
+                    <button class="chip" aria-pressed="false">서울 송파구</button>
+                    <button class="chip" aria-pressed="false">과천시</button>
+                  </div>
+                </div>
+                <div>
+                  <p class="field__hint" style="margin-bottom:8px">예산 (대략)</p>
+                  <p class="rep__price num" style="margin:0 0 8px">8억 ~ 12억 <span class="badge badge--estimated">대략</span></p>
+                  <input type="range" min="3" max="30" value="12" style="width:100%">
+                </div>
+              </div>
+              <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:32px">
+                <button class="btn btn--ghost">건너뛰기</button>
+                <button class="btn btn--primary">시작하기</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </figure>
+  </div>
+
+  <div class="wf-note">
+    <strong>구현 요건 (re-fe)</strong>
+    <ul>
+      <li><b>"건너뛰고 지도 보기"를 반드시 남긴다.</b> 조건 입력을 강제해 이탈을 막는 건 다크패턴(README §12).
+        건너뛰면 예산 필터 없이 지도만 뜬다 — 그래도 동작한다.</li>
+      <li>예산은 <b>범위(min~max)</b>로 받는다. 단일 상한만 받으면 "8억짜리를 찾는데 5억 매물"이 섞인다.</li>
+      <li>슬라이더는 터치 타깃 44px 확보 + <b>숫자 직접 입력 대안</b>을 함께 제공(정밀 조작은 슬라이더로 못 한다).</li>
+      <li>모바일은 세로 1열, 데스크톱은 2열. 데스크톱에서 세로로 길게 늘어놓으면 스크롤이 생겨 손해.</li>
+      <li>지역 칩은 <code>&lt;button aria-pressed&gt;</code> — 체크박스처럼 보이는 div 금지.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ══════════════════ 2단계 ══════════════════ -->
+<section class="wf-section">
+  <h2>2단계 — 첫 추천 직전 · 소득 · 기존 대출 · 보유 주택수</h2>
+  <p class="wf-why"><b>왜 지금 묻나:</b> 사용자가 "추천 받기"를 누른 <b>바로 그 순간</b>이 민감 정보를 요구할 수 있는 유일한 시점이다.
+     이 시점에는 사용자가 이미 지도를 보고 매물을 봤고, <b>무엇을 얻는지 알고 있다.</b>
+     온보딩에서 물으면 대가 없이 소득을 요구하는 꼴이 된다.</p>
+
+  <div class="wf-row">
+    <figure class="wf-frame">
+      <figcaption>모바일 390×760 — 시트 형태(지도 위에 겹침)</figcaption>
+      <div class="wf-phone">
+        <div class="scr" style="background:var(--bg-elev)">
+          <!-- 뒤에 지도가 비쳐 보인다는 표시 -->
+          <div style="flex:0 0 140px;display:grid;place-items:center;color:var(--text-estimated);font-size:14px">
+            (지도 — 배경에 유지)
+          </div>
+          <div style="flex:1 1 auto;background:var(--bg);border-radius:12px 12px 0 0;
+                      border-top:1px solid var(--border);display:flex;flex-direction:column">
+            <div class="scr__top" style="border:0">
+              <h2>더 정확하게 계산할까요?</h2>
+            </div>
+            <div class="scr__body" style="padding-top:0">
+              <p class="disclaimer" style="margin:0 0 16px">
+                입력하면 <b>취득세·보유세·대출 한도</b>를 반영한 실구매 가능 금액으로 후보를 좁힙니다.
+              </p>
+
+              <div class="trust">
+                <span aria-hidden="true">🔒</span>
+                <span><b>왜 필요한가:</b> 대출 한도와 세금을 정확히 계산하기 위해서입니다.<br>
+                      <b>어떻게 보관하나:</b> 암호화해 저장하며 <b>외부 AI에는 금액이 전송되지 않습니다.</b></span>
+              </div>
+
+              <div class="field">
+                <label for="inc">연소득 (세전)</label>
+                <div style="display:flex;align-items:center;gap:8px">
+                  <input class="input input--num" id="inc" inputmode="numeric" value="9,000">
+                  <span>만원</span>
+                </div>
+                <p class="field__hint">DSR 한도 계산에 씁니다.</p>
+              </div>
+
+              <div class="field">
+                <label for="loan">기존 대출 잔액</label>
+                <div style="display:flex;align-items:center;gap:8px">
+                  <input class="input input--num" id="loan" inputmode="numeric" value="5,000">
+                  <span>만원</span>
+                </div>
+                <p class="field__hint">없으면 0. 신용대출·전세대출 포함.</p>
+              </div>
+
+              <div class="field">
+                <fieldset style="border:0;padding:0;margin:0">
+                  <legend style="font-size:14px;font-weight:600;margin-bottom:4px">보유 주택수</legend>
+                  <div style="display:flex;gap:8px">
+                    <button class="chip" aria-pressed="true">0채</button>
+                    <button class="chip" aria-pressed="false">1채</button>
+                    <button class="chip" aria-pressed="false">2채+</button>
+                  </div>
+                  <p class="field__hint">취득세율이 크게 달라집니다(1주택 1~3% vs 다주택 중과).</p>
+                </fieldset>
+              </div>
+            </div>
+            <div class="scr__foot">
+              <button class="btn btn--primary btn--block">계산하고 추천 받기</button>
+              <button class="btn btn--ghost btn--block">나중에 · 대략 예산으로 추천</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </figure>
+
+    <figure class="wf-frame">
+      <figcaption>데스크톱 1280×800 — 모달 (지도 유지)</figcaption>
+      <div class="wf-desk">
+        <div class="wf-desk__inner">
+          <div style="height:100%;background:var(--bg-elev);display:grid;place-items:center">
+            <div class="desk-card" style="width:720px;box-shadow:0 8px 32px rgba(0,0,0,.18)">
+              <h2 style="margin:0 0 8px;font-size:24px">더 정확하게 계산할까요?</h2>
+              <p class="disclaimer" style="margin:0 0 16px">
+                입력하면 취득세·보유세·대출 한도를 반영한 실구매 가능 금액으로 후보를 좁힙니다.
+              </p>
+              <div class="trust">
+                <span aria-hidden="true">🔒</span>
+                <span><b>암호화해 저장</b>하며 외부 AI에는 금액이 전송되지 않습니다.</span>
+              </div>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+                <div class="field" style="margin:0">
+                  <label for="d-inc">연소득 (세전, 만원)</label>
+                  <input class="input input--num" id="d-inc" value="9,000">
+                </div>
+                <div class="field" style="margin:0">
+                  <label for="d-loan">기존 대출 잔액 (만원)</label>
+                  <input class="input input--num" id="d-loan" value="5,000">
+                </div>
+              </div>
+              <div class="field" style="margin-top:16px">
+                <p style="font-size:14px;font-weight:600;margin:0 0 4px">보유 주택수</p>
+                <div style="display:flex;gap:8px">
+                  <button class="chip" aria-pressed="true">0채</button>
+                  <button class="chip" aria-pressed="false">1채</button>
+                  <button class="chip" aria-pressed="false">2채+</button>
+                </div>
+              </div>
+              <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:24px">
+                <button class="btn btn--ghost">나중에</button>
+                <button class="btn btn--primary">계산하고 추천 받기</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </figure>
+  </div>
+
+  <div class="wf-note">
+    <strong>구현 요건 (re-fe) — 이 화면은 G3(개인정보) 대상이다</strong>
+    <ul>
+      <li><b>[나중에]가 [입력]과 같은 크기·같은 시각 비중이면 안 되지만, 숨겨서도 안 된다.</b>
+        고스트 버튼으로 명확히 보이게 두되 주 동작은 primary. 이게 다크패턴 경계선이다.</li>
+      <li>금액은 <b>만원 단위 입력 → 원 단위 정수로 변환해 전송</b>(api-spec §0: 금액은 원 단위 <code>bigint</code>).
+        입력 중 <code>toLocaleString</code>으로 3자리 콤마를 넣되 <b>커서 위치를 보존</b>한다.</li>
+      <li><code>inputmode="numeric"</code> — 모바일에서 숫자 키패드가 안 뜨면 소득 입력에서 이탈한다.</li>
+      <li>⛔ <b>이 화면의 값은 어떤 경우에도 <code>console.log</code>·에러 리포팅·<code>sessionStorage</code>에 남기지 않는다</b>
+        (api-spec §2 로그 제외 규정). 폼 상태는 컴포넌트 메모리에만.</li>
+      <li>제출 실패 시 재입력 부담을 줄이려 값을 유지하되, <b>브라우저 자동완성 저장은 끈다</b>
+        (<code>autocomplete="off"</code>) — 공용 기기 대비.</li>
+      <li>결과는 <code>POST /affordability</code>의 <code>binding_constraint</code>를 그대로 보여준다:
+        "한도를 결정한 건 <b>DSR</b>입니다" — 왜 이 금액인지가 곧 신뢰다.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ══════════════════ 3단계 ══════════════════ -->
+<section class="wf-section">
+  <h2>3단계 — 쓰면서 정교화 · "이 매물 왜 빠졌죠?"</h2>
+  <p class="wf-why"><b>왜 설정 화면이 아니라 결과 옆에 두나:</b> 선호·기피는 <b>추상적으로 물으면 못 답한다.</b>
+     "대로변 소음이 싫으신가요?"보다 "이 매물이 대로변이라 감점됐습니다 → 신경 안 씀"이 훨씬 정확하다.
+     조건 편집은 <b>불만이 생긴 그 자리에서</b> 일어나야 한다.</p>
+
+  <div class="wf-row">
+    <figure class="wf-frame">
+      <figcaption>모바일 390×760</figcaption>
+      <div class="wf-phone">
+        <div class="scr">
+          <div class="scr__top">
+            <button class="btn btn--ghost" aria-label="닫기">←</button>
+            <h2>추천 조건</h2>
+          </div>
+          <div class="scr__body">
+            <div style="border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:16px">
+              <p style="margin:0 0 4px;font-weight:600">△△아파트가 후보에서 빠진 이유</p>
+              <ul style="margin:0;padding-left:1.2em;font-size:14px;color:var(--text-muted)">
+                <li><b>기피: 1층</b> 조건에 걸림 <button class="btn btn--ghost" style="min-height:32px;padding:0 8px">해제</button></li>
+                <li>예산 12억 초과 (호가 <span class="num">13.2억</span>)</li>
+              </ul>
+            </div>
+
+            <h3 style="font-size:16px;margin:0 0 8px">기피 조건</h3>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:24px">
+              <button class="chip" aria-pressed="true">1층</button>
+              <button class="chip" aria-pressed="true">대로변 소음</button>
+              <button class="chip" aria-pressed="false">재건축 초기단계</button>
+              <button class="chip" aria-pressed="false">1000세대 미만</button>
+            </div>
+
+            <h3 style="font-size:16px;margin:0 0 4px">무엇을 더 중요하게 볼까요?</h3>
+            <p class="field__hint" style="margin:0 0 12px">합계는 자동으로 100%가 됩니다.</p>
+
+            <div class="field">
+              <label for="w1">가격 <span class="num">30%</span></label>
+              <input id="w1" type="range" min="0" max="100" value="30" style="width:100%;min-height:44px">
+            </div>
+            <div class="field">
+              <label for="w2">입지·학군 <span class="num">30%</span></label>
+              <input id="w2" type="range" min="0" max="100" value="30" style="width:100%;min-height:44px">
+            </div>
+            <div class="field">
+              <label for="w3">시세 적정성 <span class="num">25%</span></label>
+              <input id="w3" type="range" min="0" max="100" value="25" style="width:100%;min-height:44px">
+            </div>
+            <div class="field">
+              <label for="w4">리스크 회피 <span class="num">15%</span></label>
+              <input id="w4" type="range" min="0" max="100" value="15" style="width:100%;min-height:44px">
+            </div>
+          </div>
+          <div class="scr__foot">
+            <button class="btn btn--primary btn--block">저장하고 다시 추천 <span class="badge badge--count">3건 변동</span></button>
+          </div>
+        </div>
+      </div>
+    </figure>
+
+    <figure class="wf-frame">
+      <figcaption>데스크톱 1280×800 — 우측 패널 (결과 유지)</figcaption>
+      <div class="wf-desk">
+        <div class="wf-desk__inner">
+          <div style="display:grid;grid-template-columns:1fr 460px;height:100%">
+            <div style="padding:24px;background:var(--bg-elev);color:var(--text-estimated)">
+              <p style="margin:0">(추천 결과 리스트 — 조건을 바꾸면 여기서 순위가 실시간으로 바뀐다)</p>
+              <div style="margin-top:16px;padding:16px;border:1px solid var(--border);border-radius:12px;background:var(--bg);color:var(--text)">
+                <b>① ○○아파트</b> <span class="num">14.8억</span>
+              </div>
+              <div style="margin-top:8px;padding:16px;border:1px dashed var(--border);border-radius:12px;opacity:.9">
+                △△아파트 — <span class="badge badge--warn">기피: 1층</span> 으로 제외됨
+              </div>
+            </div>
+            <div style="border-left:1px solid var(--border);padding:24px;overflow:auto">
+              <h2 style="margin:0 0 16px;font-size:20px">추천 조건</h2>
+              <h3 style="font-size:16px;margin:0 0 8px">기피 조건</h3>
+              <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:24px">
+                <button class="chip" aria-pressed="true">1층</button>
+                <button class="chip" aria-pressed="true">대로변 소음</button>
+                <button class="chip" aria-pressed="false">재건축 초기단계</button>
+              </div>
+              <h3 style="font-size:16px;margin:0 0 12px">가중치</h3>
+              <div class="field"><label>가격 <span class="num">30%</span></label><input type="range" value="30" style="width:100%"></div>
+              <div class="field"><label>입지·학군 <span class="num">30%</span></label><input type="range" value="30" style="width:100%"></div>
+              <div class="field"><label>시세 적정성 <span class="num">25%</span></label><input type="range" value="25" style="width:100%"></div>
+              <div class="field"><label>리스크 회피 <span class="num">15%</span></label><input type="range" value="15" style="width:100%"></div>
+              <button class="btn btn--primary btn--block">저장하고 다시 추천</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </figure>
+  </div>
+
+  <div class="wf-note">
+    <strong>구현 요건 (re-fe)</strong>
+    <ul>
+      <li><b>제외된 매물을 목록에서 지우지 않는다.</b> "왜 없는지"가 보여야 조건을 고칠 수 있다
+        (README §4의 "예산 초과 단지는 회색으로" 와 같은 원칙).</li>
+      <li>가중치 합계는 <b>자동 정규화</b>. 사용자에게 100 맞추기를 시키면 아무도 안 만진다.
+        <code>PUT /me/preferences</code> 의 <code>weights</code>에 정규화된 값으로 보낸다.</li>
+      <li>슬라이더 <code>&lt;input type="range"&gt;</code>는 키보드 조작이 기본 제공된다 —
+        커스텀 div 슬라이더로 바꾸지 말 것(접근성 손실).</li>
+      <li>조건 변경 → <b>재추천은 사용자가 명시적으로 누를 때만</b>. 슬라이더를 만질 때마다 Claude API가 도는 건 비용 사고다
+        (architecture.md §6 비용 통제).</li>
+      <li>[저장하고 다시 추천] 버튼의 <code>3건 변동</code> 배지는 <b>규칙 필터로 미리 계산 가능한 값만</b> 표시한다
+        (예산·기피 필터). 점수 변동은 AI를 돌려야 알 수 있으므로 예고하지 않는다.</li>
+    </ul>
+  </div>
+</section>
+
+</body>
+</html>

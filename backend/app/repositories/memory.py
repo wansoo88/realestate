@@ -8,6 +8,7 @@ from __future__ import annotations
 import itertools
 from typing import Any
 
+from app.domain.location.models import BuildingLocationFact, LocationFacts
 from app.repositories.base import (
     ComplexSummary,
     JobRecord,
@@ -26,6 +27,8 @@ class InMemoryRepository:
         self._prefs: dict[int, dict[str, Any]] = {}
         self._complexes: list[ComplexSummary] = []
         self._jobs: dict[str, JobRecord] = {}
+        self._location: dict[int, LocationFacts] = {}
+        self._buildings: dict[int, list[BuildingLocationFact]] = {}
         self._ids = itertools.count(1)
 
     # -- 사용자 -----------------------------------------------------------
@@ -85,6 +88,27 @@ class InMemoryRepository:
             if len(out) >= limit:
                 break
         return out
+
+    # -- 입지 (스텁) -------------------------------------------------------
+    # 공간연산이 없으므로 **테스트가 넣어준 사실만 돌려준다.**
+    # 좌표로 거리를 흉내 내지 않는다 — 가짜 거리로 통과한 입지 로직은
+    # 실제 PostGIS 위에서 처음 틀린 걸 알게 된다.
+
+    def set_location_facts(self, complex_id: int, facts: LocationFacts) -> LocationFacts:
+        self._location[complex_id] = facts
+        return facts
+
+    def set_building_location_facts(
+        self, complex_id: int, facts: list[BuildingLocationFact],
+    ) -> list[BuildingLocationFact]:
+        self._buildings[complex_id] = list(facts)
+        return self._buildings[complex_id]
+
+    def location_facts(self, complex_id: int) -> LocationFacts | None:
+        return self._location.get(complex_id)
+
+    def building_location_facts(self, complex_id: int) -> list[BuildingLocationFact]:
+        return list(self._buildings.get(complex_id, ()))
 
     # -- 추천 작업 ---------------------------------------------------------
     def create_job(self, job_id: str, user_id: int, criteria: dict[str, Any]) -> JobRecord:

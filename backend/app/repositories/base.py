@@ -17,6 +17,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
+from app.domain.location.models import BuildingLocationFact, LocationFacts
+
 
 @dataclass
 class UserRecord:
@@ -95,3 +97,26 @@ class JobRepository(Protocol):
                    criteria: dict[str, Any]) -> JobRecord: ...
     #: user_id 필수 — 소유권 검증 없이 조회할 방법을 만들지 않는다
     def get_job(self, job_id: str, user_id: int) -> JobRecord | None: ...
+
+
+@runtime_checkable
+class LocationRepository(Protocol):
+    """입지 사실 조립 — `location-analyst`(re-domain) 의 입력을 만든다.
+
+    경계 (domain/location/models.py 의 규약과 짝을 이룬다)
+    -----------------------------------------------------
+    **공간 판정은 전부 여기서 한다.** 학구도 포함 여부(`ST_Contains`),
+    역·POI·유해요소 최단거리(`ST_Distance`)를 DB 에서 계산해 사실만 넘기고,
+    그걸 점수·근거로 바꾸는 일은 도메인 계층이 한다. 반대 방향으로 새면 안 된다 —
+    리포지토리가 점수를 매기기 시작하면 근거 감사(G2)가 두 곳을 봐야 한다.
+
+    ⚠️ 데이터가 없으면 **추정하지 않고 비운다.**
+    학구도가 없으면 `SchoolFact.district_data_available=False` 로 넘기고,
+    최근접 학교 거리로 배정을 대체하지 않는다(배정과 거리는 다른 개념).
+    거리를 모르면 `None` 이다 — 0 이나 임의값으로 채우지 않는다.
+    """
+
+    def location_facts(self, complex_id: int) -> LocationFacts | None: ...
+
+    #: 동(棟)별 좌표 사실. 실거래에 동 정보가 없어 **추정 입력**으로만 쓰인다(F4 §D).
+    def building_location_facts(self, complex_id: int) -> list[BuildingLocationFact]: ...

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -20,6 +21,7 @@ from app.agents.base import (
     AgentOutputError,
     Evidence,
     Finding,
+    PromptSafetyError,
     Risk,
     assert_no_secrets,
     data_block,
@@ -30,6 +32,8 @@ from app.agents.base import (
 from app.agents.llm import LLMClient, LLMError
 from app.domain.affordability.models import AffordabilityResult
 from app.domain.listings.dedup import ListingGroup, trust_score
+from app.domain.location.analysis import evaluate_location
+from app.domain.location.models import LocationAssessment, LocationFacts
 from app.domain.valuation.models import ListingRow, TradeRow
 from app.domain.valuation.stats import ask_gap_pct, fair_price_band, liquidity
 
@@ -52,20 +56,27 @@ class Candidate:
     trades: list[TradeRow] = field(default_factory=list)
     total_households: int | None = None
     listings: list[ListingRow] = field(default_factory=list)
+    #: 입지 사실(학군·교통·인프라·유해요소). 리포지토리가 공간쿼리로 채워 넘긴다.
+    #: 없으면 location-analyst 는 판단 보류를 낸다(지어내지 않는다).
+    location: LocationFacts | None = None
 
 
 @dataclass
 class AnalysisContext:
     """파이프라인 입력.
 
-    ⚠️ **사용자 자산 원본 금액을 담지 않는다.** `affordability` 계산 결과만 가진다.
+    ⚠️ **1차 방어는 이 구조다.** 이 컨텍스트는 사용자 자산 **원본 금액을 담지 않고**
+    `affordability` **계산 결과(파생값)** 만 가진다. 각 Finding 도 한도·부대비용 같은
+    파생값만 프롬프트에 싣는다. 즉 원본 자산은 애초에 LLM 경로로 갈 수 없다.
+    `forbidden_amounts` 는 그 위에 얹는 **best-effort tripwire** 일 뿐 주 방어가 아니다.
     """
 
     affordability: AffordabilityResult
     candidates: list[Candidate]
     avoid: dict[str, Any] = field(default_factory=dict)
     as_of: dt.date = field(default_factory=dt.date.today)
-    #: 프롬프트에 나가면 안 되는 값들(검사용). 프롬프트 구성에는 쓰지 않는다.
+    #: tripwire 검사값(프롬프트 구성에는 쓰지 않는다). 비워두면 파이프라인이
+    #: affordability 파생값으로 보강하고, 그래도 비면 fail-loud 로 막는다.
     forbidden_amounts: list[int] = field(default_factory=list)
 
 
@@ -181,28 +192,52 @@ def valuation_finding(candidate: Candidate, as_of: dt.date) -> Finding:
 
 
 # ---------------------------------------------------------------------------
-# [3] location-analyst — 입지 데이터가 없으면 판단 보류
+# [3] location-analyst — 공간쿼리 결과를 근거로. 데이터 없으면 판단 보류
 # ---------------------------------------------------------------------------
 
-def location_finding(candidate: Candidate, poi_summary: dict[str, Any] | None,
-                     as_of: dt.date) -> Finding:
-    if not poi_summary:
-        # POI 수집 전에는 지어내지 않는다.
+def _assessment_to_finding(assessment: LocationAssessment) -> Finding:
+    """입지 종합 판정을 Finding 으로. 근거가 하나도 없으면 판단 보류."""
+    if not assessment.excluded and not assessment.has_evidence:
         return insufficient("location-analyst",
-                            ["입지 데이터(학군·교통·인프라) 미수집"])
+                            list(assessment.missing)
+                            or ["입지 판단에 쓸 실측 데이터 부족"])
 
-    evidence = [Evidence(claim=f"{k} {v}", source="공공 기초자료",
-                         as_of=as_of.isoformat())
-                for k, v in poi_summary.items()]
+    evidence = [Evidence(claim=e["claim"], source=e["source"], as_of=e.get("as_of"))
+                for e in assessment.evidence]
+    risks = [Risk(r["severity"], r["detail"]) for r in assessment.risks]
+
+    if assessment.excluded:
+        # 기피 조건 해당 — 근거가 아니라 제외 사유를 남긴다.
+        return validate_finding(Finding(
+            agent_id="location-analyst",
+            verdict=assessment.verdict,
+            rationale=assessment.rationale,
+            evidence=evidence or [Evidence(
+                claim=assessment.rationale, source="유해요소 반경 판정", as_of=None)],
+            risks=[Risk("high", r) for r in assessment.exclusion_reasons] or risks,
+            score=None,
+            confidence=assessment.confidence,
+        ))
+
     return validate_finding(Finding(
         agent_id="location-analyst",
-        verdict="입지 분석",
-        rationale="; ".join(f"{k}: {v}" for k, v in poi_summary.items()),
+        verdict=assessment.verdict,
+        rationale=assessment.rationale,
         evidence=evidence,
-        risks=[Risk("low", "학군 배정은 변경될 수 있습니다(현재 기준).")],
-        score=None,
-        confidence=0.8,
+        risks=risks,
+        score=assessment.score,
+        confidence=assessment.confidence,
     ))
+
+
+def location_finding(candidate: Candidate, as_of: dt.date, *,
+                     avoid: Iterable[str] | None = None) -> Finding:
+    """입지 판정. 입지 사실이 없으면 지어내지 않고 판단 보류."""
+    if candidate.location is None:
+        return insufficient("location-analyst",
+                            ["입지 데이터(학군·교통·인프라) 미수집"])
+    assessment = evaluate_location(candidate.location, avoid=avoid, as_of=as_of)
+    return _assessment_to_finding(assessment)
 
 
 # ---------------------------------------------------------------------------
@@ -244,13 +279,24 @@ def _fallback_summary(findings: list[Finding]) -> dict[str, Any]:
 def portfolio_summary(findings: list[Finding], llm: LLMClient | None,
                       forbidden_amounts: list[int]) -> dict[str, Any]:
     if llm is None:
+        # 외부 전송이 없다 → tripwire 불필요(구조적 방어만으로 충분).
         return _fallback_summary(findings)
+
+    # fail-loud: 실제 외부(LLM) 전송 경로인데 tripwire 검사값이 하나도 없으면
+    # "검사할 게 없어서 통과"라는 조용한 no-op 을 만들지 않고 **막는다**.
+    # (best-effort 그물이라도 실경로에서 무장 해제된 채 나가지 않게 강제)
+    if not [v for v in forbidden_amounts if v and v >= 1_000_000]:
+        raise PromptSafetyError(
+            "forbidden_amounts 가 비어 자산유출 tripwire 가 무장 해제됩니다. "
+            "affordability 원본에서 파생한 검사값을 넘기세요. (security.md §6)"
+        )
 
     payload = [f.to_dict() for f in findings]
     user = data_block("analysis_results", payload) + \
         "\n\n위 분석 결과만으로 요약하세요. 없는 사실을 만들지 마세요."
 
-    # 자산 원본 금액이 섞였는지 호출 직전에 기계적으로 차단한다 (security.md §6).
+    # 자산 원본 금액이 섞였는지 호출 직전에 걸러낸다 (best-effort tripwire, security.md §6).
+    # ⚠️ 주 방어는 이게 아니라 finding 이 파생값만 싣는 구조다.
     assert_no_secrets(user, forbidden_amounts)
 
     for hit in scan_injection(user):
@@ -286,11 +332,43 @@ def portfolio_summary(findings: list[Finding], llm: LLMClient | None,
 # 파이프라인
 # ---------------------------------------------------------------------------
 
+def _avoid_tokens(avoid: dict[str, Any] | None) -> list[str]:
+    """느슨하게 들어오는 기피 조건에서 문자열 토큰만 긁어낸다.
+
+    입지와 무관한 토큰(1층·재건축 등)은 하위 로직(``_canonical_avoids``)이 걸러낸다.
+    """
+    tokens: list[str] = []
+    for key, val in (avoid or {}).items():
+        tokens.append(str(key))
+        if isinstance(val, str):
+            tokens.append(val)
+        elif isinstance(val, (list, tuple, set)):
+            tokens += [str(x) for x in val]
+    return tokens
+
+
+def _derive_forbidden(ctx: AnalysisContext) -> list[int]:
+    """tripwire 검사값을 방어적으로 보강한다.
+
+    호출자가 `forbidden_amounts` 를 채워 넘기지 않아도(A5) affordability 파생값 중
+    **원본에 가까운 값**을 자동으로 포함시켜, 실경로에서 tripwire 가 완전 no-op 이 되지 않게 한다.
+    (income·기존대출 원본은 AffordabilityResult 에 남지 않으므로, 그건 호출자가 넘겨야 하고
+     안 넘기면 `portfolio_summary` 의 fail-loud 가 막는다.)
+    """
+    vals: set[int] = {v for v in ctx.forbidden_amounts if v}
+    usable_cash = getattr(ctx.affordability, "usable_cash_krw", 0)
+    if usable_cash:
+        vals.add(usable_cash)
+    return sorted(vals)
+
+
 def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
                      top_n: int = 10) -> dict[str, Any]:
     """MVP 5종 파이프라인 실행. 반환값은 `/recommendations` 응답의 items."""
     finance = finance_finding(ctx.affordability)
     budget = ctx.affordability.max_purchase_krw
+    avoid_tokens = _avoid_tokens(ctx.avoid)
+    forbidden = _derive_forbidden(ctx)
 
     items: list[dict[str, Any]] = []
     excluded: list[dict[str, Any]] = []
@@ -298,11 +376,21 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
     for cand in ctx.candidates:
         rep = cand.group.representative
 
-        # 하드 제외 — 아무리 점수가 높아도 못 사는 집은 추천이 아니다.
+        # 하드 제외 ① — 아무리 점수가 높아도 못 사는 집은 추천이 아니다.
         if budget and rep.ask_price_krw > budget:
             excluded.append({
                 "complex_id": cand.complex_id,
                 "reason": f"예산 초과 (호가 {rep.ask_price_krw:,}원 > 한도 {budget:,}원)",
+            })
+            continue
+
+        # 하드 제외 ② — 기피 조건은 가점 상쇄가 아니라 제외다(F5).
+        loc_assess = (evaluate_location(cand.location, avoid=avoid_tokens, as_of=ctx.as_of)
+                      if cand.location is not None else None)
+        if loc_assess is not None and loc_assess.excluded:
+            excluded.append({
+                "complex_id": cand.complex_id,
+                "reason": "; ".join(loc_assess.exclusion_reasons),
             })
             continue
 
@@ -312,17 +400,20 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
             band = fair_price_band(cand.trades, area_m2=cand.area_m2, as_of=ctx.as_of)
             median = band.median_krw
 
+        location = (_assessment_to_finding(loc_assess) if loc_assess is not None
+                    else insufficient("location-analyst",
+                                      ["입지 데이터(학군·교통·인프라) 미수집"]))
         findings = [
             finance,
             listing_finding(cand, median, ctx.as_of),
             valuation,
-            location_finding(cand, None, ctx.as_of),
+            location,
         ]
         scored = [f for f in findings if f.score is not None]
         total = (sum(f.score * f.confidence for f in scored) /
                  sum(f.confidence for f in scored)) if scored else 0.0
 
-        summary = portfolio_summary(findings, llm, ctx.forbidden_amounts)
+        summary = portfolio_summary(findings, llm, forbidden)
         items.append({
             "complex": {"id": cand.complex_id, "name": cand.complex_name},
             "unit_type": {"area_m2": cand.area_m2},
