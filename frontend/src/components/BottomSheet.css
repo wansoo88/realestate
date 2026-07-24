@@ -1,0 +1,65 @@
+.sheet {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+  border-radius: var(--radius) var(--radius) 0 0;
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, .12);
+  z-index: 10;
+  /* iOS 하단 홈 인디케이터 회피 */
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+.sheet__handle {
+  /* 48px 터치 영역 — 손가락으로 잡을 수 있어야 한다 */
+  min-height: var(--sheet-handle);
+  padding: var(--sp-2) var(--sp-4);
+  cursor: grab;
+  touch-action: none;         /* 브라우저 스크롤과 싸우지 않게 */
+  user-select: none;
+  flex: 0 0 auto;
+}
+
+.sheet__handle:active { cursor: grabbing; }
+
+.sheet__grip {
+  width: 40px;
+  height: 4px;
+  margin: 0 auto var(--sp-2);
+  border-radius: 2px;
+  background: var(--border);
+}
+
+.sheet__title {
+  margin: 0;
+  font-size: var(--fs-title);
+  font-weight: 600;
+}
+
+.sheet__body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;   /* 시트 스크롤이 지도로 넘어가지 않게 */
+  padding: 0 var(--sp-4) var(--sp-4);
+  -webkit-overflow-scrolling: touch;
+}
+
+/* 데스크톱: 시트가 아니라 우측 고정 패널 (ux/README.md §3) */
+@media (min-width: 900px) {
+  .sheet {
+    top: 0;
+    left: auto;
+    width: 420px;
+    height: 100% !important;
+    border-radius: 0;
+    border-top: none;
+    border-left: 1px solid var(--border);
+    box-shadow: none;
+  }
+  .sheet__grip { display: none; }
+  .sheet__handle { cursor: default; }
+}

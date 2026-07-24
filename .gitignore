@@ -25,6 +25,8 @@ dist/
 build/
 .next/
 coverage/
+*.tsbuildinfo
+.vite/
 *.log
 npm-debug.log*
 yarn-error.log*

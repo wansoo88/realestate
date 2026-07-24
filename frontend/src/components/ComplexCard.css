@@ -1,0 +1,61 @@
+.card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: var(--sp-3);
+  background: var(--bg-elev);
+  overflow: hidden;
+}
+
+.card--selected { border-color: var(--accent); border-width: 2px; }
+
+/* 예산 초과는 목록에서 지우지 않고 흐리게 — 왜 후보에 없는지 보이게 한다 */
+.card--over { opacity: .55; }
+
+.card__main {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: var(--sp-3) var(--sp-4);
+  background: none;
+  border: none;
+  border-radius: inherit;
+}
+
+.card__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-1);
+}
+
+.card__name {
+  margin: 0;
+  font-size: var(--fs-title);
+  font-weight: 600;
+}
+
+.card__over-badge { border-color: var(--warn); color: var(--warn); }
+
+.card__price {
+  margin: 0 0 var(--sp-1);
+  font-size: var(--fs-price);
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.card__conf { font-weight: 400; }
+
+.card__meta {
+  margin: 0;
+  font-size: var(--fs-caption);
+  color: var(--text-muted);
+}
+
+.card__asof {
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-caption);
+  color: var(--text-estimated);
+}

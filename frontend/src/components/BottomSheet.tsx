@@ -1,0 +1,124 @@
+/**
+ * 바텀시트 — 3단 스냅 (peek / half / full)
+ *
+ * 왜 이렇게 하나: 폰에서 지도와 리스트를 나란히 놓을 공간이 없다.
+ * 탭으로 전환하면 맥락이 끊긴다. 드래그로 비율을 바꾸는 게 한 화면에서 둘 다 보는 유일한 방법이다.
+ * (docs/02-design/ux/README.md §3)
+ */
+import { useCallback, useEffect, useRef, useState } from "react";
+import "./BottomSheet.css";
+
+export type SnapPoint = "peek" | "half" | "full";
+
+const SNAP_RATIO: Record<SnapPoint, number> = {
+  peek: 0.25,
+  half: 0.55,
+  full: 0.92,
+};
+
+const ORDER: SnapPoint[] = ["peek", "half", "full"];
+
+interface Props {
+  snap: SnapPoint;
+  onSnapChange: (s: SnapPoint) => void;
+  title: string;
+  children: React.ReactNode;
+}
+
+function nearestSnap(ratio: number): SnapPoint {
+  let best: SnapPoint = "peek";
+  let bestDist = Infinity;
+  for (const s of ORDER) {
+    const d = Math.abs(SNAP_RATIO[s] - ratio);
+    if (d < bestDist) {
+      bestDist = d;
+      best = s;
+    }
+  }
+  return best;
+}
+
+export function BottomSheet({ snap, onSnapChange, title, children }: Props) {
+  const [dragRatio, setDragRatio] = useState<number | null>(null);
+  const startY = useRef(0);
+  const startRatio = useRef(0);
+
+  const ratio = dragRatio ?? SNAP_RATIO[snap];
+
+  const onPointerDown = useCallback(
+    (e: React.PointerEvent) => {
+      (e.target as HTMLElement).setPointerCapture(e.pointerId);
+      startY.current = e.clientY;
+      startRatio.current = SNAP_RATIO[snap];
+      setDragRatio(SNAP_RATIO[snap]);
+    },
+    [snap],
+  );
+
+  const onPointerMove = useCallback(
+    (e: React.PointerEvent) => {
+      if (dragRatio === null) return;
+      const dy = startY.current - e.clientY;
+      const next = startRatio.current + dy / window.innerHeight;
+      setDragRatio(Math.min(0.95, Math.max(0.12, next)));
+    },
+    [dragRatio],
+  );
+
+  const onPointerUp = useCallback(() => {
+    if (dragRatio === null) return;
+    onSnapChange(nearestSnap(dragRatio));
+    setDragRatio(null);
+  }, [dragRatio, onSnapChange]);
+
+  // 키보드로도 조작 가능해야 한다(접근성). 드래그만 되면 스크린리더 사용자가 못 쓴다.
+  const onKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      const idx = ORDER.indexOf(snap);
+      if (e.key === "ArrowUp" && idx < ORDER.length - 1) {
+        e.preventDefault();
+        onSnapChange(ORDER[idx + 1]);
+      } else if (e.key === "ArrowDown" && idx > 0) {
+        e.preventDefault();
+        onSnapChange(ORDER[idx - 1]);
+      }
+    },
+    [snap, onSnapChange],
+  );
+
+  useEffect(() => {
+    // 드래그 중 텍스트 선택 방지
+    document.body.style.userSelect = dragRatio === null ? "" : "none";
+    return () => {
+      document.body.style.userSelect = "";
+    };
+  }, [dragRatio]);
+
+  return (
+    <section
+      className="sheet"
+      style={{ height: `${ratio * 100}%`, transition: dragRatio === null ? "height .2s ease" : "none" }}
+      aria-label={title}
+    >
+      <div
+        className="sheet__handle"
+        role="slider"
+        tabIndex={0}
+        aria-label="목록 크기 조절"
+        aria-valuemin={0}
+        aria-valuemax={2}
+        aria-valuenow={ORDER.indexOf(snap)}
+        aria-valuetext={{ peek: "작게", half: "중간", full: "크게" }[snap]}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerUp}
+        onKeyDown={onKeyDown}
+      >
+        <div className="sheet__grip" aria-hidden="true" />
+        <h2 className="sheet__title">{title}</h2>
+      </div>
+      <div className="sheet__body">{children}</div>
+    </section>
+  );
+}

@@ -1,0 +1,34 @@
+.map {
+  position: absolute;
+  inset: 0;
+  background: var(--bg-elev);
+}
+
+.map--error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  padding: var(--sp-6);
+  text-align: center;
+}
+
+.map__error-title { margin: 0; font-weight: 600; }
+
+.map__error-detail {
+  margin: 0;
+  font-size: var(--fs-caption);
+  color: var(--text-muted);
+  max-width: 32ch;
+}
+
+.map__error-hint {
+  margin: 0;
+  font-size: var(--fs-caption);
+  color: var(--text-estimated);
+}
+
+@media (min-width: 900px) {
+  .map { right: 420px; }
+}

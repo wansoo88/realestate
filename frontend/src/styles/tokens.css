@@ -1,0 +1,109 @@
+/* 디자인 토큰 — docs/02-design/ux/README.md §9
+   모바일 퍼스트: 폰(360px)을 기준으로 정하고 데스크톱에서 넓힌다. */
+
+:root {
+  color-scheme: light dark;
+
+  /* 색 — 한국 금융 관습: 상승 빨강, 하락 파랑 */
+  --price-up: #d92d20;
+  --price-down: #1570ef;
+
+  --bg: #ffffff;
+  --bg-elev: #f9fafb;
+  --border: #e4e7ec;
+  --text: #101828;
+  --text-muted: #667085;
+  --text-estimated: #98a2b3; /* 추정치는 흐리게 — 확정치와 시각적으로 구분 */
+  --accent: #175cd3;
+  --warn: #f79009;
+  --danger: #d92d20;
+
+  /* 간격 — 4px 그리드 */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-6: 24px;
+
+  /* 타이포 */
+  --fs-caption: 13px;
+  --fs-body: 16px;
+  --fs-price: 20px;
+  --fs-title: 18px;
+  --ff: system-ui, -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+  /* 금액은 등폭 — 세로로 비교할 때 자릿수가 맞아야 읽힌다 */
+  --ff-num: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+
+  /* 터치 — 지도 위 버튼은 특히 중요 */
+  --touch-min: 44px;
+  --sheet-handle: 48px;
+  --radius: 12px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0c111d;
+    --bg-elev: #161b26;
+    --border: #333741;
+    --text: #f5f5f6;
+    --text-muted: #94969c;
+    --text-estimated: #85888e;
+    --accent: #84caff;
+    --price-up: #f97066;
+    --price-down: #53b1fd;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: var(--ff);
+  font-size: var(--fs-body);
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  /* 바텀시트 드래그 중 페이지가 같이 움직이지 않게 */
+  overscroll-behavior: none;
+}
+
+button {
+  font: inherit;
+  min-height: var(--touch-min);
+  min-width: var(--touch-min);
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--text);
+  cursor: pointer;
+}
+
+button:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.num { font-family: var(--ff-num); font-variant-numeric: tabular-nums; }
+
+/* 추정치 표기 — 이 제품의 정체성이다. 모르는 걸 모른다고 보여준다. */
+.estimated { color: var(--text-estimated); }
+
+.badge {
+  display: inline-block;
+  padding: 2px var(--sp-2);
+  border-radius: 999px;
+  font-size: var(--fs-caption);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+}
+
+.badge--estimated { border-style: dashed; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}
