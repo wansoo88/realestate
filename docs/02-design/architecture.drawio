@@ -1,5 +1,102 @@
-# architecture.drawio — 2. 설계
+<mxfile host="app.diagrams.net" modified="2026-07-24T00:00:00.000Z" agent="data-product-studio" version="24.0.0">
+  <diagram name="pjt13-realestate 시스템 아키텍처" id="arch-main">
+    <mxGraphModel dx="1400" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1300" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
 
-> data-product-studio 골격. 이 단계 스킬 실행 시 채워집니다.
+        <mxCell id="vps" value="iwinv VPS (Ubuntu · 공인 IP) — Docker Compose 단일 호스트" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fontSize=13;fontStyle=1;fillColor=#f5f5f5;strokeColor=#666666;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="150" width="780" height="670" as="geometry" />
+        </mxCell>
 
-(아직 작성 전)
+        <mxCell id="browser" value="모바일 브라우저 (1차)&#10;React 반응형 웹 · 모바일 퍼스트" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="120" y="40" width="230" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="rnapp" value="React Native 앱 (2차)&#10;웹 컴포넌트 로직 재사용" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="400" y="40" width="230" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="nginx" value="nginx — TLS 종단 · 정적 서빙 · rate limit&#10;443/80 만 외부 개방 · Let's Encrypt 자동갱신" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="1">
+          <mxGeometry x="80" y="200" width="700" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="api" value="api — FastAPI / uvicorn&#10;인증(JWT) · 매물 조회 · 자산 프로필&#10;추천 요청은 큐에 적재하고 즉시 응답" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="80" y="300" width="330" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="redis" value="redis&#10;작업 큐 + 분석결과 캐시&#10;(Claude API 비용이 주 변동비 → 캐싱 필수)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="450" y="300" width="330" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="wingest" value="worker-ingest — 수집 배치&#10;실거래가 일 1회 · 호가 수 시간 · 기초자료 주 1회&#10;정규화 · 중복제거 · 출처/수집시각 기록" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="1">
+          <mxGeometry x="80" y="420" width="330" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="wagent" value="worker-agent — 분석 실행&#10;전문가 에이전트 8종 오케스트레이션&#10;규칙 계산(세금·대출) + LLM 추론 분리" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="1">
+          <mxGeometry x="450" y="420" width="330" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="db" value="db — PostgreSQL 16 + PostGIS&#10;공간 인덱스(GiST) · 실거래 이력 파티셔닝 · 민감컬럼 암호화&#10;⛔ 5432 외부 미개방 (Docker 내부 네트워크 전용)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="80" y="550" width="700" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="backup" value="backup — pg_dump 일 1회 + 오프사이트 보관 (단일 서버 = 단일 장애점 대응)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999999;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="80" y="680" width="700" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="kakao" value="카카오맵 API&#10;지도 타일 · 마커 군집&#10;(브라우저에서 직접 호출)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;" vertex="1" parent="1">
+          <mxGeometry x="890" y="60" width="250" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="claude" value="Anthropic Claude API&#10;에이전트 분석 · 근거 문장 생성" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;" vertex="1" parent="1">
+          <mxGeometry x="890" y="300" width="250" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="pubapi" value="공공 오픈API (1순위)&#10;국토부 실거래가 · 공공데이터포털&#10;부동산원 통계 · 정책 고시" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;" vertex="1" parent="1">
+          <mxGeometry x="890" y="420" width="250" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="portal" value="포털 매물 호가 (보조)&#10;⚠️ 약관 준수 · rate limit&#10;막혀도 서비스 성립하도록 이중화" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#b85450;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="890" y="520" width="250" height="70" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e1" value="HTTPS" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;" edge="1" parent="1" source="browser" target="nginx">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" value="HTTPS" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;dashed=1;" edge="1" parent="1" source="rnapp" target="nginx">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" value="지도 SDK" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;dashed=1;" edge="1" parent="1" source="browser" target="kakao">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" value="/api 리버스 프록시" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;" edge="1" parent="1" source="nginx" target="api">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" value="작업 적재 · 캐시 조회" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;" edge="1" parent="1" source="api" target="redis">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" value="작업 소비" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;" edge="1" parent="1" source="redis" target="wagent">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7" value="조회" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;" edge="1" parent="1" source="api" target="db">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e8" value="적재" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;" edge="1" parent="1" source="wingest" target="db">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e9" value="조회 · 결과 저장" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;" edge="1" parent="1" source="wagent" target="db">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e10" value="분석 호출" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;" edge="1" parent="1" source="wagent" target="claude">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e11" value="1순위 수집" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;" edge="1" parent="1" source="wingest" target="pubapi">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e12" value="보조 수집" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;dashed=1;" edge="1" parent="1" source="wingest" target="portal">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e13" value="일 1회 덤프" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;dashed=1;" edge="1" parent="1" source="db" target="backup">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

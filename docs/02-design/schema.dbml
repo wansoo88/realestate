@@ -1,0 +1,268 @@
+// schema.dbml — 부동산 AI 자문 시스템 (PostgreSQL 16 + PostGIS)
+// 2026-07-24 · dbdiagram.io 에 붙여넣으면 시각화됨
+// 설계 근거와 한계는 erd.md 참조 (특히 §0: 실거래에 '동' 정보 없음)
+
+//==================== 공간 · 마스터 ====================
+
+Table region {
+  code       char(10) [pk, note: '법정동코드']
+  sido       text
+  sigungu    text
+  dong       text
+  geom       geometry [note: 'MULTIPOLYGON,4326 · GIST']
+  Note: '수도권만 적재 (서울·경기·인천)'
+}
+
+Table complex {
+  id                 bigint [pk, increment]
+  region_code        char(10) [ref: > region.code]
+  name               text [not null, note: '단지명']
+  address_road       text
+  address_jibun      text
+  geom               geometry [note: 'POINT,4326 · GIST']
+  built_year         int
+  total_households   int
+  total_buildings    int
+  floor_area_ratio   numeric(6,2) [note: '용적률 — 재건축 사업성 판단']
+  building_coverage  numeric(6,2) [note: '건폐율']
+  heating_type       text
+  source             text
+  updated_at         timestamptz
+
+  indexes {
+    (region_code, name)
+    geom [type: gist]
+  }
+}
+
+Table building {
+  id             bigint [pk, increment]
+  complex_id     bigint [ref: > complex.id]
+  name           text [note: '101동']
+  geom           geometry [note: 'POINT,4326 · 동별 가치 추정의 유일한 근거']
+  floors         int
+  households     int
+  direction_deg  smallint [note: '향(방위각 0~359)']
+  source         text [note: '좌표 출처 — 건축물대장/지도API/수기']
+
+  indexes {
+    complex_id
+    geom [type: gist]
+  }
+  Note: '실거래에 동 정보가 없으므로, 이 좌표로 입지를 추정해 동별 편차를 간접 산출한다. 추정치임을 반드시 표기할 것.'
+}
+
+Table unit_type {
+  id              bigint [pk, increment]
+  complex_id      bigint [ref: > complex.id]
+  area_m2         numeric(8,4) [not null, note: '전용면적']
+  supply_area_m2  numeric(8,4) [note: '공급면적']
+  type_name       text [note: '84A']
+  rooms           smallint
+  baths           smallint
+
+  indexes { (complex_id, area_m2) }
+}
+
+//==================== 거래 · 시세 ====================
+
+Table trade {
+  id            bigint [pk, increment]
+  complex_id    bigint [ref: > complex.id]
+  unit_type_id  bigint [ref: > unit_type.id, note: 'nullable — 면적 매칭 실패 가능']
+  contract_date date [not null, note: 'PARTITION KEY (RANGE, 연 단위)']
+  price_krw     bigint [not null, note: '거래금액(원)']
+  floor         smallint [note: '층 — 동(棟)은 공개되지 않음']
+  area_m2       numeric(8,4)
+  is_cancelled  boolean [default: false, note: '해제여부']
+  registered_at date [note: '등기일자']
+  trade_type    text [note: '중개거래/직거래']
+  source        text [not null]
+  ingested_at   timestamptz [not null]
+
+  indexes {
+    (complex_id, contract_date)
+    (complex_id, area_m2, floor)
+  }
+  Note: '확정된 과거 거래. 신고 지연 최대 30일 → "현재 시세"는 항상 추정치. 호가와 절대 섞지 말 것.'
+}
+
+Table listing {
+  id            bigint [pk, increment]
+  complex_id    bigint [ref: > complex.id]
+  building_id   bigint [ref: > building.id, note: 'nullable — 동이 표기된 매물만']
+  unit_type_id  bigint [ref: > unit_type.id]
+  ask_price_krw bigint [not null, note: '호가']
+  floor         smallint
+  area_m2       numeric(8,4)
+  status        text [note: 'active/traded/withdrawn']
+  listed_at     date
+  agency        text [note: '중개사']
+  source        text [not null]
+  collected_at  timestamptz [not null]
+  duplicate_of  bigint [ref: > listing.id, note: '중복 대표건 — 삭제하지 않고 연결']
+  trust_score   numeric(4,3) [note: '허위·미끼 의심도 0~1']
+
+  indexes {
+    (complex_id, status)
+    duplicate_of
+  }
+  Note: '희망 가격이며 허위·미끼 포함 가능. 중복 등록이 흔하므로 duplicate_of 로 묶되 삭제하지 않는다(중개사 수 자체가 신호).'
+}
+
+Table market_index {
+  id                 bigint [pk, increment]
+  region_code        char(10) [ref: > region.code]
+  as_of              date [not null, note: '기준일']
+  jeonse_ratio       numeric(6,3) [note: '전세가율']
+  unsold_units       int [note: '미분양']
+  buyer_superiority  numeric(6,2) [note: '매수우위지수']
+  move_in_supply     int [note: '입주물량']
+  base_rate          numeric(5,3) [note: '기준금리']
+  source             text [not null]
+
+  indexes { (region_code, as_of) }
+  Note: 'market-timing-analyst 의 입력'
+}
+
+//==================== 정책 · 정비사업 ====================
+
+Table policy {
+  id             bigint [pk, increment]
+  title          text [not null]
+  category       text [note: '규제지역/대출/세제/공급']
+  effective_from date [not null, note: '발효일 — 기준일자 없는 정책은 사용 금지']
+  effective_to   date
+  source_url     text [not null, note: '출처 필수 (G2)']
+  summary        text
+}
+
+Table policy_region {
+  policy_id   bigint [ref: > policy.id]
+  region_code char(10) [ref: > region.code]
+  indexes { (region_code, policy_id) [pk] }
+}
+
+Table redevelopment {
+  id                bigint [pk, increment]
+  complex_id        bigint [ref: > complex.id]
+  stage             text [note: '조합설립/사업시행인가/관리처분/착공']
+  stage_date        date
+  est_extra_cost_krw bigint [note: '추가분담금 추정 — 반드시 추정임을 표기']
+  source_url        text
+}
+
+//==================== 입지 ====================
+
+Table poi {
+  id       bigint [pk, increment]
+  category text [not null, note: 'school/subway/mart/hospital/park/hazard']
+  name     text
+  geom     geometry [note: 'POINT,4326 · GIST']
+  attrs    jsonb [note: '학업성취도·노선·개통예정일 등']
+  source   text
+
+  indexes {
+    category
+    geom [type: gist]
+  }
+}
+
+Table school_district {
+  id            bigint [pk, increment]
+  school_poi_id bigint [ref: > poi.id]
+  geom          geometry [note: 'MULTIPOLYGON,4326 · 학구도 · GIST']
+  source        text
+}
+
+Table transit_plan {
+  id            bigint [pk, increment]
+  name          text [note: 'GTX-A / 신안산선 등']
+  geom          geometry [note: 'LINESTRING or POINT,4326']
+  open_expected date [note: '개통 예정 — 지연 흔함, 신뢰도 낮게']
+  status        text [note: '계획/착공/개통']
+  source_url    text
+}
+
+//==================== 사용자 (민감) ====================
+
+Table app_user {
+  id            bigint [pk, increment]
+  email         text [unique, not null]
+  password_hash text [not null, note: 'argon2id']
+  created_at    timestamptz
+}
+
+Table user_profile {
+  user_id              bigint [pk, ref: - app_user.id]
+  cash_krw_enc         bytea [note: '🔐 보유현금 — 암호화']
+  income_krw_enc       bytea [note: '🔐 연소득 — 암호화']
+  existing_loan_krw_enc bytea [note: '🔐 기존대출 — 암호화']
+  owned_houses         smallint [note: '보유주택수 — 세금 계산 필수, 평문']
+  household_size       smallint
+  updated_at           timestamptz
+  Note: '금액 3종은 절대 평문 저장 금지. 로그·에러메시지에도 노출 금지(G3).'
+}
+
+Table user_preference {
+  id      bigint [pk, increment]
+  user_id bigint [ref: > app_user.id]
+  prefer  jsonb [note: '선호: 학군/역세권/신축/대단지']
+  avoid   jsonb [note: '기피: 1층/대로변/재건축리스크']
+  weights jsonb [note: '가중치']
+}
+
+//==================== 분석 결과 ====================
+
+Table recommendation_job {
+  id                bigint [pk, increment]
+  user_id           bigint [ref: > app_user.id]
+  criteria_snapshot jsonb [note: '요청 시점 조건 동결 — 재현성(G2)']
+  status            text [note: 'queued/running/done/failed']
+  created_at        timestamptz
+  completed_at      timestamptz
+
+  indexes { (user_id, created_at) }
+}
+
+Table recommendation_item {
+  id            bigint [pk, increment]
+  job_id        bigint [ref: > recommendation_job.id]
+  complex_id    bigint [ref: > complex.id]
+  building_id   bigint [ref: > building.id, note: 'nullable — 동 추천은 추정']
+  unit_type_id  bigint [ref: > unit_type.id]
+  rank          smallint
+  total_score   numeric(6,3)
+  est_price_krw bigint [note: '적정가 추정']
+  timing_signal text [note: '매수/관망/회피']
+
+  indexes { (job_id, rank) }
+}
+
+Table agent_finding {
+  id         bigint [pk, increment]
+  item_id    bigint [ref: > recommendation_item.id]
+  agent_id   text [not null, note: 'listing-researcher / location-analyst / finance-tax-advisor / valuation-trader / policy-researcher / market-timing-analyst / risk-auditor / portfolio-advisor']
+  score      numeric(6,3)
+  verdict    text
+  rationale  text [note: '근거 문장']
+  evidence   jsonb [not null, note: '{claim, source, as_of, verifier, data_rows} — 출처·기준일자 없으면 반려(G2)']
+  confidence numeric(4,3) [note: '0~1 · 동별 추정 등은 낮게']
+
+  indexes { (item_id, agent_id) }
+}
+
+//==================== 운영 ====================
+
+Table ingest_log {
+  id           bigint [pk, increment]
+  source       text [not null]
+  target_table text
+  started_at   timestamptz
+  finished_at  timestamptz
+  rows_ok      int
+  rows_failed  int
+  status       text [note: 'ok/partial/failed']
+  message      text
+  Note: '수집 실패를 조용히 넘기지 않기 위한 원장. 0건 연속 시 경보.'
+}

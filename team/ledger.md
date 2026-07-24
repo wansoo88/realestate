@@ -8,3 +8,5 @@
 |---|---|---|---|---|---|---|
 | 2026-07-24-00-team | 2026-07-24 | (전원) | 팀 구성·킥오프(역할 숙지) | none | dispatched | `team/CHARTER.md`, `team/roles/*.md` — re-domain·re-arch·re-data·re-ux·re-review 5인 부팅 |
 | 2026-07-24-01-stage1 | 2026-07-24 | re-pm | 1단계 인터뷰·골격 생성 | none | done | `docs/01-interview/*`, `CLAUDE.md`, `skill.md`. CR-001·SR-001(문서 한정) PASS. GitHub push 완료 |
+| 2026-07-24-02-design | 2026-07-24 | re-pm | 2단계 설계 전체 (워커 부재로 PM 직접 수행) | review-required | done | `docs/02-design/**` 11개 문서. herdr API 리스너 다운으로 워커 위임 불가 → PM 직접 작성. **re-review 복구 시 G2 근거감사 재수행 필요** |
+| 2026-07-24-03-team | 2026-07-24 | (전원) | herdr 팀 복구 | none | blocked | herdr 서버는 살아있으나 API 소켓(named pipe) 소실 → CLI 제어 불가. 서버 재시작 필요(타 워크스페이스 11개 에이전트 영향) — 사람 결정으로 **보류** |

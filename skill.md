@@ -7,10 +7,12 @@
 |---|---|---|
 | **orchestrator (PM/PMO)** | 총괄 | ▶ 상시 |
 | project-interview | 1 인터뷰 | ✅ 완료 |
-| architecture-design | 2 설계 | ⬜ 대기 |
-| db-modeling | 2 설계 | ⬜ 대기 |
-| security-design | 2 설계 | ⬜ 대기 |
-| implementation-plan | 3 구현 | ⬜ 대기 |
+| architecture-design | 2 설계 | ✅ 완료 (AWS 3-tier → 단일 VPS Docker Compose 로 치환) |
+| db-modeling | 2 설계 | ✅ 완료 (`erd.md`, `schema.dbml`) |
+| security-design | 2 설계 | ✅ 완료 (`security.md`) |
+| (추가) 에이전트 명세 | 2 설계 | ✅ 완료 (`docs/02-design/agents/` 8종) |
+| (추가) UI/UX 설계 | 2 설계 | ✅ 완료 (`docs/02-design/ux/`) |
+| implementation-plan | 3 구현 | ⬜ 다음 |
 | code-review | 3 구현 | ⬜ 필수 게이트 |
 | security-review | 3 구현 | ⬜ 필수 게이트 |
 | testing-unit-e2e | 4 테스트 | ⬜ 대기 |

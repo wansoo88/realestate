@@ -74,7 +74,13 @@
 
 ## 6단계 파이프라인 현황
 - [x] 1. 인터뷰 — 완료 (이 파일 생성)
-- [ ] 2. 설계 (아키텍처·ERD·보안)
+- [x] 2. 설계 — 완료 (2026-07-24) · `docs/02-design/`
+  - `architecture.drawio` + `architecture.md` — 단일 VPS + Docker Compose (AWS 3-tier 아님)
+  - `erd.md` + `schema.dbml` — PostGIS 데이터 모델
+  - `api-spec.md` — API 계약
+  - `security.md` — 위협모델·암호화·서버 하드닝 (R-01~R-04 해소)
+  - `agents/` — 런타임 전문가 에이전트 8종 명세 (MVP 5종)
+  - `ux/` — 모바일 퍼스트 UI/UX
 - [ ] 3. 구현 (**code-review·security-review 무조건**)
 - [ ] 4. 테스트 (단위·e2e)
 - [ ] 5. 모니터링
