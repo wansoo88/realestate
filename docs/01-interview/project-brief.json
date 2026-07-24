@@ -1,0 +1,65 @@
+{
+  "project_name": "부동산 AI 자문 시스템 (pjt13-realestate)",
+  "product_type": "AI 자문 웹앱 — 지도 기반 매물 추천 + 근거 리포트 (분석·예측 엔진 내장)",
+  "primary_users": "나 개인 (내 자산·소득·대출 한도 기준 실거주/투자 판단). 추후 가족·지인 확장 여지",
+  "core_problem": "① 실거래가·매물·학군·교통·세금·정책이 흩어져 종합 판단이 안 됨 ② 내 자산/대출 한도에 실제로 맞는 후보를 못 고름 ③ 언제 사야 하는지 타이밍 근거가 없음 ④ 같은 단지도 동·층·타입별 가치 차이를 몰라 비싸게 사거나 안 팔리는 물건을 잡음",
+  "success_metrics": "① 추천 근거가 납득돼 실제 매수 결정에 사용 ② 지역·매물 조사 시간 며칠→수분 ③ 내 조건(예산·세금·대출·선호)에 맞는 후보만 수천 건에서 5~10건으로 정확히 좁혀짐 ④ (장기) 추천 매물의 사후 수익률이 시장 평균 초과",
+
+  "data_sources": [
+    "공공 오픈API (국토교통부 실거래가, 공공데이터포털, 부동산원)",
+    "포털 매물(호가) 수집 — 네이버 부동산 등",
+    "공공 기초자료 (공시가격, 건축물대장, 학교알리미, 지하철/노선, 인구·세대)",
+    "정책·고시 문서 (국토부 보도자료, 지자체 정비사업 고시)"
+  ],
+  "data_scale": "medium",
+  "refresh_cycle": "매물 준실시간(수시간) / 실거래가 일 1회 배치 / 정책·인프라 주 1회",
+  "sensitive_data": "개인 금융정보 (본인 자산·소득·대출한도) + 로그인 계정 — 암호화 저장 필요",
+
+  "cloud": "자체 서버 (iwinv VPS, <DEPLOY_HOST>) — Docker 기반 배포. 실제 접속 정보는 저장소 밖 deploy-target.local.md 참조",
+  "database": "PostgreSQL + PostGIS (공간쿼리)",
+  "frontend": "React 반응형 웹 (모바일 퍼스트) → React Native 앱 확장",
+  "backend": "python-fastapi",
+  "docker": true,
+
+  "scale_users": "few",
+  "security_requirements": "자산·소득·대출 정보 서버 저장 + 컬럼 암호화(예: pgcrypto/앱단 AES) + 로그인 인증 필수. 공인 IP 노출 서버이므로 root 직접 SSH 금지 → 배포 전용 계정 + 키 기반 접속 + 방화벽/포트 제한. HTTPS 필수. 포털 매물 수집은 개인 비상업 용도 전제 + robots/이용약관 준수 + 수집 속도 제한(rate limit), 공공API만으로도 서비스가 성립하도록 이중화.",
+  "timeline": "2-3m",
+  "team": "solo",
+  "doc_store": "confluence",
+  "mode": "new",
+  "current_stage": 1,
+  "created": "2026-07-24",
+
+  "domain": {
+    "target_regions": "수도권 전체 (서울 25개구 + 경기 + 인천)",
+    "property_types": ["아파트 (재건축 포함)"],
+    "map_api": "카카오맵 API (주소→좌표 변환, 마커 군집)",
+    "mobile_target": "React Native 네이티브 앱까지 (웹 반응형 선행 → 앱 확장)",
+    "agent_deployment": "런타임(웹앱 내 Claude API 호출 분석) + 개발 보조(Claude Code 스킬) 양쪽"
+  },
+
+  "runtime_agents": [
+    {"id": "listing-researcher", "name": "매물 리서처", "role": "조건에 맞는 매물 수집·정규화·중복 제거, 허위/미끼매물 탐지, 급매·장기 미거래 물건 식별"},
+    {"id": "location-analyst", "name": "지역 전문가", "role": "학군(학구도·학업성취도·학원가), 교통(역세권·GTX·신설노선 호재), 생활 인프라(마트·병원·공원), 유해시설·소음 등 입지 평가"},
+    {"id": "finance-tax-advisor", "name": "세금·대출 전문가", "role": "취득세·보유세(재산세/종부세)·양도세 시뮬레이션, LTV/DSR/DTI 한도 계산, 내 자산 기준 실구매 가능 금액 산출"},
+    {"id": "valuation-trader", "name": "매매 전문가", "role": "단지/동/층/향/타입별 가격 편차 분석, 적정가 밴드 산출, 매도 호가와 실거래가 갭, 거래회전율·환금성 판정"},
+    {"id": "policy-researcher", "name": "정책 연구가", "role": "규제지역·대출규제·세제개편·공급계획·정비사업 단계 추적 및 정책 변화가 대상 매물에 미칠 영향 예측"},
+    {"id": "market-timing-analyst", "name": "타이밍 분석가", "role": "전세가율·미분양·매수우위지수·금리·입주물량 기반 매수 타이밍 신호 (핵심 문제 ③ 대응)"},
+    {"id": "risk-auditor", "name": "리스크 검증가", "role": "권리관계·근저당, 재건축 사업성·추가분담금, 깡통전세, 노후도·하자 등 하방 리스크 점검"},
+    {"id": "portfolio-advisor", "name": "종합 자문가", "role": "위 전문가 의견을 사용자 자산·선호·기피 조건으로 가중 종합해 '언제·어느 단지·어느 동·왜'를 사유와 함께 최종 리포트로 생성"}
+  ],
+
+  "dev_agents_extra": [
+    {"id": "ui-ux-designer", "role": "모바일 퍼스트 UI/UX 설계 — 지도 조작성, 한 손 도달 범위, 리스트↔지도 전환, 리포트 가독성, 디자인 시스템 (사용자 요청으로 추가)"},
+    {"id": "mobile-react-native", "role": "React Native 앱 구현 및 웹 컴포넌트 로직 재사용 전략"},
+    {"id": "data-engineer", "role": "공공API 수집·크롤링 파이프라인, 정규화·중복제거, 배치 스케줄링"}
+  ],
+
+  "_assumed": [
+    "project_name (디렉터리명 기반 임시 — 원하는 이름 있으면 알려주세요)",
+    "data_scale (수도권 아파트 실거래 10년치+매물 기준 수백만 건으로 추정)",
+    "team (개인 프로젝트로 solo 가정)",
+    "doc_store (기본값 confluence — 로컬 md만 쓸 거면 변경)",
+    "runtime_agents 8종 구성 (제가 도메인 기준으로 제안한 로스터 — 2단계에서 조정 가능)"
+  ]
+}

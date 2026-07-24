@@ -1,0 +1,46 @@
+# === 비밀/접속 정보 (절대 커밋 금지) ===
+.env
+.env.*
+!.env.example
+*.local.md
+secrets/
+*.pem
+*.key
+id_rsa*
+deploy-target.local.md
+
+# === Python ===
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# === Node / React / React Native ===
+node_modules/
+dist/
+build/
+.next/
+coverage/
+*.log
+npm-debug.log*
+yarn-error.log*
+.expo/
+
+# === 데이터 (원천 수집물은 커밋하지 않음) ===
+data/raw/
+data/cache/
+*.csv
+*.parquet
+*.sqlite
+*.db
+
+# === IDE / OS ===
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
