@@ -1,0 +1,25 @@
+# 웹
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic[email]==2.10.4
+pydantic-settings==2.7.1
+
+# DB
+SQLAlchemy==2.0.36
+psycopg[binary]==3.2.3
+GeoAlchemy2==0.16.0
+
+# 보안
+argon2-cffi==25.1.0
+PyJWT==2.12.1
+cryptography==44.0.0
+
+# 큐 · 캐시
+redis==5.2.1
+
+# 수집
+httpx==0.28.1
+PyYAML==6.0.2
+
+# 유틸
+python-ulid==3.0.0

@@ -1,0 +1,130 @@
+# tax_rules.yaml — 세율·대출한도 설정
+#
+# ⚠️ 이 파일은 **템플릿이며 아직 사용할 수 없습니다.**
+#    `status: unverified` 이므로 로더가 프로덕션에서 거부합니다.
+#
+# 왜 값이 비어 있나
+# -----------------
+# 부동산 세제·대출 규제는 자주 바뀝니다. 여기에 제가 기억하는 숫자를 적어 넣으면
+# 그 숫자가 근거처럼 굳어버리고, 틀렸을 때 사용자 예산이 수천만 원 어긋납니다.
+# 그래서 **공식 출처에서 확인한 값만** 채우도록 비워 두었습니다.
+#
+# 채우는 방법
+# -----------
+# 1. 아래 각 항목의 `rate_pct` 를 공식 출처에서 확인해 입력
+# 2. `source` / `source_url` / `as_of` 를 실제 근거로 채움
+# 3. 위택스·국세청 계산기와 대조 (backend/tests/test_affordability.py 참고)
+# 4. 검증이 끝나면 `status: verified` 로 변경
+#
+# 퍼센트 규약
+# -----------
+# 모든 `rate_pct` 와 `extras.*_pct` 는 **거래금액 대비 퍼센트**입니다.
+# (취득세 본세 1.0% + 지방교육세 0.1% → 합계 1.1%)
+# 이 규약을 어기면 계산이 조용히 틀어집니다.
+
+version: "template-2026-07-24"
+status: unverified          # verified 로 바꾸기 전까지 프로덕션에서 로딩 거부
+
+# --------------------------------------------------------------------------
+# 취득세 (거래금액 대비 %)
+# 위에서부터 먼저 매칭되는 구간이 적용됩니다. 순서가 중요합니다.
+#   when 접미사:  _max = 이하,  _min = 이상,  그 외 = 완전일치
+# --------------------------------------------------------------------------
+acquisition_tax:
+  - id: first_home_under_600m_small
+    when: { houses_owned_max: 1, price_max: 600000000, area_max: 85 }
+    rate_pct: null            # TODO 지방세법에서 확인
+    extras:
+      local_education_pct: null
+      rural_special_pct: 0.0  # 85㎡ 이하 농특세 비과세
+    source: "지방세법 제11조"
+    source_url: ""            # TODO
+    as_of: null               # TODO YYYY-MM-DD
+
+  - id: first_home_under_600m_large
+    when: { houses_owned_max: 1, price_max: 600000000 }
+    rate_pct: null
+    extras: { local_education_pct: null, rural_special_pct: null }
+    source: "지방세법 제11조"
+    source_url: ""
+    as_of: null
+
+  - id: first_home_600m_to_900m
+    when: { houses_owned_max: 1, price_max: 900000000 }
+    rate_pct: null            # 6~9억 구간은 누진 산식이 별도 — 확인 필요
+    extras: { local_education_pct: null, rural_special_pct: null }
+    source: "지방세법 제11조"
+    source_url: ""
+    as_of: null
+
+  - id: first_home_over_900m
+    when: { houses_owned_max: 1 }
+    rate_pct: null
+    extras: { local_education_pct: null, rural_special_pct: null }
+    source: "지방세법 제11조"
+    source_url: ""
+    as_of: null
+
+  - id: multi_home
+    when: {}                  # 그 외 전부 (다주택)
+    rate_pct: null            # 조정대상지역 여부에 따라 크게 달라짐 — 확인 필요
+    extras: { local_education_pct: null, rural_special_pct: null }
+    source: "지방세법 제13조의2"
+    source_url: ""
+    as_of: null
+
+# --------------------------------------------------------------------------
+# 중개보수 (거래금액 대비 % · 상한요율). cap_krw 로 한도액 지정 가능.
+# --------------------------------------------------------------------------
+brokerage_fee:
+  - id: under_200m
+    when: { price_max: 200000000 }
+    rate_pct: null
+    extras: { cap_krw: null }
+    source: "공인중개사법 시행규칙 별표"
+    source_url: ""
+    as_of: null
+
+  - id: under_900m
+    when: { price_max: 900000000 }
+    rate_pct: null
+    source: "공인중개사법 시행규칙 별표"
+    source_url: ""
+    as_of: null
+
+  - id: over_900m
+    when: {}
+    rate_pct: null
+    source: "공인중개사법 시행규칙 별표"
+    source_url: ""
+    as_of: null
+
+# --------------------------------------------------------------------------
+# 대출 규제
+# --------------------------------------------------------------------------
+lending:
+  ltv:
+    rate_pct: null            # 지역·주택수·목적별로 다름. 규제지역이면 별도 항목 필요
+    source: ""
+    source_url: ""
+    as_of: null
+  dsr:
+    rate_pct: null
+    source: ""
+    source_url: ""
+    as_of: null
+  dti:
+    rate_pct: null            # 적용 지역만
+    source: ""
+    source_url: ""
+    as_of: null
+
+# --------------------------------------------------------------------------
+# 정액 비용 (원). 추정치이며 그렇게 표기해야 함.
+# --------------------------------------------------------------------------
+fixed_costs:
+  registration_krw: null      # 등기·법무 대행 추정
+  moving_reserve_krw: null    # 이사·수리 예비비 (가용현금에서 차감)
+  source: "추정치 — 사용자 조정 가능"
+  source_url: ""
+  as_of: null

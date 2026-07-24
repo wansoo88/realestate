@@ -1,0 +1,101 @@
+# docker-compose.yml — 부동산 AI 자문 시스템
+# 설계: docs/02-design/architecture.md · 보안: docs/02-design/security.md §4.2
+#
+# ⚠️ db · redis 에 절대 `ports:` 를 추가하지 말 것.
+#    Docker 는 ufw 규칙을 우회해 호스트 포트를 열어버린다. 방화벽만 믿으면 안 된다.
+#    (security.md T1 — 5432 스캔 → 자산 테이블 덤프)
+#
+# 네트워크 분리
+#   edge : 외부 통신 가능. nginx 인바운드 + 워커의 아웃바운드(공공API·Claude API)
+#   data : internal=true → 외부 인터넷 단절. db·redis 는 여기에만 둔다.
+
+name: realestate
+
+services:
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./frontend/dist:/usr/share/nginx/html:ro
+      - certbot-conf:/etc/letsencrypt:ro
+    depends_on:
+      - api
+    networks: [edge]
+
+  api:
+    build: ./backend
+    restart: unless-stopped
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    env_file: .env
+    environment:
+      APP_ROLE: api
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_started }
+    networks: [edge, data]
+    # ports 없음 — nginx 를 통해서만 접근
+
+  worker-agent:
+    build: ./backend
+    restart: unless-stopped
+    command: python -m app.worker --queue analyze
+    env_file: .env
+    environment:
+      APP_ROLE: worker-agent
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_started }
+    networks: [edge, data]   # edge 필요: Claude API 아웃바운드
+
+  worker-ingest:
+    build: ./backend
+    restart: unless-stopped
+    command: python -m app.worker --queue ingest
+    env_file: .env
+    environment:
+      APP_ROLE: worker-ingest
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_started }
+    networks: [edge, data]   # edge 필요: 공공 오픈API 아웃바운드
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --save 60 1 --appendonly no
+    volumes:
+      - redisdata:/data
+    networks: [data]
+    # ports 없음 (의도적)
+
+  db:
+    image: postgis/postgis:16-3.4
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./backend/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [data]
+    # ports 없음 (의도적) — 외부에서 절대 접근 불가
+
+networks:
+  edge:
+  data:
+    internal: true
+
+volumes:
+  pgdata:
+  redisdata:
+  certbot-conf:

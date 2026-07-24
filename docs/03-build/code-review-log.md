@@ -109,3 +109,72 @@
 
 > ⚠️ **한계 명시**: PM 자체 검토이며 CHARTER §2 역할 분리 원칙상 정식 판정이 아니다.
 > herdr 복구 후 `re-review`가 **G2 근거 감사**를 포함해 재수행한다.
+
+---
+
+## CR-004 · 2026-07-24 · 3단계 구현 1차 (도메인 로직 · API · 수집기)
+
+**판정: PASS (제한적 — PM 자체 검토 · 미검증 영역 명시)**
+
+### 범위
+`backend/**`, `config/tax_rules.yaml`, `docker-compose.yml`, `deploy/nginx.conf`
+
+### 테스트 실측 결과
+```
+142 passed in 5.74s
+  test_affordability.py  21   자금 계산 (F2)
+  test_api.py            28   API 계약 · IDOR · 로그
+  test_ingest.py         24   실거래가 파싱 · rate limit
+  test_listings.py       18   중복제거 · 신뢰도
+  test_rules_loader.py    8   세율 설정 가드레일
+  test_security.py       24   암호화 · JWT · 마스킹
+  test_valuation.py      19   적정가 밴드 · 층효과 · 환금성
+```
+
+| # | 항목 | 결과 | 근거 |
+|---|---|---|---|
+| C1 | 레이어 경계 | ✅ PASS | `domain/` 이 DB·FastAPI 를 import 하지 않음 → Docker 없이 테스트 성립 |
+| C2 | 라우터가 얇은가 | ✅ PASS | 계산은 전부 `domain/`. 라우터는 검증·호출·직렬화만 |
+| C3 | 대출한도를 가격의 함수로 풀었는가 | ✅ PASS | 이분탐색 구현. `test_불변식_최대가격에서_부등식이_성립한다`, `test_단순합산보다_반드시_작다` 로 회귀 방지 |
+| C4 | 세율 하드코딩 | ✅ PASS | grep 결과 도메인 코드에 세율 상수 0건. 전부 `config` 경유 |
+| C5 | 표본 부족 처리 | ✅ PASS | `n<5` 면 밴드 미산출, 기간 확장 시 `expanded=True` 로 표기 |
+| C6 | 해제 거래 제외 | ✅ PASS | `test_해제거래가_밴드를_왜곡하지_않는다` |
+| C7 | 금액 단위 변환 | ✅ PASS | 국토부 만원→원 변환 테스트. 누락 시 시세가 1/10000 이 되는 치명적 버그 |
+| C8 | 미구현을 숨기지 않는가 | ✅ PASS | `app/worker.py` 가 조용히 도는 대신 **명시적으로 실패**. 추천 API 응답에 미구현 note |
+
+### 구현 중 발견해 고친 설계 결함
+
+1. **`trust_score` 부호가 문서마다 반대였다.**
+   `schema.dbml`·`erd.md`는 "의심도", `01-listing-researcher.md` 예시는 "0.82 = 양호"(신뢰도).
+   그대로 구현했으면 **추천 정렬이 뒤집혔다.** → **신뢰도(1=신뢰)** 로 통일하고 3개 문서 수정.
+
+2. **`docker-compose.yml`의 `back: internal: true` 가 워커의 아웃바운드를 막았다.**
+   worker-agent(Claude API)·worker-ingest(공공API)가 인터넷에 못 나간다. 배포 후에야 발견될 버그.
+   → `edge`(외부 통신) / `data`(internal) 로 분리하고 워커를 양쪽에 배치.
+
+3. **`NO_BODY_LOG_PATHS` 상수가 선언만 되고 쓰이지 않았다.**
+   보안 요구사항이 문서에만 있고 코드에 없는 상태. → 접근 로그 미들웨어로 실제 구현하고 테스트 추가.
+
+### ⚠️ 검증하지 못한 영역 (정직하게)
+
+| 영역 | 이유 | 이월 |
+|---|---|---|
+| **PostGIS 마이그레이션 실행** | 로컬에 Docker 없음 | 첫 배포 시 빈 DB 에 적용해 검증 |
+| **PostGIS 리포지토리 구현** | 위와 동일 — 현재 인메모리 구현만 존재 | 배포 환경에서 |
+| **공공API 실호출** | 서비스키 미발급 | 키 확보 후. 파싱은 픽스처로 검증됨 |
+| **에이전트 오케스트레이션(T7)** | 큐 구현 미확정 | 다음 작업 |
+| **프론트엔드(T8)** | 미착수 | 다음 작업 |
+| **세율 실제값** | 공식 출처 확인 필요 | `re-data` 담당 |
+
+> 이 목록이 길다는 건 3단계가 아직 안 끝났다는 뜻이다. 끝난 척하지 않는다.
+
+### 지적 사항 (다음 작업)
+
+| ID | 내용 |
+|---|---|
+| I-09 | `ProfileRecord` 에 기존대출 연 상환액 컬럼이 없어 DSR 계산이 항상 0 가정. 스키마·API 확장 필요 |
+| I-10 | `recommendation_job` 이 큐에 실제로 적재되지 않음 (worker 미구현) |
+| I-11 | `deploy/nginx.conf` 의 `proxy_params_custom` 파일 미작성 |
+| I-12 | 로그인 실패 횟수 제한이 nginx rate limit 에만 있고 앱 레벨 계정 잠금 미구현 |
+
+> ⚠️ **한계**: PM 자체 검토. herdr 복구 후 `re-review` 재감사 필요.

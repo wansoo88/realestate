@@ -101,7 +101,7 @@ Table listing {
   source        text [not null]
   collected_at  timestamptz [not null]
   duplicate_of  bigint [ref: > listing.id, note: '중복 대표건 — 삭제하지 않고 연결']
-  trust_score   numeric(4,3) [note: '허위·미끼 의심도 0~1']
+  trust_score   numeric(4,3) [note: '신뢰도 0~1 (1=신뢰, 0=의심). 의심도가 아님 — 부호 주의']
 
   indexes {
     (complex_id, status)

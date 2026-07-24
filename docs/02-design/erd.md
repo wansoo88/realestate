@@ -124,7 +124,7 @@ erDiagram
         text source
         timestamptz collected_at
         bigint duplicate_of FK "중복 대표건"
-        numeric trust_score "허위/미끼 의심도"
+        numeric trust_score "신뢰도 1=신뢰 0=의심"
     }
     MARKET_INDEX {
         bigint id PK
@@ -298,7 +298,8 @@ CREATE TABLE trade_2026 PARTITION OF trade
 **중복 판정 키(제안)**: `complex_id` + `area_m2` + `floor` + `ask_price_krw`(±1% 허용) + 활성 기간 겹침
 - 대표건 하나를 남기고 나머지는 `duplicate_of`로 연결 (**삭제하지 않는다** — 중개사 수 자체가
   "많이 나온 매물 = 안 팔리는 물건" 신호가 된다)
-- `trust_score`: 시세 대비 비정상 저가, 장기 미거래, 중복 과다 → 허위·미끼 의심도
+- `trust_score`: **신뢰도**(1=신뢰, 0=의심). 시세 대비 비정상 저가·장기 미거래·중복 과다로 하락.
+  ⚠️ 의심도가 아니라 신뢰도다. 부호를 뒤집으면 추천 정렬이 반대로 나온다.
 
 ---
 

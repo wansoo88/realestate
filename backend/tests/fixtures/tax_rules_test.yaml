@@ -1,0 +1,68 @@
+# ⚠️ 테스트 전용 가상 세율입니다. 실제 세율이 아닙니다. 절대 운영에 쓰지 마세요.
+#
+# 계산 로직만 검증하기 위한 값입니다. 값이 단순한 이유는 손으로 검산하기 위해서입니다.
+# 실제 세율은 config/tax_rules.yaml 에 공식 출처 확인 후 채웁니다.
+
+version: "TEST-FIXTURE-DO-NOT-USE"
+status: verified          # 테스트에서 로더를 통과시키기 위함
+
+acquisition_tax:
+  # 1주택 · 6억 이하 · 85㎡ 이하 → 합계 1.1%
+  - id: t_first_small
+    when: { houses_owned_max: 1, price_max: 600000000, area_max: 85 }
+    rate_pct: 1.0
+    extras: { local_education_pct: 0.1, rural_special_pct: 0.0 }
+    source: "TEST"
+    source_url: "https://example.test/acq-1"
+    as_of: "2026-07-01"
+
+  # 1주택 · 그 외 → 합계 1.1% (테스트 단순화)
+  - id: t_first_other
+    when: { houses_owned_max: 1 }
+    rate_pct: 1.0
+    extras: { local_education_pct: 0.1, rural_special_pct: 0.0 }
+    source: "TEST"
+    source_url: "https://example.test/acq-2"
+    as_of: "2026-07-01"
+
+  # 다주택 → 합계 8.4%
+  - id: t_multi
+    when: {}
+    rate_pct: 8.0
+    extras: { local_education_pct: 0.4 }
+    source: "TEST"
+    source_url: "https://example.test/acq-3"
+    as_of: "2026-07-01"
+
+brokerage_fee:
+  - id: t_brk_default
+    when: {}
+    rate_pct: 0.4
+    extras: { cap_krw: 8000000 }
+    source: "TEST"
+    source_url: "https://example.test/brk"
+    as_of: "2026-07-01"
+
+lending:
+  ltv:
+    rate_pct: 70.0
+    source: "TEST"
+    source_url: "https://example.test/ltv"
+    as_of: "2026-07-01"
+  dsr:
+    rate_pct: 40.0
+    source: "TEST"
+    source_url: "https://example.test/dsr"
+    as_of: "2026-07-01"
+  dti:
+    rate_pct: 60.0
+    source: "TEST"
+    source_url: "https://example.test/dti"
+    as_of: "2026-07-01"
+
+fixed_costs:
+  registration_krw: 1000000
+  moving_reserve_krw: 20000000
+  source: "TEST"
+  source_url: "https://example.test/fixed"
+  as_of: "2026-07-01"
