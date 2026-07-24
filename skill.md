@@ -12,9 +12,9 @@
 | security-design | 2 설계 | ✅ 완료 (`security.md`) |
 | (추가) 에이전트 명세 | 2 설계 | ✅ 완료 (`docs/02-design/agents/` 8종) |
 | (추가) UI/UX 설계 | 2 설계 | ✅ 완료 (`docs/02-design/ux/`) |
-| implementation-plan | 3 구현 | ⬜ 다음 |
-| code-review | 3 구현 | ⬜ 필수 게이트 |
-| security-review | 3 구현 | ⬜ 필수 게이트 |
+| implementation-plan | 3 구현 | ✅ 완료 |
+| code-review | 3 구현 | 🟡 CR-001~006 기록 (PM 자체 검토 — re-review 재감사 필요) |
+| security-review | 3 구현 | 🟡 SR-001~005 기록 (동일) |
 | testing-unit-e2e | 4 테스트 | ⬜ 대기 |
 | monitoring-setup | 5 모니터링 | ⬜ 대기 |
 | handover-check | 6 최종점검 | ⬜ 대기 |
