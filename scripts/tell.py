@@ -19,6 +19,14 @@ import shutil
 import subprocess
 import sys
 
+# Windows 콘솔이 cp949 라 em-dash(—)·화살표(→) 같은 문자에서 print 가 죽는다.
+# 메시지 자체(herdr send 인자)는 유니코드로 잘 전달되지만, 확인용 print 가 실패하면
+# 스크립트가 비정상 종료한 것처럼 보인다. 출력 인코딩만 안전하게 바꾼다.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 HERDR = shutil.which("herdr") or "herdr"
 
 
