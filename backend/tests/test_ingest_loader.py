@@ -41,6 +41,17 @@ def _silent_clock_limiter() -> RateLimiter:
     return RateLimiter(0.0, clock=lambda: t[0], sleeper=lambda s: None)
 
 
+def _deal_xml(*, cancelled: bool) -> str:
+    """같은 거래(◇◇ 도곡동 84.97㎡ 10층 15억 2026-06-10)를 정상/해제 두 버전으로."""
+    flag = "O" if cancelled else " "
+    extra = "<해제사유발생일>26.06.25</해제사유발생일>" if cancelled else ""
+    return f"""<response><header><resultCode>00</resultCode></header><body><items>
+      <item><거래금액>150,000</거래금액><년>2026</년><월>6</월><일>10</일>
+      <아파트>◇◇아파트</아파트><전용면적>84.97</전용면적><지역코드>11680</지역코드>
+      <법정동>도곡동</법정동><층>10</층><해제여부>{flag}</해제여부>{extra}</item>
+    </items></body></response>"""
+
+
 # ---------------------------------------------------------------------------
 # 파싱 — 픽스처가 기대대로 읽히는가
 # ---------------------------------------------------------------------------
@@ -61,7 +72,7 @@ def test_같은단지_다른층은_같은_단지타입_다른_거래(trades):
     a, b = trades[0], trades[1]  # ○○ 84.97 14층 / ○○ 84.97 3층
     assert normalize.complex_key(a) == normalize.complex_key(b)
     assert normalize.unit_type_key(a) == normalize.unit_type_key(b)
-    assert normalize.trade_dedup_key(a) != normalize.trade_dedup_key(b)
+    assert normalize.trade_natural_key(a) != normalize.trade_natural_key(b)
 
 
 def test_같은단지_다른면적은_다른_타입(trades):
@@ -70,8 +81,16 @@ def test_같은단지_다른면적은_다른_타입(trades):
     assert normalize.unit_type_key(a) != normalize.unit_type_key(c)
 
 
-def test_정확한_중복은_같은_dedup키(trades):
-    assert normalize.trade_dedup_key(trades[0]) == normalize.trade_dedup_key(trades[3])
+def test_정확한_중복은_같은_자연키(trades):
+    assert normalize.trade_natural_key(trades[0]) == normalize.trade_natural_key(trades[3])
+
+
+def test_자연키에는_해제여부가_들어가지_않는다():
+    """INGEST-2: 같은 거래는 정상이든 해제든 같은 자연키여야 upsert 로 원본을 갱신한다."""
+    normal = parse_response(_deal_xml(cancelled=False), now=NOW)[0]
+    cancelled = parse_response(_deal_xml(cancelled=True), now=NOW)[0]
+    assert normal.is_cancelled is False and cancelled.is_cancelled is True
+    assert normalize.trade_natural_key(normal) == normalize.trade_natural_key(cancelled)
 
 
 # ---------------------------------------------------------------------------
@@ -83,17 +102,17 @@ def test_적재_카운트(trades):
     res = loader.load(trades)
     assert res.complexes_created == 3       # ○○, △△, □□
     assert res.unit_types_created == 4      # ○○84.97, ○○59.98, △△74.90, □□74.52
-    assert res.trades_inserted == 5         # 6건 중 1건은 정확한 중복
-    assert res.trades_skipped_dup == 1
+    assert res.trades_inserted == 5         # 6건 중 1건은 같은 자연키(upsert)
+    assert res.trades_updated == 1
 
 
 def test_재수집은_멱등하다(trades):
-    """증분 수집이 최근 2개월을 다시 받아도 중복이 쌓이면 안 된다."""
+    """증분 수집이 최근 2개월을 다시 받아도 중복 행이 쌓이면 안 된다(upsert)."""
     loader = InMemoryTradeLoader()
     loader.load(trades)
     second = loader.load(trades)            # 같은 배치 재적재
     assert second.trades_inserted == 0
-    assert second.trades_skipped_dup == 6
+    assert second.trades_updated == 6
     assert second.complexes_created == 0
     assert second.unit_types_created == 0
     # 누적 총계
@@ -106,6 +125,30 @@ def test_해제거래도_적재되지만_플래그가_산다(trades):
     loader.load(trades)
     cancelled = [row for row in loader.trades.values() if row["is_cancelled"]]
     assert len(cancelled) == 1              # △△ 해제거래도 버리지 않는다
+
+
+def test_정상거래가_해제되면_시세에서_사라진다():
+    """★INGEST-2 회귀(CHARTER §0 최대 리스크): 허위신고 후 해제로 시세를 띄우는 조작 차단.
+
+    정상 15억이 유입돼 시세에 잡힌 뒤, 같은 거래가 해제되어 재유입되면 **기존 행이
+    is_cancelled=True 로 갱신**되어 시세(NOT is_cancelled)에서 사라져야 한다. 중복 행이
+    생겨 원본 15억이 남으면 안 된다.
+    """
+    loader = InMemoryTradeLoader()
+    loader.load(parse_response(_deal_xml(cancelled=False), now=NOW))
+
+    # 정상일 때는 시세(active)에 15억이 잡힌다
+    assert any(r["price_krw"] == 1_500_000_000 for r in loader.active_trades())
+
+    # 같은 거래가 해제되어 재유입 → 새 행이 아니라 기존 행 갱신
+    res = loader.load(parse_response(_deal_xml(cancelled=True), now=NOW))
+    assert res.trades_inserted == 0
+    assert res.trades_updated == 1
+    assert len(loader.trades) == 1          # 중복 행이 생기지 않는다
+
+    # 해제됐으므로 시세에서 사라진다 — 원본 15억이 통계에 남으면 안 된다
+    assert loader.active_trades() == []
+    assert all(r["is_cancelled"] for r in loader.trades.values())
 
 
 def test_region_resolver로_법정동코드를_채운다(trades):

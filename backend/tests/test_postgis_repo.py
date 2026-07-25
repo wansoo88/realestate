@@ -441,6 +441,377 @@ def test_작업_스냅샷과_항목이_순위대로_온다(repo, engine):
 
 
 # ---------------------------------------------------------------------------
+# 추천 러너 핸드오프 (docs/domain/recommendation-execution.md §repo인터페이스)
+#   러너가 duck-typing 으로 부르므로, 시그니처가 어긋나도 크래시 대신
+#   **조용히 추천이 비어** 버린다. 그래서 실제 동작을 여기서 못 박는다.
+# ---------------------------------------------------------------------------
+
+def test_후보조회는_시군구_5자리로_접두매칭한다(repo, engine):
+    """region_codes 는 5자리 시군구, complex.region_code 는 10자리 법정동코드다.
+
+    완전일치로 짜면 후보가 **항상 0건**이 되고 러너는 그걸 정상으로 취급한다.
+    """
+    gangnam = _seed_complex(engine, name="강남단지", lon=127.05, lat=37.50,
+                            region="1168010100")
+    bundang = _seed_complex(engine, name="분당단지", lon=127.11, lat=37.36,
+                            region="4113510100")
+
+    assert [c.id for c in repo.recommendation_candidates(region_codes=["11680"])] == [gangnam]
+    assert [c.id for c in repo.recommendation_candidates(region_codes=["41135"])] == [bundang]
+    got = repo.recommendation_candidates(region_codes=["11680", "41135"])
+    assert {c.id for c in got} == {gangnam, bundang}
+    # 빈 목록이면 전체 (러너가 지역 미지정으로 부를 수 있다)
+    assert len(repo.recommendation_candidates(region_codes=[])) == 2
+    # 10자리를 그대로 줘도 동작한다
+    assert [c.id for c in repo.recommendation_candidates(
+        region_codes=["1168010100"])] == [gangnam]
+
+
+def test_후보조회는_예산으로_거르지_않는다(repo, engine):
+    """예산 초과 단지도 넘기고 파이프라인이 사유와 함께 제외한다(ux/README.md §4)."""
+    _seed_complex(engine, name="비싼단지", lon=127.05, lat=37.50)
+    got = repo.recommendation_candidates(region_codes=["11680"], max_price_krw=1)
+    assert len(got) == 1
+
+
+def test_후보조회에_시세와_매물수가_실린다(repo, engine):
+    cid = _seed_complex(engine, name="후보단지", lon=127.05, lat=37.50)
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO trade (complex_id, contract_date, price_krw, source)
+            VALUES (:cid, DATE '2026-06-01', 1600000000, 'molit')
+        """), {"cid": cid})
+        conn.execute(text("""
+            INSERT INTO listing (complex_id, ask_price_krw, status, source)
+            VALUES (:cid, 1700000000, 'active', 'portal')
+        """), {"cid": cid})
+
+    c = repo.recommendation_candidates(region_codes=["11680"])[0]
+    assert c.recent_price_krw == 1600000000
+    assert c.price_as_of == "2026-06-01"
+    assert c.active_listings == 1
+
+
+def test_활성매물만_중복포함해서_넘긴다(repo, engine):
+    """중복 제거는 러너의 group_duplicates 가 한다 — 미리 지우면 근거를 못 만든다."""
+    cid = _seed_complex(engine, name="매물단지", lon=127.05, lat=37.50)
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO listing (complex_id, ask_price_krw, area_m2, floor,
+                                 listed_at, status, agency, source) VALUES
+              (:cid, 1700000000, 84.9, 10, DATE '2026-07-01', 'active', 'A공인', 'p1'),
+              (:cid, 1700000000, 84.9, 10, DATE '2026-07-02', 'active', 'B공인', 'p2'),
+              (:cid, 1650000000, 84.9,  3, DATE '2026-06-01', 'withdrawn', 'C공인', 'p3')
+        """), {"cid": cid})
+
+    rows = repo.listings_for_complex(cid)
+    assert len(rows) == 2                       # withdrawn 제외, 중복 2건은 그대로
+    assert {r.agency for r in rows} == {"A공인", "B공인"}
+    assert rows[0].area_m2 == pytest.approx(84.9)
+    assert rows[0].floor == 10
+    assert all(r.status == "active" for r in rows)
+    assert repo.listings_for_complex(999_999) == []
+
+
+def test_실거래는_해제건도_그대로_넘긴다(repo, engine):
+    """해제 제외는 통계 계층이 정한다. 여기서 걸러 버리면 '해제 몇 건'을 근거로 못 쓴다."""
+    cid = _seed_complex(engine, name="거래단지", lon=127.05, lat=37.50)
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO trade (complex_id, contract_date, price_krw, area_m2,
+                               floor, is_cancelled, source) VALUES
+              (:cid, DATE '2026-05-01', 1500000000, 84.9, 5, false, 'molit'),
+              (:cid, DATE '2026-06-01', 9900000000, 84.9, 7, true,  'molit')
+        """), {"cid": cid})
+
+    rows = repo.trades_for_complex(cid)
+    assert len(rows) == 2
+    assert rows[0].contract_date.isoformat() == "2026-06-01"   # 최신순
+    assert rows[0].is_cancelled is True
+    assert rows[1].price_krw == 1500000000
+
+
+def test_추천결과_저장과_조회_왕복(repo, engine):
+    """저장한 리포트 본문이 그대로 돌아와야 한다 (payload — 005).
+
+    re-pm 승인 근거: "headline·why·why_not·next_actions·판단보류사유가 응답에서
+    사라지면 추천이 반쪽이다." 그 다섯 가지를 여기서 하나씩 확인한다.
+    """
+    user = repo.create_user("save@example.com", "h")
+    cid = _seed_complex(engine, name="저장단지", lon=127.05, lat=37.50)
+    repo.create_job("rec_save", user.id, {"region_codes": ["11680"]})
+
+    items = [{
+        "complex": {"id": cid, "name": "저장단지"},
+        "unit_type": {"area_m2": 84.9},
+        "building": None,
+        "ask_price_krw": 1_700_000_000,
+        "total_score": 88.25,
+        "timing_signal": "unknown",
+        "headline": "예산 안에서 가장 균형 잡힌 후보",
+        "why": ["역세권 350m", "학구도 포함"],
+        "why_not": ["1층 매물"],
+        "next_actions": ["현장 확인"],
+        "rank": 1,
+        "findings": [
+            {"agent_id": "valuation-trader", "verdict": "적정", "rationale": "중위 대비 -2%",
+             "evidence": [{"claim": "중위 17억", "source": "국토부", "as_of": "2026-07-01"}],
+             "risks": [], "score": 88.0, "confidence": 0.8, "basis": None, "missing": []},
+            # 근거 없는 '판단 보류' — agent_finding 에는 못 들어간다(CHECK)
+            {"agent_id": "location-analyst", "verdict": "판단 보류", "rationale": "입지 데이터 없음",
+             "evidence": [], "risks": [], "score": None, "confidence": 0.0,
+             "basis": None, "missing": ["학군"]},
+        ],
+    }]
+    repo.save_job_result("rec_save", user.id, status="done", items=items)
+
+    job = repo.get_job("rec_save", user.id)
+    assert job.status == "done"
+    assert len(job.items) == 1
+    got = job.items[0]
+    # 리포트 본문 4종 — 정규화 컬럼만으로는 하나도 복원되지 않는다
+    assert got["headline"] == "예산 안에서 가장 균형 잡힌 후보"
+    assert got["why"] == ["역세권 350m", "학구도 포함"]
+    assert got["why_not"] == ["1층 매물"]
+    assert got["next_actions"] == ["현장 확인"]
+    assert got["rank"] == 1
+
+    # 다섯째 — 판단 보류 사유. agent_finding 에는 못 들어가지만(CHECK) 여기엔 남는다.
+    abstained = [f for f in got["findings"] if f["verdict"] == "판단 보류"]
+    assert len(abstained) == 1
+    assert abstained[0]["agent_id"] == "location-analyst"
+    assert abstained[0]["rationale"] == "입지 데이터 없음"
+    assert abstained[0]["missing"] == ["학군"]
+
+    with engine.connect() as conn:
+        item = conn.execute(text("""
+            SELECT complex_id, rank, total_score, est_price_krw, timing_signal, unit_type_id
+            FROM recommendation_item WHERE job_id = 'rec_save'
+        """)).one()
+        assert item.complex_id == cid and item.rank == 1
+        assert float(item.total_score) == pytest.approx(88.25)
+        assert item.est_price_krw == 1_700_000_000
+        assert item.unit_type_id is None            # unit_type 미적재 → NULL 허용
+
+        # 근거 있는 finding 만 저장된다 (G2 · agent_finding CHECK)
+        agents = [r.agent_id for r in conn.execute(text(
+            "SELECT agent_id FROM agent_finding"))]
+        assert agents == ["valuation-trader"]
+
+
+def test_남의_작업에는_결과를_쓰지_못한다(repo):
+    """IDOR — save_job_result 도 소유권을 다시 확인한다."""
+    owner = repo.create_user("owner2@example.com", "h")
+    other = repo.create_user("other2@example.com", "h")
+    repo.create_job("rec_idor", owner.id, {})
+
+    repo.save_job_result("rec_idor", other.id, status="done",
+                         items=[{"complex": {"id": 1}, "total_score": 99}])
+
+    job = repo.get_job("rec_idor", owner.id)
+    assert job.status == "queued"     # 남이 쓴 결과가 반영되지 않았다
+    assert job.items == []
+
+
+def test_결과_재저장은_이전_결과를_대체한다(repo, engine):
+    user = repo.create_user("rerun@example.com", "h")
+    cid = _seed_complex(engine, name="재실행단지", lon=127.05, lat=37.50)
+    repo.create_job("rec_rerun", user.id, {})
+
+    def _item(score):
+        return {"complex": {"id": cid}, "total_score": score, "rank": 1,
+                "timing_signal": "unknown", "findings": []}
+
+    repo.save_job_result("rec_rerun", user.id, status="done", items=[_item(50)])
+    repo.save_job_result("rec_rerun", user.id, status="done", items=[_item(90)])
+
+    with engine.connect() as conn:
+        n = conn.execute(text(
+            "SELECT count(*) FROM recommendation_item WHERE job_id='rec_rerun'")).scalar_one()
+    assert n == 1
+    assert repo.get_job("rec_rerun", user.id).items[0]["total_score"] == 90
+
+
+# ---------------------------------------------------------------------------
+# 004 — trade 자연키 · 지역코드 해석
+# ---------------------------------------------------------------------------
+
+def test_004_중복_실거래는_한_번만_적재된다(repo, engine):
+    """원본에 거래 ID 가 없어 매일 배치가 같은 거래를 다시 받아온다.
+
+    중복이 쌓이면 표본 수가 부풀어 MIN_SAMPLE 을 가짜로 넘기고 중위가가 왜곡된다.
+    """
+    cid = _seed_complex(engine, name="중복단지", lon=127.05, lat=37.50)
+    row = {"cid": cid}
+    ins = text("""
+        INSERT INTO trade (complex_id, contract_date, price_krw, area_m2, floor, source)
+        VALUES (:cid, DATE '2026-06-01', 1500000000, 84.9, 5, 'molit')
+        ON CONFLICT ON CONSTRAINT trade_natural_key
+        DO UPDATE SET is_cancelled = EXCLUDED.is_cancelled
+    """)
+    with engine.begin() as conn:
+        conn.execute(ins, row)
+        conn.execute(ins, row)          # 같은 배치를 다시 돌린다
+        conn.execute(ins, row)
+
+    with engine.connect() as conn:
+        n = conn.execute(text(
+            "SELECT count(*) FROM trade WHERE complex_id = :cid"), {"cid": cid}).scalar_one()
+    assert n == 1, "같은 거래가 여러 번 적재됐습니다 (자연키 미적용)"
+
+
+def test_004_층_면적이_비어도_중복을_막는다(repo, engine):
+    """NULLS NOT DISTINCT — 기본 동작이면 NULL 끼리 달라서 유니크가 안 걸린다.
+
+    원본에서 floor·area_m2 가 비는 행이 바로 중복이 가장 많이 생기는 자리다.
+    """
+    cid = _seed_complex(engine, name="널단지", lon=127.05, lat=37.50)
+    ins = text("""
+        INSERT INTO trade (complex_id, contract_date, price_krw, area_m2, floor, source)
+        VALUES (:cid, DATE '2026-06-01', 1500000000, NULL, NULL, 'molit')
+        ON CONFLICT ON CONSTRAINT trade_natural_key DO NOTHING
+    """)
+    with engine.begin() as conn:
+        conn.execute(ins, {"cid": cid})
+        conn.execute(ins, {"cid": cid})
+
+    with engine.connect() as conn:
+        n = conn.execute(text(
+            "SELECT count(*) FROM trade WHERE complex_id = :cid"), {"cid": cid}).scalar_one()
+    assert n == 1
+
+
+def test_004_해제여부는_갱신된다(repo, engine):
+    """해제는 나중에 바뀌어 다시 내려온다 — 자연키는 같고 상태만 바뀐다."""
+    cid = _seed_complex(engine, name="해제단지", lon=127.05, lat=37.50)
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO trade (complex_id, contract_date, price_krw, area_m2, floor,
+                               is_cancelled, source)
+            VALUES (:cid, DATE '2026-06-01', 1500000000, 84.9, 5, false, 'molit')
+        """), {"cid": cid})
+        conn.execute(text("""
+            INSERT INTO trade (complex_id, contract_date, price_krw, area_m2, floor,
+                               is_cancelled, source)
+            VALUES (:cid, DATE '2026-06-01', 1500000000, 84.9, 5, true, 'molit')
+            ON CONFLICT ON CONSTRAINT trade_natural_key
+            DO UPDATE SET is_cancelled = EXCLUDED.is_cancelled
+        """), {"cid": cid})
+
+    rows = repo.trades_for_complex(cid)
+    assert len(rows) == 1 and rows[0].is_cancelled is True
+
+
+def test_INGEST2_해제거래_시세조작이_막힌다(repo, engine):
+    """자연키에 `is_cancelled` 가 들어가면 방어가 깨진다 — 그걸 여기서 못 박는다.
+
+    공격: 높은 가격에 계약 → 신고 → 해제.
+    해제 신고가 **별도 행**으로 들어오면 원래의 허위 고가 행이 그대로 살아남아
+    시세가 위로 조작된다. 자연키에서 is_cancelled 를 빼야 upsert 가
+    **기존 행을 해제로 갱신**하고, 통계 계층이 그 한 행을 제외할 수 있다.
+    """
+    cid = _seed_complex(engine, name="조작단지", lon=127.05, lat=37.50)
+    normal = text("""
+        INSERT INTO trade (complex_id, contract_date, price_krw, area_m2, floor,
+                           is_cancelled, source)
+        VALUES (:cid, DATE '2026-06-01', :price, 84.9, 5, false, 'molit')
+        ON CONFLICT ON CONSTRAINT trade_natural_key
+        DO UPDATE SET is_cancelled = EXCLUDED.is_cancelled
+    """)
+    cancelled = text("""
+        INSERT INTO trade (complex_id, contract_date, price_krw, area_m2, floor,
+                           is_cancelled, source)
+        VALUES (:cid, DATE '2026-06-01', :price, 84.9, 5, true, 'molit')
+        ON CONFLICT ON CONSTRAINT trade_natural_key
+        DO UPDATE SET is_cancelled = EXCLUDED.is_cancelled
+    """)
+    with engine.begin() as conn:
+        # 정상 시세 한 건
+        conn.execute(normal, {"cid": cid, "price": 1_500_000_000})
+        # 허위 고가 신고
+        conn.execute(normal, {"cid": cid, "price": 3_000_000_000})
+        # 며칠 뒤 해제 신고가 내려온다
+        conn.execute(cancelled, {"cid": cid, "price": 3_000_000_000})
+
+    rows = repo.trades_for_complex(cid)
+    # 허위 고가가 '정상' 행으로 남아 있으면 안 된다 (있으면 시세가 2배로 뛴다)
+    assert len(rows) == 2, "해제행이 별도로 생겼습니다 — 자연키에 is_cancelled 가 들어갔습니다"
+    high = [r for r in rows if r.price_krw == 3_000_000_000]
+    assert len(high) == 1 and high[0].is_cancelled is True
+
+    live = [r for r in rows if not r.is_cancelled]
+    assert [r.price_krw for r in live] == [1_500_000_000]
+
+    # 자연키 정의 자체를 확인 — is_cancelled 가 들어가면 즉시 깨진다
+    with engine.connect() as conn:
+        cols = conn.execute(text("""
+            SELECT a.attname
+            FROM pg_constraint c
+            JOIN unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord) ON true
+            JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+            WHERE c.conname = 'trade_natural_key'
+            ORDER BY k.ord
+        """)).scalars().all()
+    assert "is_cancelled" not in cols, f"자연키에 is_cancelled 가 있습니다: {cols}"
+    assert set(cols) == {"complex_id", "contract_date", "price_krw", "area_m2", "floor"}
+
+
+def _seed_regions(engine) -> None:
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO region (code, sido, sigungu, dong) VALUES
+              ('1168010100','서울특별시','강남구','역삼동'),
+              ('1168010600','서울특별시','강남구','대치동'),
+              ('1135010100','서울특별시','강북구','미아동'),
+              ('4113510100','경기도','성남시 분당구','정자동')
+            ON CONFLICT (code) DO NOTHING
+        """))
+
+
+def test_주소에서_법정동코드를_찾는다(repo, engine):
+    _seed_regions(engine)
+    assert repo.resolve_region_code("서울특별시 강남구 대치동 316") == "1168010600"
+    # 시군구가 두 토막인 경우
+    assert repo.resolve_region_code("경기도 성남시 분당구 정자동 178") == "4113510100"
+
+
+def test_같은_동이름은_시군구로_구분한다(repo, engine):
+    """동 이름만으로 찾으면 다른 구의 같은 동에 붙는다 — 엉뚱한 지역 통계가 된다."""
+    _seed_regions(engine)
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO region (code, sido, sigungu, dong) VALUES
+              ('1168010700','서울특별시','강남구','신사동'),
+              ('1129013000','서울특별시','성동구','신사동')
+            ON CONFLICT (code) DO NOTHING
+        """))
+    assert repo.resolve_region_code("서울특별시 강남구 신사동 123") == "1168010700"
+    assert repo.resolve_region_code("서울특별시 성동구 신사동 123") == "1129013000"
+
+
+def test_못_찾으면_None을_돌려준다(repo, engine):
+    """비슷한 이름으로 넘겨짚지 않는다 — 틀린 지역코드는 조용히 통계를 오염시킨다."""
+    _seed_regions(engine)
+    assert repo.resolve_region_code("서울특별시 강남구 없는동 1") is None
+    assert repo.resolve_region_code("부산광역시 해운대구 우동 1") is None
+    assert repo.resolve_region_code("") is None
+    # 도로명주소는 동 정보가 없다 → None (추정하지 않는다)
+    assert repo.resolve_region_code("서울특별시 강남구 테헤란로 152") is None
+
+
+def test_배치_해석(repo, engine):
+    _seed_regions(engine)
+    got = repo.resolve_region_codes([
+        "서울특별시 강남구 대치동 316",
+        "서울특별시 강북구 미아동 1",
+        "없는 주소",
+    ])
+    assert got["서울특별시 강남구 대치동 316"] == "1168010600"
+    assert got["서울특별시 강북구 미아동 1"] == "1135010100"
+    assert got["없는 주소"] is None
+
+
+# ---------------------------------------------------------------------------
 # 리포지토리 — 입지 (location-analyst 입력)
 # ---------------------------------------------------------------------------
 

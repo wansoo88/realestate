@@ -43,6 +43,7 @@ from app.domain.location.models import (
     StationFact,
     TransitPlan,
 )
+from app.domain.valuation.models import ListingRow, TradeRow
 from app.repositories.base import (
     ComplexSummary,
     JobRecord,
@@ -78,6 +79,11 @@ _HAZARD_SCAN_RADIUS_M = float(max(HAZARD_RADIUS_M.values()))
 
 #: 동별 간선도로 거리 밴드가 (30,300)m 라 그보다 넉넉히 본다.
 _BUILDING_ROAD_RADIUS_M = 1_000.0
+
+#: 단지 하나당 가져올 실거래 최대 건수. 시세 통계는 최근 36개월까지만 보므로
+#: (valuation/models.py PERIOD_LADDER) 전 이력을 끌어올 이유가 없다.
+#: 대단지 10년치가 수천 행이라 상한이 없으면 후보 50개 × 수천 행이 메모리로 올라온다.
+_TRADE_HISTORY_LIMIT = 2000
 
 #: 이 반경 안에 학구도 폴리곤이 하나도 없으면 "학구도 미확보"로 본다.
 #: 포함이 아닌 것과 데이터가 없는 것은 다르다 — 도메인이 이 둘을 다르게 처리한다.
@@ -150,6 +156,29 @@ def _opt_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _item_to_dict(row: Any) -> dict[str, Any]:
+    """recommendation_item 행 → API 가 돌려줄 항목.
+
+    `payload`(원본 JSON)가 있으면 그대로 쓴다. 정규화 컬럼은 조회·감사용이지
+    리포트 본문을 담지 못한다(headline·why·why_not·next_actions·risks 가 없다).
+    payload 가 비어 있는 옛 행에서는 컬럼으로 최소한만 복원한다.
+    """
+    payload = getattr(row, "payload", None)
+    if payload:
+        # DB 가 부여한 식별자와 순위는 payload 보다 DB 쪽이 정본이다.
+        return {**payload, "id": row.id, "rank": row.rank}
+    return {
+        "id": row.id,
+        "complex_id": row.complex_id,
+        "building_id": row.building_id,
+        "unit_type_id": row.unit_type_id,
+        "rank": row.rank,
+        "total_score": _as_float(row.total_score),
+        "est_price_krw": row.est_price_krw,
+        "timing_signal": row.timing_signal,
+    }
 
 
 def _norm_email(email: str) -> str:
@@ -422,7 +451,7 @@ class PostgisRepository:
         # rank 는 SQL 함수명과 겹치므로 전부 테이블 별칭을 붙여 둔다.
         items_sql = text("""
             SELECT ri.id, ri.complex_id, ri.building_id, ri.unit_type_id, ri.rank,
-                   ri.total_score, ri.est_price_krw, ri.timing_signal
+                   ri.total_score, ri.est_price_krw, ri.timing_signal, ri.payload
             FROM recommendation_item ri
             WHERE ri.job_id = :job_id
             ORDER BY ri.rank NULLS LAST, ri.id
@@ -438,20 +467,313 @@ class PostgisRepository:
             user_id=job.user_id,
             criteria_snapshot=job.criteria_snapshot or {},
             status=job.status,
-            items=[
-                {
-                    "id": it.id,
-                    "complex_id": it.complex_id,
-                    "building_id": it.building_id,
-                    "unit_type_id": it.unit_type_id,
-                    "rank": it.rank,
-                    "total_score": _as_float(it.total_score),
-                    "est_price_krw": it.est_price_krw,
-                    "timing_signal": it.timing_signal,
-                }
-                for it in items
-            ],
+            # payload 가 있으면 **그대로** 돌려준다 — 인메모리 구현과 완전히 같은
+            # 응답이 되도록. 정규화 컬럼만으로 되살리면 headline·why·why_not·
+            # next_actions·risks 가 전부 사라져 리포트가 빈 껍데기가 된다.
+            items=[_item_to_dict(it) for it in items],
         )
+
+    # -- 지역코드 해석 (re-data 수집 로더용) -------------------------------
+    #
+    # 수집기가 받는 건 주소 문자열이고, `complex.region_code` 에 넣어야 하는 건
+    # 10자리 법정동코드다. 그 사이를 잇는다.
+    #
+    # ⚠️ 못 찾으면 **None 을 돌려준다.** 비슷한 이름으로 넘겨짚지 않는다 —
+    #    지역코드가 틀리면 그 단지가 엉뚱한 지역 통계에 섞이고, 사용자는
+    #    "강남 단지"라며 다른 구 물건을 보게 된다.
+
+    def _region_index(self) -> dict[tuple[str, str], str]:
+        """(시군구, 동) → 법정동코드. 첫 호출 때 한 번 만들고 재사용한다.
+
+        같은 동 이름이 여러 구에 있으므로(예: 신사동) **시군구 없이는 찾지 않는다.**
+        """
+        cached = getattr(self, "_region_idx_cache", None)
+        if cached is not None:
+            return cached
+
+        sql = text("""
+            SELECT code, sido, sigungu, dong
+            FROM region
+            WHERE dong IS NOT NULL AND sigungu IS NOT NULL
+            ORDER BY code
+        """)
+        index: dict[tuple[str, str], str] = {}
+        with self._engine.connect() as conn:
+            for row in conn.execute(sql):
+                code = (row.code or "").rstrip()
+                sigungu = (row.sigungu or "").strip()
+                dong = (row.dong or "").strip()
+                if not code or not sigungu or not dong:
+                    continue
+                # '수원시 장안구' 처럼 두 토막인 경우 마지막 토막으로도 찾을 수 있게 한다.
+                for key in {(sigungu, dong), (sigungu.split()[-1], dong)}:
+                    index.setdefault(key, code)
+
+        self._region_idx_cache = index
+        logger.info("region 인덱스 %d건 로드", len(index))
+        return index
+
+    def resolve_region_code(self, address: str) -> str | None:
+        """지번 주소 → 10자리 법정동코드. 못 찾으면 None.
+
+        `"서울특별시 강남구 대치동 316"` · `"경기도 성남시 분당구 정자동 178"` 처럼
+        시군구와 동이 함께 있는 주소를 가정한다(공공 API 의 지번주소 형식).
+        """
+        if not address:
+            return None
+        index = self._region_index()
+        # 토큰을 앞에서부터 훑으며 (시군구, 동) 조합을 찾는다. 도로명주소나
+        # 동이 없는 주소는 매칭되지 않고 None 이 된다 — 그게 맞다.
+        tokens = [t for t in address.replace(",", " ").split() if t]
+        for i, sigungu in enumerate(tokens):
+            for dong in tokens[i + 1:i + 4]:      # 시군구 뒤 3토막 안에 동이 있다
+                code = index.get((sigungu, dong))
+                if code:
+                    return code
+                # '성남시 분당구' 처럼 시군구가 두 토막인 경우
+                if i + 1 < len(tokens):
+                    code = index.get((f"{sigungu} {tokens[i + 1]}", dong))
+                    if code:
+                        return code
+        return None
+
+    def resolve_region_codes(self, addresses: list[str]) -> dict[str, str | None]:
+        """배치 해석. 인덱스를 한 번만 만들어 쓴다(주소 수만큼 쿼리하지 않는다)."""
+        self._region_index()
+        return {addr: self.resolve_region_code(addr) for addr in addresses}
+
+    # -- 추천 러너용 조회 (docs/domain/recommendation-execution.md §repo인터페이스) --
+    #
+    # re-domain 러너는 이 메서드들을 **duck-typing 으로** 부른다. 없으면 경고 후
+    # 빈 결과로 degrade 하므로, 시그니처가 어긋나도 크래시 대신 **조용히 추천이 비어** 버린다.
+    # 그래서 인메모리 구현과 인자 이름까지 똑같이 맞춘다(테스트가 둘을 교차 검증한다).
+
+    #: region_codes 는 **5자리 시군구 코드**로 온다(config/regions_capital.yaml).
+    #: 반면 complex.region_code 는 10자리 법정동코드다 → **접두 매칭**이 필요하다.
+    #: 이걸 완전일치로 짜면 후보가 항상 0건이 되고, 러너는 빈 결과를 정상으로 취급한다.
+    _CANDIDATES_SQL = text("""
+        SELECT c.id,
+               c.name,
+               ST_X(c.geom) AS lon,
+               ST_Y(c.geom) AS lat,
+               c.region_code,
+               c.built_year,
+               c.total_households,
+               t.price_krw     AS recent_price_krw,
+               t.contract_date AS price_as_of,
+               COALESCE(l.active_listings, 0) AS active_listings
+        FROM complex c
+        LEFT JOIN LATERAL (
+            SELECT tr.price_krw, tr.contract_date
+            FROM trade tr
+            WHERE tr.complex_id = c.id AND NOT tr.is_cancelled
+            ORDER BY tr.contract_date DESC
+            LIMIT 1
+        ) t ON true
+        LEFT JOIN LATERAL (
+            SELECT count(*) AS active_listings
+            FROM listing li
+            WHERE li.complex_id = c.id
+              AND li.status = 'active'
+              AND li.duplicate_of IS NULL
+        ) l ON true
+        WHERE (
+                cardinality(CAST(:region_codes AS text[])) = 0
+                OR EXISTS (
+                    SELECT 1 FROM unnest(CAST(:region_codes AS text[])) AS rc
+                    WHERE c.region_code LIKE rc || '%'
+                )
+              )
+        -- 활성 매물이 있는 단지를 먼저 본다. 호가가 없으면 추천할 물건 자체가 없다.
+        ORDER BY COALESCE(l.active_listings, 0) DESC, c.id
+        LIMIT CAST(:limit AS int)
+    """)
+
+    def recommendation_candidates(
+        self, *, region_codes: list[str], max_price_krw: int | None = None,
+        limit: int = 50,
+    ) -> list[ComplexSummary]:
+        """조건에 맞는 후보 단지.
+
+        `max_price_krw` 로 **걸러내지 않는다.** 예산 초과 단지도 그대로 넘기고
+        파이프라인이 "왜 제외됐는지" 사유와 함께 떨어뜨린다(ux/README.md §4).
+        여기서 조용히 지우면 사용자는 그 단지를 아예 못 본다.
+        """
+        with self._engine.connect() as conn:
+            rows = conn.execute(self._CANDIDATES_SQL, {
+                "region_codes": list(region_codes or []),
+                "limit": limit,
+            }).all()
+
+        return [
+            ComplexSummary(
+                id=row.id, name=row.name, lon=row.lon, lat=row.lat,
+                region_code=(row.region_code or "").rstrip(),
+                built_year=row.built_year,
+                total_households=row.total_households,
+                recent_price_krw=row.recent_price_krw,
+                price_as_of=row.price_as_of.isoformat() if row.price_as_of else None,
+                active_listings=row.active_listings,
+            )
+            for row in rows
+        ]
+
+    _LISTINGS_SQL = text("""
+        SELECT li.id, li.ask_price_krw, li.area_m2, li.floor,
+               li.listed_at, li.collected_at, li.building_id, li.agency, li.status
+        FROM listing li
+        WHERE li.complex_id = :complex_id AND li.status = 'active'
+        ORDER BY li.ask_price_krw, li.id
+    """)
+
+    def listings_for_complex(self, complex_id: int) -> list[ListingRow]:
+        """활성 호가. **중복을 여기서 지우지 않는다** — 러너가 group_duplicates 로
+        묶어 대표건을 고른다. 미리 지우면 어떤 근거로 묶였는지 설명할 수 없다."""
+        with self._engine.connect() as conn:
+            rows = conn.execute(self._LISTINGS_SQL, {"complex_id": complex_id}).all()
+        return [
+            ListingRow(
+                id=row.id,
+                ask_price_krw=row.ask_price_krw,
+                area_m2=float(row.area_m2) if row.area_m2 is not None else 0.0,
+                floor=row.floor,
+                listed_at=row.listed_at,
+                # collected_at 은 timestamptz — 모델은 date 를 기대한다
+                collected_at=row.collected_at.date() if row.collected_at else None,
+                building_id=row.building_id,
+                agency=row.agency,
+                status=row.status,
+            )
+            for row in rows
+        ]
+
+    _TRADES_SQL = text("""
+        SELECT tr.contract_date, tr.price_krw, tr.area_m2, tr.floor, tr.is_cancelled
+        FROM trade tr
+        WHERE tr.complex_id = :complex_id
+        ORDER BY tr.contract_date DESC
+        LIMIT CAST(:limit AS int)
+    """)
+
+    def trades_for_complex(self, complex_id: int) -> list[TradeRow]:
+        """실거래. **해제건도 그대로 넘긴다** — 통계 계층이 제외 여부를 정한다.
+        여기서 걸러 버리면 '해제가 몇 건이었나'를 근거로 쓸 수 없다."""
+        with self._engine.connect() as conn:
+            rows = conn.execute(self._TRADES_SQL, {
+                "complex_id": complex_id, "limit": _TRADE_HISTORY_LIMIT,
+            }).all()
+        return [
+            TradeRow(
+                contract_date=row.contract_date,
+                price_krw=row.price_krw,
+                area_m2=float(row.area_m2) if row.area_m2 is not None else 0.0,
+                floor=row.floor,
+                is_cancelled=row.is_cancelled,
+            )
+            for row in rows
+        ]
+
+    # -- 추천 결과 저장 ----------------------------------------------------
+
+    def save_job_result(self, job_id: str, user_id: int, *, status: str,
+                        items: list[dict[str, Any]]) -> None:
+        """분석 결과를 되쓴다.
+
+        ⚠️ 소유권을 **여기서 다시 확인한다**(IDOR). 작업을 만든 사람과 결과를 쓰는
+        사람이 같은지 UPDATE 의 WHERE 로 강제하고, 안 맞으면 조용히 아무것도 하지 않는다.
+
+        저장 구조 (recommendation-execution.md §저장매핑)
+          items[i]            → recommendation_item 1행
+          items[i]["findings"] → agent_finding N행
+          items[i] 원본 JSON   → recommendation_item.payload (아래 주석 참조)
+        """
+        with self._engine.begin() as conn:
+            owned = conn.execute(text("""
+                UPDATE recommendation_job
+                   SET status = :status,
+                       completed_at = CASE WHEN :status IN ('done','failed')
+                                           THEN now() ELSE completed_at END
+                 WHERE id = :job_id AND user_id = :user_id
+                RETURNING id
+            """), {"job_id": job_id, "user_id": user_id, "status": status}).one_or_none()
+
+            if owned is None:
+                # 남의 작업이거나 없는 작업. 결과를 쓰지 않는다.
+                logger.warning("save_job_result: 소유권 불일치 또는 없는 작업 (job=%s)", job_id)
+                return
+
+            # 재실행 시 결과가 겹치지 않게 먼저 비운다.
+            # agent_finding 은 ON DELETE CASCADE 로 함께 지워진다.
+            conn.execute(text("DELETE FROM recommendation_item WHERE job_id = :job_id"),
+                         {"job_id": job_id})
+
+            for item in items:
+                self._insert_item(conn, job_id, item)
+
+    def _insert_item(self, conn, job_id: str, item: dict[str, Any]) -> None:
+        complex_id = (item.get("complex") or {}).get("id")
+        if complex_id is None:
+            logger.warning("추천 항목에 complex.id 가 없어 건너뜁니다 (job=%s)", job_id)
+            return
+
+        building = item.get("building") or {}
+        area_m2 = (item.get("unit_type") or {}).get("area_m2")
+
+        row = conn.execute(text("""
+            INSERT INTO recommendation_item
+                (job_id, complex_id, building_id, unit_type_id, rank,
+                 total_score, est_price_krw, timing_signal, payload)
+            VALUES (:job_id, :complex_id, :building_id,
+                    -- 면적으로 unit_type 을 찾되, 없으면 NULL (스키마가 허용한다).
+                    -- 없는 타입을 만들어 넣지 않는다 — 수집이 채울 자리다.
+                    (SELECT ut.id FROM unit_type ut
+                      WHERE ut.complex_id = :complex_id
+                        AND :area_m2 IS NOT NULL
+                        AND ut.area_m2 = CAST(:area_m2 AS numeric)
+                      ORDER BY ut.id LIMIT 1),
+                    :rank, :total_score, :est_price_krw, :timing_signal,
+                    CAST(:payload AS jsonb))
+            RETURNING id
+        """), {
+            "job_id": job_id,
+            "complex_id": complex_id,
+            "building_id": building.get("id"),
+            "area_m2": area_m2,
+            "rank": item.get("rank"),
+            "total_score": item.get("total_score"),
+            "est_price_krw": item.get("ask_price_krw"),
+            "timing_signal": item.get("timing_signal"),
+            "payload": json.dumps(item, ensure_ascii=False, default=str),
+        }).one()
+
+        for finding in item.get("findings") or []:
+            self._insert_finding(conn, row.id, finding)
+
+    def _insert_finding(self, conn, item_id: int, finding: dict[str, Any]) -> None:
+        evidence = finding.get("evidence") or []
+        if not evidence:
+            # 스키마가 `CHECK (jsonb_array_length(evidence) > 0)` 로 막는다.
+            # 근거 없는 판단은 저장하지 않는다는 설계다(G2) — '판단 보류' finding 이
+            # 여기 해당한다. 넣으려 하면 트랜잭션 전체가 깨지므로 건너뛴다.
+            # ⚠️ 그 대신 사유가 DB 에서 사라지므로 payload JSON 에는 남겨 둔다.
+            logger.debug("근거 없는 finding 은 저장하지 않습니다 (agent=%s)",
+                         finding.get("agent_id"))
+            return
+
+        conn.execute(text("""
+            INSERT INTO agent_finding
+                (item_id, agent_id, score, verdict, rationale, evidence, confidence)
+            VALUES (:item_id, :agent_id, :score, :verdict, :rationale,
+                    CAST(:evidence AS jsonb), :confidence)
+        """), {
+            "item_id": item_id,
+            "agent_id": finding.get("agent_id") or "unknown",
+            "score": finding.get("score"),
+            "verdict": finding.get("verdict"),
+            "rationale": finding.get("rationale"),
+            "evidence": json.dumps(evidence, ensure_ascii=False, default=str),
+            "confidence": finding.get("confidence"),
+        })
 
     # -- 입지 (location-analyst 입력) --------------------------------------
     #

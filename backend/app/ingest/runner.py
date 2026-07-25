@@ -117,36 +117,42 @@ def run_molit_trade_ingest(
     run = IngestRun(source=molit.SOURCE_NAME, target_table="trade", started_at=now)
     attempted = 0
 
-    for region in region_codes5:
-        for ym in months:
-            attempted += 1
-            limiter.wait()                      # rate limit — 예의가 아니라 가용성
-            try:
-                params = molit.build_params(
-                    service_key=service_key, region_code5=region, ym=ym,
-                    rows=rows_per_page)
-                body = fetch(params)
-                trades = molit.parse_response(body, now=now)
-            except molit.MolitParseError as exc:
-                run.rows_failed += 1
-                run.failures.append((f"{region}:{ym}", f"파싱 실패: {exc}"))
-                continue
-            except Exception as exc:            # 네트워크 등 — 실패로 남기고 계속
-                run.rows_failed += 1
-                run.failures.append((f"{region}:{ym}", f"수집 실패: {exc}"))
-                continue
+    # INGEST-1: 적재(row_sink)까지 try 안에서 처리하고, log_sink 는 finally 로 옮긴다.
+    # 적재가 실패해도 예외가 새어 루프를 죽이면 안 되고(다른 지역·달은 계속돼야 한다),
+    # 무엇보다 **어떤 경우에도 ingest_log 는 남아야** 한다 — '조용한 실패'가 가장 위험하다.
+    try:
+        for region in region_codes5:
+            for ym in months:
+                attempted += 1
+                limiter.wait()                  # rate limit — 예의가 아니라 가용성
+                try:
+                    params = molit.build_params(
+                        service_key=service_key, region_code5=region, ym=ym,
+                        rows=rows_per_page)
+                    body = fetch(params)
+                    trades = molit.parse_response(body, now=now)
+                    if row_sink is not None:
+                        row_sink(trades)         # 적재 실패도 이 배치의 실패로 잡힌다
+                    run.rows_ok += len(trades)
+                except molit.MolitParseError as exc:
+                    run.rows_failed += 1
+                    run.failures.append((f"{region}:{ym}", f"파싱 실패: {exc}"))
+                except Exception as exc:        # 네트워크·적재 등 — 실패로 남기고 계속
+                    run.rows_failed += 1
+                    run.failures.append((f"{region}:{ym}", f"수집/적재 실패: {exc}"))
 
-            if row_sink is not None:
-                row_sink(trades)
-            run.rows_ok += len(trades)
-
-    run.finished_at = now
-    if run.rows_failed == 0:
-        run.status = "ok"
-    elif run.rows_ok > 0 or run.rows_failed < attempted:
-        run.status = "partial"
-    else:
-        run.status = "failed"
-    run.message = f"{attempted}개 (지역·달) 시도, 실패 {len(run.failures)}건"
-    log_sink(run)
+        if run.rows_failed == 0:
+            run.status = "ok"
+        elif run.rows_ok > 0 or run.rows_failed < attempted:
+            run.status = "partial"
+        else:
+            run.status = "failed"
+        run.message = f"{attempted}개 (지역·달) 시도, 실패 {len(run.failures)}건"
+    finally:
+        # 루프 밖에서 예기치 못한 예외가 나도 원장은 반드시 남긴다.
+        run.finished_at = now
+        if run.status == "running":
+            run.status = "failed"
+            run.message = run.message or f"{attempted}개 시도 중 예기치 못한 중단"
+        log_sink(run)
     return run

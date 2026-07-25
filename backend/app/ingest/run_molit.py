@@ -79,7 +79,7 @@ def run_daily(
 ) -> IngestRun:
     """수도권 시군구·최근 (lookback+1)개월 실거래가를 수집·적재한다.
 
-    반환 IngestRun.message 에 적재 결과(신규/중복)를 덧붙인다.
+    반환 IngestRun.message 에 적재 결과(신규/갱신)를 덧붙인다.
     ⚠️ region_codes5 는 수도권 시군구 5자리 목록. region 마스터가 적재되면 거기서 파생,
        그전까지는 호출부가 목록을 넘긴다(현재 수도권 전 시군구 목록은 별도 준비 대상).
     """
@@ -97,10 +97,10 @@ def run_daily(
         row_sink=loader.load,
         log_sink=log_sink or postgis_log_sink(engine),
     )
-    # 적재 결과를 로그 메시지에 남긴다(파싱 성공 ≠ 신규 적재. 재수집이면 대부분 중복).
+    # 적재 결과를 로그 메시지에 남긴다(파싱 성공 ≠ 신규 적재. 재수집이면 대부분 갱신).
     t = loader.totals
     run.message += (f" | 적재: 단지 {t.complexes_created} 신규, 타입 {t.unit_types_created} 신규, "
-                    f"거래 {t.trades_inserted} 신규 / {t.trades_skipped_dup} 중복")
+                    f"거래 {t.trades_inserted} 신규 / {t.trades_updated} 갱신")
     return run
 
 

@@ -11,12 +11,15 @@
 
 둘은 **normalize.py 의 같은 키**를 쓴다 — 규칙이 갈리면 "테스트는 되는데 운영엔 중복"이 된다.
 
-멱등성 (증분 재수집)
---------------------
+멱등성 · 해제 반영 (증분 재수집 · INGEST-2)
+-------------------------------------------
 증분 수집이 최근 2개월을 다시 받으므로 같은 거래가 반복 유입된다. trade 는 원천에
-거래 ID 가 없어, 자연키(normalize.TradeDedupKey)로 **이미 있으면 건너뛴다**. PostGIS 는
-`WHERE NOT EXISTS` 로 처리 — 유니크 제약 없이도 멱등하다(동시성·성능을 위해선 자연키
-유니크 인덱스를 권장, re-arch 에 별도 요청).
+거래 ID 가 없어, 자연키(normalize.TradeNaturalKey = 단지·거래일·금액·면적·층, **is_cancelled
+제외**)로 **찾아서 upsert** 한다. 정상 거래가 나중에 해제되어 재유입되면 기존 행의
+is_cancelled 가 True 로 갱신되고, 시세 통계(NOT is_cancelled)에서 사라진다 — 허위신고 후
+해제로 시세를 띄우는 조작을 걷어내는 것이 is_cancelled 추적의 목적이다(CHARTER §0).
+PostGIS 는 유니크 제약이 아직 없어 `UPDATE→(없으면)INSERT` 로 멱등을 만든다(동시성·성능을
+위해선 자연키 유니크 인덱스 권장 — re-arch 004 에 새 자연키로 반영 요청).
 """
 from __future__ import annotations
 
@@ -35,18 +38,22 @@ RegionResolver = Callable[[str, str | None], str | None]
 
 @dataclass
 class LoadResult:
-    """한 번 이상의 load() 누적 결과. ingest_log 보완 지표."""
+    """한 번 이상의 load() 누적 결과. ingest_log 보완 지표.
+
+    trades_updated: 자연키가 이미 있어 upsert 된 건수. 재수집 멱등의 결과이자,
+    **정상→해제 갱신**(INGEST-2)도 여기 잡힌다.
+    """
 
     complexes_created: int = 0
     unit_types_created: int = 0
     trades_inserted: int = 0
-    trades_skipped_dup: int = 0
+    trades_updated: int = 0
 
     def _add(self, other: "LoadResult") -> None:
         self.complexes_created += other.complexes_created
         self.unit_types_created += other.unit_types_created
         self.trades_inserted += other.trades_inserted
-        self.trades_skipped_dup += other.trades_skipped_dup
+        self.trades_updated += other.trades_updated
 
 
 class TradeLoader(Protocol):
@@ -70,13 +77,13 @@ class _StoredComplex:
 
 
 class InMemoryTradeLoader:
-    """dict 기반 적재. get-or-create·중복 dedup 을 PostGIS 구현과 동일 규칙으로 흉내낸다."""
+    """dict 기반 적재. get-or-create·자연키 upsert 를 PostGIS 구현과 동일 규칙으로 흉내낸다."""
 
     def __init__(self, *, region_resolver: RegionResolver | None = None) -> None:
         self._resolver = region_resolver
         self.complexes: dict[normalize.ComplexKey, _StoredComplex] = {}
         self.unit_types: dict[normalize.UnitTypeKey, int] = {}
-        self.trades: dict[normalize.TradeDedupKey, dict[str, Any]] = {}
+        self.trades: dict[normalize.TradeNaturalKey, dict[str, Any]] = {}
         self.totals = LoadResult()
         self._seq_complex = 0
         self._seq_unit = 0
@@ -108,19 +115,29 @@ class InMemoryTradeLoader:
         for t in trades:
             cx = self._get_or_create_complex(t, res)
             ut = self._get_or_create_unit_type(t, res)
-            dk = normalize.trade_dedup_key(t)
-            if dk in self.trades:
-                res.trades_skipped_dup += 1
-                continue
-            self.trades[dk] = {
+            nk = normalize.trade_natural_key(t)
+            row = {
                 "complex_id": cx.id, "unit_type_id": ut,
                 "contract_date": t.contract_date, "price_krw": t.price_krw,
                 "floor": t.floor, "area_m2": normalize._norm_area(t.area_m2),
-                "is_cancelled": t.is_cancelled, "source": t.source,
+                "is_cancelled": t.is_cancelled, "cancelled_on": t.cancelled_on,
+                "source": t.source,
             }
-            res.trades_inserted += 1
+            # upsert: 자연키(is_cancelled 제외)가 이미 있으면 최신값으로 덮어쓴다.
+            # 정상 거래가 해제되어 재유입되면 기존 행의 is_cancelled 가 True 로 갱신되고,
+            # NOT is_cancelled 로 거르는 시세 통계에서 사라진다(INGEST-2).
+            if nk in self.trades:
+                self.trades[nk] = row
+                res.trades_updated += 1
+            else:
+                self.trades[nk] = row
+                res.trades_inserted += 1
         self.totals._add(res)
         return res
+
+    def active_trades(self) -> list[dict[str, Any]]:
+        """시세로 쓰는 거래 = 해제되지 않은 거래(NOT is_cancelled). 테스트·검증용 뷰."""
+        return [row for row in self.trades.values() if not row["is_cancelled"]]
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +170,7 @@ class PostgisTradeLoader:
             for t in trades:
                 cid = self._complex_id(conn, text, t, cx_cache, res)
                 uid = self._unit_type_id(conn, text, t, cid, ut_cache, res)
-                self._insert_trade(conn, text, t, cid, uid, res)
+                self._upsert_trade(conn, text, t, cid, uid, res)
         self.totals._add(res)
         return res
 
@@ -201,34 +218,42 @@ class PostgisTradeLoader:
         cache[key] = row.id
         return row.id
 
-    def _insert_trade(self, conn, text, t: MolitTrade, complex_id: int,
+    def _upsert_trade(self, conn, text, t: MolitTrade, complex_id: int,
                       unit_type_id: int, res: LoadResult) -> None:
         params = {
             "cid": complex_id, "uid": unit_type_id,
             "contract_date": t.contract_date, "price": t.price_krw,
             "floor": t.floor, "area": normalize._norm_area(t.area_m2),
-            "cancelled": t.is_cancelled, "registered": t.registered_at,
-            "trade_type": t.trade_type, "source": t.source,
-            "ingested_at": t.ingested_at,
+            "cancelled": t.is_cancelled, "cancelled_on": t.cancelled_on,
+            "registered": t.registered_at, "trade_type": t.trade_type,
+            "source": t.source, "ingested_at": t.ingested_at,
         }
-        # 자연키 dedup — 이미 있으면 넣지 않는다(증분 재수집 멱등).
-        result = conn.execute(text("""
+        # upsert by **자연키(is_cancelled 제외)** — INGEST-2.
+        # 먼저 UPDATE. 매치되면 해제여부까지 최신값으로 갱신된다(정상→해제 시 원본 행이
+        # is_cancelled=True 로 바뀌어 시세 통계 NOT is_cancelled 에서 사라진다).
+        # 유니크 제약이 아직 없어 ON CONFLICT 대신 UPDATE→(없으면)INSERT 로 멱등을 만든다.
+        updated = conn.execute(text("""
+            UPDATE trade SET
+                unit_type_id = :uid,
+                is_cancelled = :cancelled,
+                registered_at = :registered,
+                trade_type = :trade_type,
+                source = :source,
+                ingested_at = :ingested_at
+            WHERE complex_id = :cid
+              AND contract_date = :contract_date
+              AND price_krw = :price
+              AND area_m2 IS NOT DISTINCT FROM :area
+              AND floor IS NOT DISTINCT FROM :floor
+        """), params)
+        if updated.rowcount and updated.rowcount > 0:
+            res.trades_updated += 1
+            return
+        conn.execute(text("""
             INSERT INTO trade (complex_id, unit_type_id, contract_date, price_krw,
                                floor, area_m2, is_cancelled, registered_at,
                                trade_type, source, ingested_at)
-            SELECT :cid, :uid, :contract_date, :price, :floor, :area, :cancelled,
-                   :registered, :trade_type, :source, :ingested_at
-            WHERE NOT EXISTS (
-                SELECT 1 FROM trade tr
-                WHERE tr.complex_id = :cid
-                  AND tr.contract_date = :contract_date
-                  AND tr.price_krw = :price
-                  AND tr.area_m2 IS NOT DISTINCT FROM :area
-                  AND tr.floor IS NOT DISTINCT FROM :floor
-                  AND tr.is_cancelled = :cancelled
-            )
+            VALUES (:cid, :uid, :contract_date, :price, :floor, :area, :cancelled,
+                    :registered, :trade_type, :source, :ingested_at)
         """), params)
-        if result.rowcount and result.rowcount > 0:
-            res.trades_inserted += 1
-        else:
-            res.trades_skipped_dup += 1
+        res.trades_inserted += 1

@@ -1,0 +1,40 @@
+# regions_capital.yaml — 수도권 시군구 코드 (수집 배치 `run_daily` 입력)
+#
+# ⚠️ 아직 채워지지 않았습니다. `status: generated` 가 아니면 로더가 거부합니다.
+#
+# 왜 손으로 적지 않는가
+# ---------------------
+# 법정동은 신설·폐지·통합이 계속 일어납니다. 없어진 코드로 수집을 돌리면
+# **0건이 돌아오는데, 그게 "그 지역에 거래가 없었다"와 구분되지 않습니다.**
+# 조용히 비는 데이터가 이 제품에서 가장 위험한 실패 방식이라, 목록은
+# 공식 법정동코드에서 **생성**합니다.
+#
+# 채우는 방법
+# -----------
+#   1) 행정안전부 행정표준코드관리시스템에서 '법정동코드 전체자료' 를 받는다
+#      https://www.code.go.kr/stdcode/regCodeL.do
+#      (공공데이터포털: https://www.data.go.kr/data/15092039/fileData.do)
+#   2) region 테이블에 적재
+#      python scripts/load_regions.py --file 법정동코드_전체자료.txt
+#   3) 이 파일 생성
+#      python scripts/build_region_config.py
+#
+# 생성되면 status 가 generated 로 바뀌고 sigungu 목록(서울 25 + 인천 10 + 경기 31
+# 규모)이 채워집니다. 실제 개수는 생성 시점의 공식 자료를 따릅니다.
+
+version: "unfilled"
+status: unfilled
+
+source: "행정안전부 행정표준코드관리시스템 — 법정동코드 전체자료"
+source_url: "https://www.code.go.kr/stdcode/regCodeL.do"
+as_of: null
+
+# 시도 코드는 체계상 고정값입니다 (10자리 = 시도2 + 시군구3 + 읍면동3 + 리2).
+sido:
+  "11": 서울특별시
+  "41": 경기도
+  "28": 인천광역시
+
+# 5자리 시군구 코드 = 국토교통부 실거래가 API 의 LAWD_CD 파라미터.
+# build_region_config.py 가 채웁니다.
+sigungu: []

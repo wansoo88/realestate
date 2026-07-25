@@ -97,6 +97,44 @@ def test_전부_파싱실패면_failed():
     assert run.rows_ok == 0
 
 
+def test_적재실패도_조용히_넘기지_않고_로그를_남긴다():
+    """★INGEST-1: row_sink(적재) 예외가 새어 루프를 죽이거나 ingest_log 를 건너뛰면 안 된다."""
+    def boom(trades):
+        raise RuntimeError("DB 적재 실패")
+
+    logged: list[IngestRun] = []
+    run = run_molit_trade_ingest(
+        service_key="KEY", region_codes5=["11680"], months=["202606"],
+        fetch=lambda p: _OK_XML, now=NOW, rate_limiter=_fake_limiter([]),
+        row_sink=boom, log_sink=logged.append)
+
+    assert run.status == "failed"            # 적재 실패 = 실패(가짜 성공 아님)
+    assert run.rows_ok == 0
+    assert run.failures and "적재" in run.failures[0][1]
+    assert logged and logged[0].status == "failed"   # ingest_log 는 반드시 남는다(finally)
+
+
+def test_한_배치_적재실패가_다른_배치를_막지_않는다():
+    """INGEST-1: 적재 예외가 루프를 죽이면 뒤 지역·달이 통째로 유실된다."""
+    calls = [0]
+
+    def flaky_sink(trades):
+        calls[0] += 1
+        if calls[0] == 1:
+            raise RuntimeError("일시 적재 실패")
+
+    logged: list[IngestRun] = []
+    run = run_molit_trade_ingest(
+        service_key="KEY", region_codes5=["11680"], months=["202605", "202606"],
+        fetch=lambda p: _OK_XML, now=NOW, rate_limiter=_fake_limiter([]),
+        row_sink=flaky_sink, log_sink=logged.append)
+
+    assert calls[0] == 2                     # 첫 배치가 터져도 둘째 배치를 시도한다
+    assert run.status == "partial"
+    assert run.rows_ok == 1 and run.rows_failed == 1
+    assert logged and logged[0].status == "partial"
+
+
 def test_증분_월목록은_신고지연_흡수용_이전달을_포함():
     months = incremental_months(dt.date(2026, 7, 25), lookback_months=1)
     assert months == ["202606", "202607"]

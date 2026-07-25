@@ -14,7 +14,7 @@ from app.repositories.memory import InMemoryRepository
 
 PROTOCOLS = (
     base.UserRepository, base.ProfileRepository, base.MapRepository,
-    base.JobRepository, base.LocationRepository,
+    base.JobRepository, base.LocationRepository, base.RecommendationRepository,
 )
 
 

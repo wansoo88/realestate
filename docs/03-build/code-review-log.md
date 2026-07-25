@@ -526,3 +526,128 @@ Pydantic 이 미정의 필드를 무시하므로 주입 자체가 성립하지 �
 ### 판정
 **`CR10-1` CLOSE (PASS).** 「클라이언트가 못 바꾼다」는 서술과 코드가 이제 일치하고,
 그 사실이 e2e 로 실증된다.
+
+---
+
+## CR-013 · 2026-07-25 · 추천 실행 경로 + 수집 파이프라인 검증 (re-review)
+
+**판정: FAIL — 수집 2건 수정 필요(`INGEST-1`·`INGEST-2`). 추천 4개 항목은 전부 PASS.**
+지시 `2026-07-25-27-review` · 대상 `24-domain`·`25-data`(커밋 `debeedd`) · 회귀 **351 passed · 0 failed · 34 skipped**
+
+---
+
+### 추천 실행 경로 (24-domain)
+
+#### (1) IDOR — **PASS**
+- 생성 `repo.create_job(job_id, user.id, …)` — JWT 의 `CurrentUser` 에서만 온다.
+- 조회 `repo.get_job(job_id, user.id)` → 소유자 불일치면 `None` → **404 로 통일**해
+  *남의 작업이 존재한다는 사실조차* 알려주지 않는다(`routes.py:374-380`).
+- 저장 `save_job_result(job_id, user_id, …)` 가 **소유권을 다시 확인**한다(`memory.py`) —
+  BackgroundTask 가 엉뚱한 job 에 쓰지 못한다. 방어가 두 겹이다.
+
+#### (2) 예외 격리 — **PASS (5개 실패 모드 실측)**
+| 상황 | status | items | 예외 유출 |
+|---|:--:|:--:|:--:|
+| 프로필 없음 | `done` | 0 | 없음 |
+| 데이터 없음(수집 전) | `done` | 0 | 없음 |
+| LLM 전면 장애 | `done` | 정상 | 없음 |
+| repo 예외(DB down) | `error` | 0 | 없음 |
+| 세율파일 없음 | `error` | 0 | 없음 |
+
+**`queued` 영구정지 0건.** "데이터가 없다"(`done`+빈결과)와 "실패했다"(`error`)를 구분하는 것도 옳다.
+- 비차단 관찰: `_persist` 가 `save_job_result` 자체의 예외를 삼키므로, **저장이 실패하면**
+  job 이 `queued` 로 남는다. 다만 같은 DB 에 `error` 도 못 쓰는 상황이라 실질 대안이 적다 — 기록만 남긴다.
+
+#### (3) ★ SR4-2 구조 유지 — **PASS (실행 검증)**
+문서 주장이 아니라 **`run_recommendation_job` 을 실제로 돌려 프롬프트를 압수**했다.
+특이값(현금 812,345,678 / 소득 234,567,890 / 기존대출 123,456,789)을 암호화 저장하고,
+`FakeLLM` 이 받은 system·user 프롬프트 전문(2,898자)에서 원/콤마/억/만 표기를 전부 탐색:
+
+| 대상 | 결과 |
+|---|:--:|
+| 원본 현금·소득·기존대출 | **0건** |
+| **가용현금(현금−예비비)** — 예비비 2,000만이 `assumptions` 에 공개돼 **역산 가능**한 값 | **0건** |
+
+역산 가능한 파생값까지 확인한 이유는 `AffordabilityResult.usable_cash_krw` 가
+`AnalysisContext` 에 실려 들어가기 때문이다. **그것도 프롬프트에 닿지 않는다.**
+`forbidden_amounts` tripwire 도 실값으로 무장돼 있다(빈 배열 아님 → fail-loud 조건 미발동).
+
+> **부수 확인(강점)**: LLM 정상 vs **전면 장애**에서 findings·`total_score` 가 **완전히 동일**했다
+> (91.2 / 동일 4개 finding). 즉 추천 수치가 **LLM 추론이 아니라 계산식**에서 나온다 —
+> G2 원칙 3("계산식으로 구현되었는가")이 실제 경로에서 충족됨을 실측으로 확인했다.
+> LLM 의존 부분은 headline 뿐이고 실패 시 "분석 요약(자동 생성)" 으로 폴백한다.
+
+#### (4) 결측 처리 — **PASS**
+데이터가 모자라면 지어내지 않고 **사유를 특정해 판단을 보류**한다:
+"표본 1건으로 최소 5건에 미달", "입지 데이터(학군·교통·인프라) 미수집" — confidence 0.0.
+크래시 없음. G2 원칙 4(불확실성 표기)에 부합.
+
+---
+
+### 수집 파이프라인 (25-data)
+
+#### (5) 멱등성 — **PASS**
+같은 거래 3회 재수집 → `inserted=1, skipped_dup=2`, **저장 1행**. 증분 재수집이 최근 2개월을
+다시 받아도 중복이 쌓이지 않는다. PostGIS 는 같은 자연키로 `WHERE NOT EXISTS` — 인메모리와 규칙 동일.
+
+#### (6) rate limit · ingest_log · robots — **1건 결함**
+| 점검 | 결과 |
+|---|---|
+| rate limit | ✅ 요청 6회에 `limiter.wait()` **6회** — 매 요청 전 호출 확인 |
+| 키 없음 | ✅ 즉시 `failed` + ingest_log 기록. **가짜 성공 없음** |
+| fetch 실패 | ✅ 실패로 집계 + ingest_log 기록 |
+| robots | ✅ fail-closed — 판정 불가면 **거부**(`robots.py:43`) |
+| **적재 실패** | ⛔ **`INGEST-1`** |
+
+#### ⛔ `INGEST-1` (medium) — 적재 실패 시 `ingest_log` 가 남지 않는다
+`row_sink(trades)`(DB 적재) 호출이 **try 밖**에 있고 `log_sink(run)` 이 **`finally` 가 아니다**
+(`runner.py:142·151`). 적재기가 던지면 예외가 `run_molit_trade_ingest` 밖으로 나가고
+**ingest_log 는 0건**이 된다 — 실측 확인.
+모듈 자신이 `runner.py:10` 에 *"ingest_log — 성공/실패 건수와 상태를 반드시 남긴다.
+**'조용한 실패'가 가장 위험하다**"* 라고 적어 둔 원칙과 어긋난다.
+DB 연결 끊김·FK 위반(예: `region_code` 마스터 미적재)은 현실적인 실패 모드다.
+**통과 조건**: `row_sink` 호출을 같은 `try/except` 안에 넣어 실패로 집계 + `log_sink(run)` 을 `finally` 로.
+
+#### (7) 원천 데이터 커밋 — **PASS**
+추적 파일 중 수집 원천은 `tests/fixtures/molit_apt_trade_sample.xml` **1개(3.5KB)** 뿐 —
+파서 회귀용 소형 픽스처다. `data/raw/`·`data/cache/` 는 `.gitignore` 등재, 대량 데이터 **0건**.
+
+#### ⛔ `INGEST-2` (high) — 해제거래가 원본을 무효화하지 못한다
+**dedup 자연키에 `is_cancelled` 가 포함**돼 있다(`normalize.py:97`, `loader.py:228`).
+그래서 같은 거래가 나중에 **'해제'로 재유입되면 중복 행이 하나 더 생기고 원본은 그대로 남는다.**
+실측:
+
+```
+1회차 정상 신고        → inserted=1              저장 1행 (is_cancelled=False)
+2·3회차 재수집         → skipped_dup             저장 1행  ← 멱등 정상
+4회차 '해제'로 재유입   → inserted=1  ⛔          저장 2행 (False + True)
+```
+
+`stats.py:65` 와 `postgis.py:350,500` 은 **해제건만 제외**하므로, 남아 있는 원본
+(is_cancelled=False)이 **여전히 시세 통계에 잡힌다.** 즉 **해제 신고가 아무 효과가 없다.**
+- 실측에서 해제된 15억 거래가 통계 대상으로 그대로 남았다.
+- 허위신고 후 해제(가격 띄우기)는 국내 실거래가의 **알려진 조작 수법**이고, `is_cancelled` 를
+  추적하는 목적 자체가 그것을 걷어내는 것이다. 지금은 추적만 하고 **걷어내지 못한다.**
+- CHARTER §0 최대 리스크(*틀린 근거로 수억 원짜리 매수 결정*)에 직결된다.
+**통과 조건**: ① dedup 키에서 `is_cancelled` 제거(거래 동일성은 단지·날짜·가격·면적·층으로 판단),
+② 해제 신고 유입 시 기존 행을 **UPDATE**(`is_cancelled=true`, `cancelled_on`)하도록 upsert,
+③ "정상→해제 재유입 후 통계에서 사라진다" 회귀 테스트 1건.
+
+---
+
+### 실 DB 미검증분 (다음 DB 라운드에 명시)
+`needs_db` **34건 전부 skip**(로컬 DB 부재). 이번 검증은 **인메모리 구현·정적 SQL 판독**으로 했다.
+다음 DB 라운드에서 실측할 것:
+1. `PostgisTradeLoader` 의 `WHERE NOT EXISTS` 멱등성이 **실제 SQL 로도** 성립하는지
+   (인메모리와 규칙은 같으나 `IS NOT DISTINCT FROM` 의 NULL 처리는 실행해 봐야 안다).
+2. `INGEST-2` 수정 후 **해제 UPDATE 가 파티션 테이블에서 동작**하는지
+   (`trade` 는 연도 파티션 — 파티션 키 밖 UPDATE 는 제약이 따른다).
+3. `complex`/`unit_type` get-or-create 의 **동시성**(유니크 인덱스 없이 경합 시 중복 생성 여부).
+   → re-arch 에 요청된 자연키 유니크 인덱스(004)가 붙은 뒤 재확인.
+4. CR-009 에서 이월된 `agent_finding` 비배열 CHECK 실측(needs_db 34/34).
+
+### 판정
+**FAIL.** 추천 실행 경로는 IDOR·예외격리·SR4-2·결측처리 **4개 전부 통과**했고, 특히 SR4-2 는
+역산 가능한 파생값까지 실행 검증했다. 수집은 멱등성·rate limit·robots·원천데이터 통제가 견고하나
+**`INGEST-2`(해제거래 무효)는 시세 정확성에 직접 영향**하므로 반드시 고쳐야 한다.
+`INGEST-1` 은 실패 관측 가능성 문제로 함께 처리 권고.

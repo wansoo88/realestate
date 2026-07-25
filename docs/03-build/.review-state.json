@@ -19,6 +19,52 @@
   },
   "open_findings": [
     {
+      "id": "INGEST-2",
+      "verdict": "OPEN",
+      "severity": "high",
+      "blocks": "수집 실운영 — 시세 정확성에 직접 영향",
+      "found_by": "CR-013 (re-review, 지시 2026-07-25-27-review)",
+      "date_found": "2026-07-25",
+      "owner": "re-data",
+      "title": "해제거래가 원본을 무효화하지 못한다 — 중복 행만 늘고 원본이 시세에 계속 잡힘",
+      "evidence": [
+        "dedup 자연키에 is_cancelled 포함(normalize.py:97 trade_dedup_key, loader.py:228 WHERE NOT EXISTS)",
+        "실측: 정상신고 1회 → 재수집 2회 skipped_dup(멱등 정상) → '해제'로 재유입 시 inserted=1 로 2행이 됨(False + True)",
+        "stats.py:65 와 postgis.py:350,500 은 해제건만 제외하므로 남은 원본(is_cancelled=False)이 여전히 통계에 잡힌다",
+        "실측에서 해제된 15억 거래가 통계 대상으로 그대로 남음 — 해제 신고가 아무 효과가 없다",
+        "허위신고 후 해제(가격 띄우기)는 국내 실거래가의 알려진 조작 수법이고 is_cancelled 추적 목적 자체가 그것을 걷어내는 것",
+        "CHARTER §0 최대 리스크(틀린 근거로 수억 원짜리 매수 결정)에 직결"
+      ],
+      "pass_conditions": [
+        "① dedup 키에서 is_cancelled 제거 — 거래 동일성은 단지·날짜·가격·면적·층으로 판단",
+        "② 해제 신고 유입 시 기존 행을 UPDATE(is_cancelled=true, cancelled_on)하도록 upsert",
+        "③ '정상→해제 재유입 후 통계에서 사라진다' 회귀 테스트 1건"
+      ],
+      "note": "멱등성 자체는 정상(같은 거래 3회 → 1행). 문제는 해제 상태 변화를 새 거래로 오인하는 것."
+    },
+    {
+      "id": "INGEST-1",
+      "verdict": "OPEN",
+      "severity": "medium",
+      "blocks": "없음 (권고: INGEST-2 와 함께 처리)",
+      "found_by": "CR-013 (re-review, 지시 2026-07-25-27-review)",
+      "date_found": "2026-07-25",
+      "owner": "re-data",
+      "title": "적재(row_sink) 실패 시 ingest_log 가 남지 않는다 — 모듈 자신의 '조용한 실패' 원칙 위반",
+      "evidence": [
+        "row_sink(trades) 호출이 try 밖(runner.py:142), log_sink(run) 이 finally 아님(runner.py:151)",
+        "실측: row_sink 가 예외를 던지면 run_molit_trade_ingest 밖으로 전파되고 ingest_log 기록 0건",
+        "runner.py:10 이 'ingest_log — 반드시 남긴다. 조용한 실패가 가장 위험하다'고 명시한 원칙과 어긋남",
+        "DB 연결 끊김·FK 위반(region_code 마스터 미적재)은 현실적 실패 모드",
+        "대조: fetch 실패·키 없음은 정상적으로 ingest_log 기록됨(실측 확인)"
+      ],
+      "pass_conditions": [
+        "① row_sink 호출을 같은 try/except 안에 넣어 실패로 집계",
+        "② log_sink(run) 을 finally 로 이동해 어떤 경로로 끝나도 원장이 남게"
+      ],
+      "note": "rate limit(6/6 호출)·robots fail-closed·키없음 가짜성공 방지는 전부 정상."
+    },
+    {
       "id": "SR10-1",
       "verdict": "ACCEPTED (수용 · 비차단)",
       "severity": "low",
@@ -326,6 +372,17 @@
     "accepted_residuals": [
       "add_header 상속 함정은 nginx 자체 성질이라 구조적 제거 불가. 통제 3겹(위험지점 주석 · check_headers 배포시 4경로 실검증 · 실패시 조치 지목)으로 수용. 한계: check_headers 는 배포 시점에만 돌고 4개 대표경로만 본다 — 2차에 정적 감사 스크립트를 회귀검사로 넣기 권고",
       "nginx -t 로컬 미검증(로컬에 nginx 없음). 수용 근거: nginx -t 가 reload 전에 돌고 통과했을 때만 reload 하므로 문법오류의 결과는 '서비스 다운'이 아니라 '배포 중단'이다. 게이트 2회 + 되돌림 경로 + '손대지 말라' 지침 보유. re-review 가 한 블록 구조 파싱 성공은 well-formed 의 약한 근거일 뿐 nginx -t 의 대체가 아니다 — 배포 당일 사람이 결과를 반드시 확인할 것"
+    ]
+  },
+  "needs_db_carryover": {
+    "recorded_by": "CR-013 (re-review)",
+    "date": "2026-07-25",
+    "reason": "로컬 DB 부재로 needs_db 34건 전부 skip. 이번 검증은 인메모리 구현·정적 SQL 판독 기반.",
+    "items": [
+      "PostgisTradeLoader 의 WHERE NOT EXISTS 멱등성이 실제 SQL 로도 성립하는지 (IS NOT DISTINCT FROM 의 NULL 처리는 실행해 봐야 안다)",
+      "INGEST-2 수정 후 해제 UPDATE 가 파티션 테이블(trade, 연도 파티션)에서 동작하는지",
+      "complex/unit_type get-or-create 동시성 — 유니크 인덱스 없이 경합 시 중복 생성 여부. re-arch 004 자연키 유니크 인덱스 적용 후 재확인",
+      "CR-009 이월: agent_finding 비배열 evidence CHECK 실측 (needs_db 34/34)"
     ]
   }
 }

@@ -58,13 +58,17 @@ class UnitTypeKey:
 
 
 @dataclass(frozen=True)
-class TradeDedupKey:
-    """실거래 재수집 멱등성 키.
+class TradeNaturalKey:
+    """실거래 자연키 — 한 거래의 정체성. 재수집 시 이 키로 **같은 거래를 찾아 upsert** 한다.
 
-    MOLIT 은 거래 고유 ID 를 주지 않는다. 증분 수집이 최근 2개월을 다시 받으므로
-    같은 거래가 반복 유입된다 → 이 자연키로 이미 있는 건 건너뛴다.
-    (아주 드물게 같은 단지·같은 날·같은 층·같은 면적·같은 가격의 서로 다른 거래가
-     하나로 합쳐질 수 있으나, 거래 ID 가 없는 한 이게 최선이다. 근본 해결은 원천 ID.)
+    ⚠️ **is_cancelled 는 키에 넣지 않는다** (INGEST-2, CHARTER §0 최대 리스크).
+    허위신고→해제는 국내 가격조작 수법이고, is_cancelled 추적의 목적은 그걸 걷어내는 것이다.
+    is_cancelled 를 키에 넣으면 '정상 15억' 유입 후 같은 거래가 해제되어 재유입될 때
+    키가 달라져 **원본 정상행이 그대로 남고** 시세 통계(NOT is_cancelled)에 계속 잡힌다.
+    키에서 빼야 해제가 원본 행을 UPDATE 해서 시세에서 사라진다.
+
+    MOLIT 은 거래 고유 ID 를 주지 않는다. 아주 드물게 같은 단지·같은 날·같은 층·같은 면적·
+    같은 가격의 서로 다른 거래가 하나로 합쳐질 수 있으나, 원천 ID 가 없는 한 이게 최선이다.
     """
 
     complex: ComplexKey
@@ -72,7 +76,6 @@ class TradeDedupKey:
     price_krw: int
     area_m2: float
     floor: int | None
-    is_cancelled: bool
 
 
 def complex_key(t: MolitTrade) -> ComplexKey:
@@ -87,12 +90,11 @@ def unit_type_key(t: MolitTrade) -> UnitTypeKey:
     return UnitTypeKey(complex=complex_key(t), area_m2=_norm_area(t.area_m2))
 
 
-def trade_dedup_key(t: MolitTrade) -> TradeDedupKey:
-    return TradeDedupKey(
+def trade_natural_key(t: MolitTrade) -> TradeNaturalKey:
+    return TradeNaturalKey(
         complex=complex_key(t),
         contract_date=t.contract_date,
         price_krw=t.price_krw,
         area_m2=_norm_area(t.area_m2),
         floor=t.floor,
-        is_cancelled=t.is_cancelled,
     )

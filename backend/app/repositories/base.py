@@ -100,6 +100,31 @@ class JobRepository(Protocol):
 
 
 @runtime_checkable
+class RecommendationRepository(Protocol):
+    """추천 러너가 쓰는 조회·저장 (docs/domain/recommendation-execution.md §repo인터페이스).
+
+    러너는 이 메서드들을 **duck-typing 으로** 부른다 — 없으면 경고 후 빈 결과로
+    degrade 한다. 즉 시그니처가 어긋나도 크래시하지 않고 **추천이 조용히 비어** 버린다.
+    그 침묵이 위험해서 Protocol 로 박아 둔다: 두 구현 모두 `isinstance` 로 검증한다.
+    """
+
+    def recommendation_candidates(
+        self, *, region_codes: list[str], max_price_krw: int | None = None,
+        limit: int = 50,
+    ) -> list[ComplexSummary]: ...
+
+    #: 활성 호가. **중복 포함** — 대표건 선정은 러너의 group_duplicates 몫이다.
+    def listings_for_complex(self, complex_id: int) -> list[Any]: ...
+
+    #: 실거래. **해제건 포함** — 제외 여부는 통계 계층이 정한다.
+    def trades_for_complex(self, complex_id: int) -> list[Any]: ...
+
+    #: user_id 필수 — 결과를 되쓸 때도 소유권을 다시 확인한다(IDOR).
+    def save_job_result(self, job_id: str, user_id: int, *, status: str,
+                        items: list[dict[str, Any]]) -> None: ...
+
+
+@runtime_checkable
 class LocationRepository(Protocol):
     """입지 사실 조립 — `location-analyst`(re-domain) 의 입력을 만든다.
 
