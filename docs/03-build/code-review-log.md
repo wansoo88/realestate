@@ -651,3 +651,99 @@ DB 연결 끊김·FK 위반(예: `region_code` 마스터 미적재)은 현실적
 역산 가능한 파생값까지 실행 검증했다. 수집은 멱등성·rate limit·robots·원천데이터 통제가 견고하나
 **`INGEST-2`(해제거래 무효)는 시세 정확성에 직접 영향**하므로 반드시 고쳐야 한다.
 `INGEST-1` 은 실패 관측 가능성 문제로 함께 처리 권고.
+
+---
+
+## CR-014 · 2026-07-25 · INGEST-1/2 수정 + payload 최종 재검증 (re-review)
+
+**판정: 검증 범위 3건 전부 PASS → `INGEST-1`·`INGEST-2` CLOSE · 27-review 종결.**
+**단 "3단계 구현 완성" 판정은 보류(FAIL) — 아래 §4.**
+지시 `2026-07-25-30-review` · 대상 커밋 `d5d7a46` · 회귀 **390 passed · 0 failed · 50 skipped(needs_db)**
+
+### 1) `INGEST-2` — CLOSE
+**자연키에서 `is_cancelled` 제거 + dedup→upsert 전환이 실제로 시세조작을 막는다.**
+
+`normalize.TradeNaturalKey` = (complex, contract_date, price_krw, area_m2, floor) — `is_cancelled` 없음.
+인메모리 로더 실측:
+
+| 단계 | 결과 |
+|---|---|
+| 정상 신고 → 재수집 2회 | inserted=1 → updated=1,1 · **1행 유지**(멱등) |
+| **'해제'로 재유입** | **updated=1 · 여전히 1행**, `is_cancelled=True`, `cancelled_on=2026-06-01` |
+| 시세(NOT is_cancelled) | 전체 1행 / **통계 사용 0행** → **해제된 15억이 시세에서 사라졌다** ✅ |
+| 해제 취소(정상 재유입) | `is_cancelled=False` 로 **복원** |
+| 과다병합 점검 | 가격 다름 → 2행 · 층 다름 → 2행 (**서로 다른 거래는 각각 유지**) |
+
+`004_trade_natural_key.sql` 도 요구대로다:
+- `UNIQUE NULLS NOT DISTINCT (complex_id, contract_date, price_krw, area_m2, floor)`
+  → **`is_cancelled` 제외 ✅ · `unit_type_id` 제외 ✅**
+- 파티션 키(`contract_date`) 포함 — 파티션 테이블 유니크 요건 충족
+- `NULLS NOT DISTINCT`(PG15+, 배포 이미지 postgis:16-3.4 → PG16) — `floor`·`area_m2` 가 NULL 인
+  행이 유니크를 우회하지 못하게 막는다. **중복이 가장 많이 생기는 자리를 정확히 겨냥**했다.
+- 제약 코멘트에 "나중에 이 컬럼을 키에 추가하면 방어가 조용히 깨진다" 경고까지 남겼다.
+
+**pg_constraint 단언 테스트 존재 확인**(`test_postgis_repo.py:747-756`):
+`assert "is_cancelled" not in cols` + `assert set(cols) == {complex_id, contract_date, price_krw, area_m2, floor}`
+→ 자연키에 컬럼이 추가되면 즉시 깨진다. 행위 테스트(허위 고가 30억 해제 → `live` 에 15억만 남음)도 함께 있다.
+⚠️ 단 이 둘은 **`needs_db` 라 로컬에서 실행되지 않았다** — §5 참조.
+
+### 2) `INGEST-1` — CLOSE
+`row_sink` 가 `try` 안으로 들어오고 `log_sink(run)` 이 항상 호출된다. 실측:
+
+| 상황 | 예외 유출 | status | ingest_log |
+|---|:--:|:--:|:--:|
+| **적재(row_sink) 실패** | **없음** | `failed` | **1건 ✅** (`'11680:202605', '수집/적재 실패: DB 연결 끊김 / FK 위반'`) |
+| 일부 배치만 적재 실패 | 없음 | `partial` | 1건 (rows_ok=12 / failed=1, 실패 지역·달 특정) |
+| 정상 / fetch 실패 / 키 없음 | 없음 | ok / failed / failed | 각 1건 |
+
+실패 내역에 **어느 지역·어느 달이 깨졌는지**가 남아 재수집 대상을 특정할 수 있다.
+`log_sink` 자체가 던지면 예외가 전파되는데, **원장을 못 남기는 상황을 호출자에게 알리는 것이 옳다**
+(여기서 삼키면 그게 진짜 조용한 실패다) — 의도된 동작으로 본다.
+
+### 3) payload — PASS
+- 파이프라인 항목에 `headline`·`why`·`why_not`·`next_actions` **전부 존재**(실측).
+- **판단 보류 사유 보존 확인**: `location-analyst` 의 "입지 데이터(학군·교통·인프라) 미수집" 은
+  `evidence` 가 비어 `agent_finding` 의 `CHECK (jsonb_array_length(evidence) > 0)` 에 막혀
+  저장할 수 없는데, **payload 가 이를 살린다.** 005 의 설계 의도대로 동작한다.
+- **`agent_finding` CHECK 는 그대로**(001 원문 유지, 이후 마이그레이션에 ALTER/DROP 없음) —
+  CHECK 를 완화해 우회하지 않고 별도 컬럼으로 푼 것이 옳다(G2 유지).
+- `_item_to_dict` 복원: payload 있는 행 → 본문 5종 전부 복원, `id`·`rank` 는 DB 값이 정본.
+- **NULL payload 옛 행 → 예외 없음**, 정규화 컬럼으로 최소 복원(rank·total_score·timing_signal).
+  `ADD COLUMN IF NOT EXISTS` + nullable 이라 마이그레이션도 비파괴적이다.
+- payload JSON 직렬화 정상(2,717 bytes).
+
+### 4) ⛔ "3단계 구현 완성" 판정 — **보류(FAIL)**
+지시는 "통과면 … 3단계 구현 완성 판정"이었다. **검증 범위 3건은 통과했으나 완성 판정은 못 한다.**
+`CLAUDE.md:91` 이 미완으로 적어 둔 5건 중 **2건이 여전히 미완이고, 둘 다 팀 통제 범위 안**이다:
+
+| 항목 | 상태 | 근거 |
+|---|---|---|
+| PostGIS 리포지토리 | ✅ 코드 완료 | `postgis.py` +350줄, region 마스터·4종 메서드 |
+| 세율 실제값 | ✅ 완료 | CR-010 에서 검증 |
+| **로그인 화면** | ⛔ **미완** | `App.tsx`(134줄)에 **로그인 폼이 없다.** token·input·form·password 어느 것도 없고 문자열 `"로그인이 필요합니다."`(51행)뿐. **백엔드 인증은 완성인데 사용자가 로그인할 방법이 없다** — 배포해도 앱을 쓸 수 없다 |
+| **지도 마커** | ⛔ **미완** | `MapView.tsx`(95줄)는 지도를 만들고 bbox 를 `onBoundsChange` 로 emit 할 뿐 **마커를 하나도 그리지 않는다.** `kakao.maps.Marker`·`MarkerClusterer` 인스턴스화 0건이며, SDK 를 `libraries=clusterer` 로 로드해 놓고 **쓰지 않는다.** F1(지도 기반 추천)의 핵심 화면이 비어 있다 |
+| 실데이터 수집 | ⏸ 사람 대기 | `MOLIT_API_KEY` 미발급 — G5/사람 몫이라 팀 책임 아님 |
+
+앞의 2건은 **"동작하는 제품"의 최소 조건**이다. 백엔드·도메인·수집은 견고하지만
+사용자가 **로그인할 수 없고 지도에서 아무것도 볼 수 없는** 상태를 3단계 완성이라 부를 수 없다.
+→ **`FE-1`(로그인 화면)·`FE-2`(지도 마커)** 로 등록한다. 이 2건이 닫히면 완성 판정이 가능하다.
+
+### 5) 실 DB 미검증분 (다음 DB 라운드)
+`needs_db` **50건**(34→50 증가) 전부 skip. 이번 검증은 인메모리 구현·정적 SQL 판독 기반이다.
+1. **`trade_natural_key` 제약이 실제로 생성되는지** + pg_constraint 컬럼 단언 실행
+   (파티션 테이블 `UNIQUE NULLS NOT DISTINCT` 는 PG16 에서 실행해 봐야 확정된다).
+2. **해제 UPDATE 가 연도 파티션에서 동작**하는지(파티션 키 밖 컬럼 UPDATE).
+3. `PostgisTradeLoader` 의 UPDATE→INSERT 멱등성 실 SQL 검증(`IS NOT DISTINCT FROM` NULL 처리).
+4. `complex`/`unit_type` get-or-create 동시성(유니크 인덱스 없이 경합 시 중복 생성).
+5. payload 왕복(jsonb 저장→복원)과 NULL 옛 행 복원 실측.
+6. CR-009 이월: `agent_finding` 비배열 evidence CHECK 실측.
+
+> 비차단 관찰: `PostgisTradeLoader._insert_trade` 는 UPDATE→(없으면)INSERT 인데 주석은
+> "유니크 제약이 아직 없어 `ON CONFLICT` 대신"이라 적혀 있다. **004 가 제약을 추가했으므로
+> 주석이 낡았고**, 동시 실행 시 둘 다 INSERT 하여 유니크 위반이 날 수 있다(일 1회 배치라 실사용
+> 위험은 낮다). 004 코멘트가 권하는 `ON CONFLICT DO UPDATE` 로 바꾸면 경합이 사라진다 — 권고.
+
+### 판정
+**검증 범위 PASS — `INGEST-1`·`INGEST-2` CLOSE, 27-review 종결.**
+해제거래 시세조작 방어는 자연키·마이그레이션·로더·테스트 네 층에서 일관되게 구현됐고 실측으로 확인했다.
+**단 3단계 구현 완성은 `FE-1`·`FE-2` 해소 후 재판정한다.**

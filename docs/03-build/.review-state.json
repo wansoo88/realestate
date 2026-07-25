@@ -19,50 +19,44 @@
   },
   "open_findings": [
     {
-      "id": "INGEST-2",
+      "id": "FE-1",
       "verdict": "OPEN",
       "severity": "high",
-      "blocks": "수집 실운영 — 시세 정확성에 직접 영향",
-      "found_by": "CR-013 (re-review, 지시 2026-07-25-27-review)",
+      "blocks": "3단계 구현 완성 판정 · 실사용",
+      "found_by": "CR-014 (re-review — 지시 2026-07-25-30-review)",
       "date_found": "2026-07-25",
-      "owner": "re-data",
-      "title": "해제거래가 원본을 무효화하지 못한다 — 중복 행만 늘고 원본이 시세에 계속 잡힘",
+      "owner": "re-ux / re-fe",
+      "title": "로그인 화면이 없다 — 백엔드 인증은 완성인데 사용자가 로그인할 방법이 없다",
       "evidence": [
-        "dedup 자연키에 is_cancelled 포함(normalize.py:97 trade_dedup_key, loader.py:228 WHERE NOT EXISTS)",
-        "실측: 정상신고 1회 → 재수집 2회 skipped_dup(멱등 정상) → '해제'로 재유입 시 inserted=1 로 2행이 됨(False + True)",
-        "stats.py:65 와 postgis.py:350,500 은 해제건만 제외하므로 남은 원본(is_cancelled=False)이 여전히 통계에 잡힌다",
-        "실측에서 해제된 15억 거래가 통계 대상으로 그대로 남음 — 해제 신고가 아무 효과가 없다",
-        "허위신고 후 해제(가격 띄우기)는 국내 실거래가의 알려진 조작 수법이고 is_cancelled 추적 목적 자체가 그것을 걷어내는 것",
-        "CHARTER §0 최대 리스크(틀린 근거로 수억 원짜리 매수 결정)에 직결"
+        "App.tsx(134줄)에 로그인 폼 없음 — token·input·form·password 어느 것도 없다",
+        "App.tsx:51 에 문자열 '로그인이 필요합니다.' 만 존재",
+        "백엔드는 /auth/register·/auth/login·JWT 전부 완성(SR-009/SR-010 검증)",
+        "이 상태로 배포하면 앱을 쓸 수 없다"
       ],
       "pass_conditions": [
-        "① dedup 키에서 is_cancelled 제거 — 거래 동일성은 단지·날짜·가격·면적·층으로 판단",
-        "② 해제 신고 유입 시 기존 행을 UPDATE(is_cancelled=true, cancelled_on)하도록 upsert",
-        "③ '정상→해제 재유입 후 통계에서 사라진다' 회귀 테스트 1건"
-      ],
-      "note": "멱등성 자체는 정상(같은 거래 3회 → 1행). 문제는 해제 상태 변화를 새 거래로 오인하는 것."
+        "로그인·회원가입 폼 + 토큰 저장/첨부 + 401 처리",
+        "모바일 퍼스트 UX 기준 준수(ux/README.md)"
+      ]
     },
     {
-      "id": "INGEST-1",
+      "id": "FE-2",
       "verdict": "OPEN",
-      "severity": "medium",
-      "blocks": "없음 (권고: INGEST-2 와 함께 처리)",
-      "found_by": "CR-013 (re-review, 지시 2026-07-25-27-review)",
+      "severity": "high",
+      "blocks": "3단계 구현 완성 판정 · F1 핵심기능",
+      "found_by": "CR-014 (re-review — 지시 2026-07-25-30-review)",
       "date_found": "2026-07-25",
-      "owner": "re-data",
-      "title": "적재(row_sink) 실패 시 ingest_log 가 남지 않는다 — 모듈 자신의 '조용한 실패' 원칙 위반",
+      "owner": "re-ux / re-fe",
+      "title": "지도에 마커가 없다 — 지도 기반 추천(F1)의 핵심 화면이 비어 있다",
       "evidence": [
-        "row_sink(trades) 호출이 try 밖(runner.py:142), log_sink(run) 이 finally 아님(runner.py:151)",
-        "실측: row_sink 가 예외를 던지면 run_molit_trade_ingest 밖으로 전파되고 ingest_log 기록 0건",
-        "runner.py:10 이 'ingest_log — 반드시 남긴다. 조용한 실패가 가장 위험하다'고 명시한 원칙과 어긋남",
-        "DB 연결 끊김·FK 위반(region_code 마스터 미적재)은 현실적 실패 모드",
-        "대조: fetch 실패·키 없음은 정상적으로 ingest_log 기록됨(실측 확인)"
+        "MapView.tsx(95줄)는 지도 생성 + bbox 를 onBoundsChange 로 emit 할 뿐 마커를 하나도 그리지 않는다",
+        "kakao.maps.Marker · MarkerClusterer 인스턴스화 0건",
+        "SDK 를 libraries=clusterer 로 로드해 놓고 사용하지 않는다",
+        "백엔드 /map/complexes 는 완성(bbox·클러스터 레벨 응답)"
       ],
       "pass_conditions": [
-        "① row_sink 호출을 같은 try/except 안에 넣어 실패로 집계",
-        "② log_sink(run) 을 finally 로 이동해 어떤 경로로 끝나도 원장이 남게"
-      ],
-      "note": "rate limit(6/6 호출)·robots fail-closed·키없음 가짜성공 방지는 전부 정상."
+        "단지 마커 렌더링 + 줌 레벨별 클러스터링(CLUSTER_ZOOM_THRESHOLD 규약)",
+        "마커 탭 → 바텀시트 연동"
+      ]
     },
     {
       "id": "SR10-1",
@@ -103,6 +97,75 @@
     }
   ],
   "resolved_findings": [
+    {
+      "id": "INGEST-1",
+      "verdict": "CLOSE (PASS)",
+      "severity": "medium",
+      "blocks": "없음 (권고: INGEST-2 와 함께 처리)",
+      "found_by": "CR-013 (re-review, 지시 2026-07-25-27-review)",
+      "date_found": "2026-07-25",
+      "owner": "re-data",
+      "title": "적재(row_sink) 실패 시 ingest_log 가 남지 않는다 — 모듈 자신의 '조용한 실패' 원칙 위반",
+      "evidence": [
+        "row_sink(trades) 호출이 try 밖(runner.py:142), log_sink(run) 이 finally 아님(runner.py:151)",
+        "실측: row_sink 가 예외를 던지면 run_molit_trade_ingest 밖으로 전파되고 ingest_log 기록 0건",
+        "runner.py:10 이 'ingest_log — 반드시 남긴다. 조용한 실패가 가장 위험하다'고 명시한 원칙과 어긋남",
+        "DB 연결 끊김·FK 위반(region_code 마스터 미적재)은 현실적 실패 모드",
+        "대조: fetch 실패·키 없음은 정상적으로 ingest_log 기록됨(실측 확인)"
+      ],
+      "pass_conditions": [
+        "① row_sink 호출을 같은 try/except 안에 넣어 실패로 집계",
+        "② log_sink(run) 을 finally 로 이동해 어떤 경로로 끝나도 원장이 남게"
+      ],
+      "note": "rate limit(6/6 호출)·robots fail-closed·키없음 가짜성공 방지는 전부 정상.",
+      "fixed_by": "re-data/re-arch (커밋 d5d7a46)",
+      "verified_by": "CR-014 (re-review — 지시 2026-07-25-30-review)",
+      "date_closed": "2026-07-25",
+      "pass_conditions_met": [
+        "row_sink 가 try 안으로 이동, log_sink 항상 호출",
+        "실측 적재 실패: 예외 유출 없음 · status=failed · ingest_log 1건 · 실패내역에 지역:달 특정('11680:202605')",
+        "일부 실패: status=partial, rows_ok=12/failed=1 로 정확히 집계",
+        "정상·fetch실패·키없음 회귀 전부 ingest_log 기록 유지",
+        "log_sink 자체 실패는 전파 — 원장을 못 남기는 상황을 호출자에게 알리는 것이 옳다(여기서 삼키면 진짜 조용한 실패)"
+      ]
+    },
+    {
+      "id": "INGEST-2",
+      "verdict": "CLOSE (PASS)",
+      "severity": "high",
+      "blocks": "수집 실운영 — 시세 정확성에 직접 영향",
+      "found_by": "CR-013 (re-review, 지시 2026-07-25-27-review)",
+      "date_found": "2026-07-25",
+      "owner": "re-data",
+      "title": "해제거래가 원본을 무효화하지 못한다 — 중복 행만 늘고 원본이 시세에 계속 잡힘",
+      "evidence": [
+        "dedup 자연키에 is_cancelled 포함(normalize.py:97 trade_dedup_key, loader.py:228 WHERE NOT EXISTS)",
+        "실측: 정상신고 1회 → 재수집 2회 skipped_dup(멱등 정상) → '해제'로 재유입 시 inserted=1 로 2행이 됨(False + True)",
+        "stats.py:65 와 postgis.py:350,500 은 해제건만 제외하므로 남은 원본(is_cancelled=False)이 여전히 통계에 잡힌다",
+        "실측에서 해제된 15억 거래가 통계 대상으로 그대로 남음 — 해제 신고가 아무 효과가 없다",
+        "허위신고 후 해제(가격 띄우기)는 국내 실거래가의 알려진 조작 수법이고 is_cancelled 추적 목적 자체가 그것을 걷어내는 것",
+        "CHARTER §0 최대 리스크(틀린 근거로 수억 원짜리 매수 결정)에 직결"
+      ],
+      "pass_conditions": [
+        "① dedup 키에서 is_cancelled 제거 — 거래 동일성은 단지·날짜·가격·면적·층으로 판단",
+        "② 해제 신고 유입 시 기존 행을 UPDATE(is_cancelled=true, cancelled_on)하도록 upsert",
+        "③ '정상→해제 재유입 후 통계에서 사라진다' 회귀 테스트 1건"
+      ],
+      "note": "멱등성 자체는 정상(같은 거래 3회 → 1행). 문제는 해제 상태 변화를 새 거래로 오인하는 것.",
+      "fixed_by": "re-data/re-arch (커밋 d5d7a46)",
+      "verified_by": "CR-014 (re-review — 지시 2026-07-25-30-review)",
+      "date_closed": "2026-07-25",
+      "pass_conditions_met": [
+        "normalize.TradeNaturalKey 에서 is_cancelled 제거 확인 — 키=(complex, contract_date, price_krw, area_m2, floor)",
+        "실측: 정상신고→재수집2회 1행 유지(멱등) → '해제' 재유입시 updated=1 로 기존행 UPDATE, 여전히 1행(is_cancelled=True, cancelled_on 기록)",
+        "★시세 검증: NOT is_cancelled 필터 후 통계 사용 0행 — 해제된 15억이 실제로 시세에서 사라졌다",
+        "해제 취소(정상 재유입) 시 is_cancelled=False 로 복원됨",
+        "과다병합 없음: 가격 다름→2행, 층 다름→2행",
+        "004: UNIQUE NULLS NOT DISTINCT (complex_id, contract_date, price_krw, area_m2, floor) — is_cancelled·unit_type_id 둘 다 제외 확인. 파티션키 포함. NULLS NOT DISTINCT 로 floor/area NULL 행의 유니크 우회 차단(PG16)",
+        "pg_constraint 단언 테스트 존재(test_postgis_repo.py:747-756): is_cancelled 부재 + 정확히 5개 컬럼 단언. 행위 테스트(허위고가 30억 해제→live 에 15억만)도 함께",
+        "제약 코멘트에 '나중에 이 컬럼을 키에 추가하면 방어가 조용히 깨진다' 경고 기재"
+      ]
+    },
     {
       "id": "DEP-3",
       "verdict": "CLOSE (PASS)",
@@ -375,14 +438,37 @@
     ]
   },
   "needs_db_carryover": {
-    "recorded_by": "CR-013 (re-review)",
+    "recorded_by": "CR-014 (re-review)",
     "date": "2026-07-25",
-    "reason": "로컬 DB 부재로 needs_db 34건 전부 skip. 이번 검증은 인메모리 구현·정적 SQL 판독 기반.",
+    "count": "needs_db 50건 전부 skip(로컬 DB 부재). 인메모리 구현·정적 SQL 판독 기반 검증.",
     "items": [
-      "PostgisTradeLoader 의 WHERE NOT EXISTS 멱등성이 실제 SQL 로도 성립하는지 (IS NOT DISTINCT FROM 의 NULL 처리는 실행해 봐야 안다)",
-      "INGEST-2 수정 후 해제 UPDATE 가 파티션 테이블(trade, 연도 파티션)에서 동작하는지",
-      "complex/unit_type get-or-create 동시성 — 유니크 인덱스 없이 경합 시 중복 생성 여부. re-arch 004 자연키 유니크 인덱스 적용 후 재확인",
-      "CR-009 이월: agent_finding 비배열 evidence CHECK 실측 (needs_db 34/34)"
+      "trade_natural_key 제약 실제 생성 + pg_constraint 컬럼 단언 실행(파티션 테이블 UNIQUE NULLS NOT DISTINCT 는 PG16 실행 확인 필요)",
+      "해제 UPDATE 가 연도 파티션에서 동작하는지(파티션 키 밖 컬럼 UPDATE)",
+      "PostgisTradeLoader UPDATE→INSERT 멱등성 실 SQL(IS NOT DISTINCT FROM NULL 처리)",
+      "complex/unit_type get-or-create 동시성(유니크 인덱스 없이 경합)",
+      "payload 왕복(jsonb 저장→복원) + NULL 옛행 복원 실측",
+      "CR-009 이월: agent_finding 비배열 evidence CHECK 실측"
     ]
+  },
+  "stage3_completion": {
+    "status": "NOT_COMPLETE",
+    "judged_by": "CR-014 (re-review — 지시 2026-07-25-30-review)",
+    "date": "2026-07-25",
+    "done": [
+      "PostGIS 리포지토리(코드)",
+      "세율 실제값",
+      "추천 실행 경로",
+      "수집 파이프라인",
+      "보안(SR8-1/8-2)",
+      "배포 준비물"
+    ],
+    "blocking": [
+      "FE-1 로그인 화면",
+      "FE-2 지도 마커"
+    ],
+    "human_blocked": [
+      "실데이터 수집 — MOLIT_API_KEY 사람 발급 대기(팀 책임 아님)"
+    ],
+    "note": "백엔드·도메인·수집은 견고하나 사용자가 로그인할 수 없고 지도에서 아무것도 볼 수 없는 상태를 3단계 완성이라 부를 수 없다. FE-1·FE-2 해소 후 재판정."
   }
 }

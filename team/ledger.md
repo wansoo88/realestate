@@ -41,5 +41,7 @@
 | 2026-07-25-25-data | 2026-07-25 | re-data | MOLIT 수집→적재 파이프라인 | review-required | done | 정규화·멱등적재·지오코딩·러너 완성(픽스처 검증). 키 대기(실호출). 317 passed. region마스터·004 후속 | 키 발급 후 실행. 코드/픽스처 먼저 |
 | 2026-07-25-26-arch | 2026-07-25 | re-arch | PostGIS 4종+region마스터+004+시군구 | review-required | done | INGEST-2 자연키 이미 방어(is_cancelled 제외)+공격시나리오 주석+pg_constraint 단언테스트. PostGIS 4종(Protocol 12/12)·법정동코드 파서·시군구 생성경로. payload 승인→005. 127 passed, needs_db 50. re-review 재검증대기 | 실DB 추천·수집 동작 핸드오프 |
 | 2026-07-25-27-review | 2026-07-25 | re-review | 추천실행+수집 검증 | none | done→FAIL | 추천 4항목 PASS(SR4-2 프롬프트 실압수·LLM무관 점수 실측). 수집 FAIL: ⛔INGEST-2(high 해제거래 시세조작 무방비)·INGEST-1(med ingest_log 유실). CR-013. 351 passed. needs_db_carryover 4건 | IDOR·SR4-2구조·멱등·robots |
-| 2026-07-25-28-data | 2026-07-25 | re-data | INGEST-2(해제 upsert)·INGEST-1(ingest_log) 수정 | review-required | working | CHARTER0 직결. 자연키 is_cancelled 제거→re-arch 004 조율 |
-| 2026-07-25-29-arch | 2026-07-25 | re-arch | recommendation_item.payload(005) 추가 + 저장/응답 복원 | review-required | working | 추천 결과 핵심(why/why_not) 응답 복원 |
+| 2026-07-25-28-data | 2026-07-25 | re-data | INGEST-1/2 수정 | review-required | done | INGEST-2 dedup→upsert(해제거래 시세제거 회귀실증), INGEST-1 log finally. 340 passed. re-review CLOSE | CHARTER0 직결. 자연키 is_cancelled 제거→re-arch 004 조율 |
+| 2026-07-25-29-arch | 2026-07-25 | re-arch | payload(005) | review-required | done | 004서 분리, 저장/복원, NULL 옛행 최소복원. re-review PASS | 추천 결과 핵심(why/why_not) 응답 복원 |
+| 2026-07-25-30-review | 2026-07-25 | re-review | INGEST-1/2+payload 재검증 | none | done | **INGEST-1/2 CLOSE**(CR-014), payload PASS. 390 passed. ⛔**3단계 완성판정 FAIL**: FE-1(로그인폼 없음)·FE-2(지도마커 0건) 미완 → re-fe 필요 |
+| 2026-07-25-31-fe | 2026-07-25 | re-fe | FE-1(로그인 화면)·FE-2(지도 마커/클러스터) | review-required | working | re-fe 증원. 3단계 완성 관문 |
