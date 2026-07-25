@@ -10,8 +10,17 @@ import secrets
 from typing import Any
 
 import jwt
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Query,
+    Response,
+    status,
+)
 
+from app.agents.recommend import run_recommendation_job
 from app.api import schemas
 from app.api.deps import (
     CurrentUser,
@@ -329,20 +338,32 @@ def map_complexes(
 
 @router.post("/recommendations", status_code=status.HTTP_202_ACCEPTED, tags=["analysis"])
 def create_recommendation(body: schemas.RecommendationIn, user: CurrentUser,
-                          response: Response, repo=Depends(get_repo)) -> dict[str, Any]:
-    """작업을 큐에 넣고 즉시 202. 에이전트 분석은 수십 초 걸린다."""
+                          response: Response, background_tasks: BackgroundTasks,
+                          settings: SettingsDep,
+                          repo=Depends(get_repo)) -> dict[str, Any]:
+    """작업을 큐에 넣고 즉시 202. 분석은 **인프로세스 BackgroundTask** 로 돈다.
+
+    배포 최소구성이 redis 없는 api+db 라 별도 워커/큐를 두지 않는다(개인용, 동시성 낮음).
+    러너가 프로필 복호화·후보 조회·파이프라인·저장을 맡고, GET 으로 결과를 폴링한다.
+    """
     job_id = "rec_" + secrets.token_urlsafe(16)
     criteria = body.model_dump()
     criteria["requested_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
     repo.create_job(job_id, user.id, criteria)
+
+    # 세율/키 로드·복호화는 러너 안에서(BackgroundTask 는 Depends 를 못 받는다).
+    # 실패해도 요청은 202 로 접수되고, 러너가 job 을 'error' 로 남긴다.
+    background_tasks.add_task(
+        run_recommendation_job, repo=repo, settings=settings,
+        job_id=job_id, user_id=user.id, criteria=criteria,
+    )
 
     response.headers["Location"] = f"/api/v1/recommendations/{job_id}"
     return {
         "job_id": job_id,
         "status": "queued",
         "poll_url": f"/api/v1/recommendations/{job_id}",
-        # ⚠️ 실제 큐 소비자(worker-agent)는 아직 미구현이다. 완료되지 않는다.
-        "note": "에이전트 오케스트레이션은 구현 중입니다(T7).",
+        "note": "분석을 시작했습니다. 잠시 후 결과를 조회하세요.",
     }
 
 

@@ -34,14 +34,35 @@ sources:
     auth: { type: service_key, env: MOLIT_API_KEY }   # 사람이 발급(아래 B. 발급절차)
     params_builder: "app.ingest.molit:build_params"
     parser: "app.ingest.molit:parse_response"
-    target_table: trade
+    normalizer: "app.ingest.normalize"                 # MolitTrade → complex/unit_type/trade 키
+    loader: "app.ingest.loader:PostgisTradeLoader"     # get-or-create·자연키 dedup 적재
+    runner: "app.ingest.run_molit:run_daily"           # 실행 진입점(키 오면 이걸 호출)
+    target_table: trade                                # + complex, unit_type 파생 적재
     cadence: daily            # 일 1회 야간 배치
-    # 신고지연 최대 30일 → 최근 2개월(당월+전월) 재수집으로 지연분 흡수
+    # 신고지연 최대 30일 → 최근 2개월(당월+전월) 재수집으로 지연분 흡수(자연키 dedup 으로 멱등)
     incremental: { by: month, lookback_months: 1 }
     rate_limit: { min_interval_sec: 0.5, jitter_sec: 0.3 }
     notes: >
       동(棟) 정보 없음(erd.md §0). 호가(listing)와 절대 혼합 금지.
+      단지 좌표는 MOLIT 에 없음 → 적재 후 app.ingest.geocode(카카오 키워드검색)로 별도 enrich.
+      region_code(10자리 법정동코드)는 region 마스터+resolver 필요, 없으면 NULL 로 둠.
       엔드포인트 경로는 서비스키 발급 시 상세페이지에서 최종 확인.
+
+  # ── 단지 좌표 확보(지오코딩) — 적재 후 별도 단계 ──
+  - id: kakao_geocode
+    priority: 1
+    enabled: false                 # KAKAO_REST_API_KEY 사람 발급 대기
+    legal: portal_api_personal     # 카카오 로컬 API, 개인·비상업 쿼터
+    provider: "카카오 로컬 키워드 검색 (단지명→WGS84 좌표)"
+    endpoint: "https://dapi.kakao.com/v2/local/search/keyword.json"
+    auth: { type: rest_api_key, env: KAKAO_REST_API_KEY }
+    runner: "app.ingest.geocode:enrich_postgis_geom"
+    target_table: complex          # complex.geom 채움(POINT,4326)
+    cadence: on_demand             # 좌표 없는 단지 발생 시
+    rate_limit: { min_interval_sec: 0.3, jitter_sec: 0.2 }
+    notes: >
+      x=경도(lon)·y=위도(lat) 순서 주의. 못 찾으면 추정 말고 NULL 유지(입지 분석은 '정보 없음').
+      대안: 건축물대장 좌표(2차)·도로명주소 API(폴백).
 
   # ── 2순위: 공공 기초자료 (입지·가치 근거). 발급/확인 전이라 스캐폴드 상태 ──
   - id: molit_apt_price_public      # 공동주택 공시가격

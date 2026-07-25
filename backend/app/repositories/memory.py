@@ -9,6 +9,7 @@ import itertools
 from typing import Any
 
 from app.domain.location.models import BuildingLocationFact, LocationFacts
+from app.domain.valuation.models import ListingRow, TradeRow
 from app.repositories.base import (
     ComplexSummary,
     JobRecord,
@@ -29,6 +30,8 @@ class InMemoryRepository:
         self._jobs: dict[str, JobRecord] = {}
         self._location: dict[int, LocationFacts] = {}
         self._buildings: dict[int, list[BuildingLocationFact]] = {}
+        self._listings: dict[int, list[ListingRow]] = {}
+        self._trades: dict[int, list[TradeRow]] = {}
         self._ids = itertools.count(1)
 
     # -- 사용자 -----------------------------------------------------------
@@ -122,3 +125,44 @@ class InMemoryRepository:
         if job is None or job.user_id != user_id:
             return None
         return job
+
+    def save_job_result(self, job_id: str, user_id: int, *, status: str,
+                        items: list[dict[str, Any]]) -> None:
+        """BackgroundTask 가 분석 결과를 되쓴다. 소유권을 다시 확인한다(IDOR)."""
+        job = self._jobs.get(job_id)
+        if job is None or job.user_id != user_id:
+            return
+        job.status = status
+        job.items = list(items)
+
+    # -- 추천 후보 조회 (BackgroundTask 러너용) ----------------------------
+    # ⚠️ PostGIS 구현(re-arch)이 아래 3종을 같은 시그니처로 제공해야 프로덕션에서 동작한다.
+    #    인메모리 구현은 테스트가 넣어준 매물·실거래만 돌려준다(공간·가격 근사 없음).
+
+    def add_listings(self, complex_id: int, listings: list[ListingRow]) -> None:
+        self._listings.setdefault(complex_id, []).extend(listings)
+
+    def add_trades(self, complex_id: int, trades: list[TradeRow]) -> None:
+        self._trades.setdefault(complex_id, []).extend(trades)
+
+    def recommendation_candidates(
+        self, *, region_codes: list[str], max_price_krw: int | None = None,
+        limit: int = 50,
+    ) -> list[ComplexSummary]:
+        """조건에 맞는 후보 단지. 예산으로 **걸러내지 않는다** — 초과 단지도 넘기고
+        파이프라인이 사유와 함께 제외한다(ux/README.md §4)."""
+        wanted = {r for r in (region_codes or [])}
+        out: list[ComplexSummary] = []
+        for c in self._complexes:
+            if wanted and c.region_code not in wanted:
+                continue
+            out.append(c)
+            if len(out) >= limit:
+                break
+        return out
+
+    def listings_for_complex(self, complex_id: int) -> list[ListingRow]:
+        return list(self._listings.get(complex_id, ()))
+
+    def trades_for_complex(self, complex_id: int) -> list[TradeRow]:
+        return list(self._trades.get(complex_id, ()))
