@@ -40,4 +40,5 @@
 | 2026-07-25-24-domain | 2026-07-25 | re-domain | 추천 실행 경로 | review-required | done | API BackgroundTask 로 orchestrator(redis 없이). 예외격리·SR4-2구조·IDOR테스트. 317 passed. re-arch 4종메서드 핸드오프. re-review 검증대기 | 배포 최소구성 정합. 추천 202→실작동 |
 | 2026-07-25-25-data | 2026-07-25 | re-data | MOLIT 수집→적재 파이프라인 | review-required | done | 정규화·멱등적재·지오코딩·러너 완성(픽스처 검증). 키 대기(실호출). 317 passed. region마스터·004 후속 | 키 발급 후 실행. 코드/픽스처 먼저 |
 | 2026-07-25-26-arch | 2026-07-25 | re-arch | PostGIS 4종메서드 + region마스터 + 004인덱스 + 시군구목록 | review-required | working | 실DB 추천·수집 동작 핸드오프 |
-| 2026-07-25-27-review | 2026-07-25 | re-review | 추천실행+수집 검증 | none | working | IDOR·SR4-2구조·멱등·robots |
+| 2026-07-25-27-review | 2026-07-25 | re-review | 추천실행+수집 검증 | none | done→FAIL | 추천 4항목 PASS(SR4-2 프롬프트 실압수·LLM무관 점수 실측). 수집 FAIL: ⛔INGEST-2(high 해제거래 시세조작 무방비)·INGEST-1(med ingest_log 유실). CR-013. 351 passed. needs_db_carryover 4건 | IDOR·SR4-2구조·멱등·robots |
+| 2026-07-25-28-data | 2026-07-25 | re-data | INGEST-2(해제 upsert)·INGEST-1(ingest_log) 수정 | review-required | working | CHARTER0 직결. 자연키 is_cancelled 제거→re-arch 004 조율 |
