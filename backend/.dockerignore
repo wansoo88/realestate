@@ -1,0 +1,34 @@
+# 빌드 컨텍스트에서 제외 — 이미지에 들어갈 이유가 없는 것들.
+#
+# 왜 필요한가
+#   디스크·메모리가 빠듯한 서버에서 빌드한다. 컨텍스트가 작을수록
+#   전송·레이어가 가볍고, 운영 이미지에 테스트 코드가 섞이지 않는다.
+#   (Dockerfile 이 `COPY . .` 를 쓰므로 이 파일이 없으면 전부 들어간다.)
+
+# 테스트 — 운영 이미지에 있을 이유가 없다
+tests/
+conftest.py
+pytest.ini
+requirements-dev.txt
+
+# 파이썬 캐시·가상환경
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 비밀·로컬 설정 (혹시라도 backend/ 안에 생겼을 경우의 안전망)
+.env
+.env.*
+*.local.md
+*.pem
+*.key
+
+# 기타
+.git/
+.gitignore
+*.log

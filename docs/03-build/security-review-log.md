@@ -634,3 +634,114 @@ G5 를 막지 않는다. 지금 급히 더미해시를 넣으면 가용성만 �
 ### 판정
 **`SR8-2` CLOSE (PASS).** **`SR10-1` 신규 등록 — 수용(ACCEPTED), 비차단.**
 기존 「계정 열거 차단」 판정은 위와 같이 **정정**한다.
+
+---
+
+## SR-011 · 2026-07-25 · 배포 준비물 안전 검증 (re-review)
+
+**판정: FAIL — G5 전 수정 필요 2건 + 권고 1건** · 지시 `2026-07-25-21-review` · 대상 `19-arch`(커밋 `fcff115`)
+
+> 먼저 분명히 해 둔다: **파괴적 산출물은 없다.** 격리·롤백·유출 방어 설계는 견고하다.
+> FAIL 사유는 "위험해서"가 아니라 **DEPLOY.md §5-4 에서 절차가 물리적으로 막히기 때문**이다.
+> 재설계가 아니라 **3건 고치고 재검증**이면 된다.
+
+### (1) pause/resume — **PASS**
+- `pause-itsmine.sh` 전 명령 확인: **`docker stop` 뿐**. `rm`·`rmi`·`volume`·설정수정 **0건**.
+- `docker ps` (실행 중만) 로 목록을 잡아 **원래 꺼져 있던 컨테이너를 resume 이 켜지 않는다.**
+- 목록을 **중지 전에** 기록한다(중간 실패해도 복구 목록이 남는다). `--dry-run` 제공.
+- `resume` 은 **목록 파일만** 본다. 부분 실패 시 목록을 **지우지 않아** 무엇이 안 돌아왔는지 보존.
+- 비차단 관찰 3건:
+  - `docker ps --filter name=` 은 **부분일치**다. `itsmine` 패턴이 의도 밖 컨테이너를 잡을 여지가 있어
+    `--dry-run` 선행이 필수인데, DEPLOY.md 가 이미 강제하고 있다 — 유효.
+  - `pause` 를 두 번 돌리는 사이 itsmine 하나가 수동 기동되면 목록이 **작은 쪽으로 덮인다**(희박).
+  - `--force` 는 `status=exited` 를 확인 없이 start 한다. 다른 이유로 죽어 있던 것도 켤 수 있다(비상경로 명시됨).
+
+### (2) docker-compose.deploy.yml — **PASS**
+| 점검 | 결과 |
+|---|---|
+| api+db 만 | ✅ nginx·worker·redis 제외 (worker 무한재시작 루프 회피 근거 타당) |
+| db 포트 미노출 | ✅ `ports` 없음. "Docker 가 ufw 를 우회한다"는 근거도 정확 |
+| api 포트 | ✅ `127.0.0.1:8013` 바인드 — 공인 IP 미노출 |
+| 메모리 제한 | ✅ `mem_limit`·`memswap_limit` 각 192m |
+| 이름 충돌 | ✅ project `realestate` · 컨테이너 `realestate-{db,api}` · 네트워크 `realestate-internal` · 볼륨 `realestate-pgdata` — autobtc/itsmine 과 겹치지 않음 |
+| 마이그레이션 | ✅ `:ro` 마운트, 빈 볼륨 첫 기동에만 적용 |
+
+### (3) nginx-realestate.conf — **FAIL (2건)**
+**잘 된 것**: 별도 파일이라 기존 서버블록 무변경 · zone 이름 `re_api`/`re_auth`/`re_ssl` 접두로
+duplicate zone 회피(충돌 시 **nginx 전체가 안 떠 동거 서비스까지 죽는** 사고를 막음) ·
+`proxy_params` 의존 제거(배포판별 부재로 `nginx -t` 실패하는 함정 회피) ·
+`proxy_intercept_errors off` 로 SR8-2 의 503 보존 · 정규식 auth location 이 `/api/` 보다 우선(정상).
+
+#### ⛔ `DEP-1` (medium) — `add_header` 상속이 끊겨 **index.html 에 보안헤더가 안 붙는다**
+nginx 규칙: *하위 레벨에 `add_header` 가 하나라도 있으면 상위 레벨 `add_header` 를 **전혀 상속하지 않는다**.*
+`always` 플래그는 오류응답 포함 여부를 정할 뿐 **상속과 무관**하다.
+
+- `location = /index.html` → `add_header Cache-Control "no-store"` 존재 → 서버블록의
+  **HSTS·X-Content-Type-Options·X-Frame-Options·Referrer-Policy 4종이 전부 탈락**.
+- 중첩 `location ~* \.(js|css|woff2?|png|jpg|svg)$` 도 동일하게 4종 탈락.
+- `try_files $uri $uri/ /index.html` 은 **내부 리다이렉트**라 location 매칭을 다시 타므로,
+  `GET /` 도 결국 `location = /index.html` 로 들어간다 → **사용자가 실제로 여는 문서에 헤더가 없다.**
+- 영향: `X-Frame-Options DENY` 상실 → **클릭재킹 방어가 본 화면에서 사라진다**(개인 금융정보 서비스).
+  정적 JS/CSS 의 `nosniff` 상실도 함께. HSTS 는 같은 호스트의 API 응답으로 대체 확립되므로 영향이 덜하다.
+- **방증**: DEPLOY.md §5-6 의 자체 검증 `curl -sI https://.../ | grep -i strict-transport` 는
+  **빈 결과**가 나온다. 문서가 통과로 적어 둔 확인이 실제로는 실패한다.
+- **통과 조건**: 두 location 에 보안헤더 4종을 **다시 명시**(또는 `add_header` 를 쓰지 않도록 재구성).
+
+#### ⛔ `DEP-2` (blocker) — 인증서가 없어 `nginx -t` 가 실패, **절차가 진행 불가**
+`listen 443 ssl` + `ssl_certificate /etc/letsencrypt/live/realestate.utilverse.info/fullchain.pem`
+인데, 그 파일은 **§5-5 certbot 이후에야 생긴다**(preflight §6 도 "인증서 없음"을 경고한다).
+- §5-4 `sudo nginx -t` → `[emerg] cannot load certificate ... No such file or directory` → **실패**.
+- §5-5 `certbot --nginx` 도 **깨진 설정을 파싱하다 실패**한다. 앞으로 못 간다.
+- ⚠️ 안전장치 자체는 **유효하다** — "통과했을 때만 reload" 규칙이 깨진 채 reload 하는 사고를 막는다.
+  진짜 위험은 **막힌 상태에서 운영자가 손으로 고치려 드는 것**이다. 그 순간 동거 서비스가 위태롭다.
+- **통과 조건(택1)**:
+  ⓐ 임시 HTTP 전용 블록으로 `certbot certonly --webroot -w /var/www/certbot -d <도메인>` 먼저 발급 →
+     인증서 확보 후 본 conf 배치 → `nginx -t` 통과 → reload, 또는
+  ⓑ 본 conf 의 443 서버블록을 주석 처리해 배치 → certbot 발급 → 주석 해제 → `nginx -t` → reload.
+
+### (4) DEPLOY.md — **FAIL (DEP-2) · 그 외 안전**
+- ✅ 롤백이 **역순**이고 각 단계 독립: nginx 노출 제거 → `down`(데이터 보존) → **itsmine 복구**.
+- ✅ 통상 롤백은 `down` 이고 `-v` 는 별도 항목으로 분리 + "되돌릴 수 없다" 경고 — 옳다.
+- ✅ 파괴적 단계는 모두 사람 승인 뒤. preflight 는 읽기 전용(변경 명령 0건 확인).
+- ✅ `nginx -t` 게이트, `--dry-run` 선행, `docker stats` 90% 초과 시 보고 규칙.
+- ⛔ `DEP-2` 순서 문제(위).
+
+#### ⚠️ `DEP-3` (medium · 권고) — **백엔드 이미지를 서버에서 빌드한다**
+§5-3 `docker compose build api` 는 **db 가 이미 떠 있는 상태에서** 서버에서 돈다.
+- **빌드 프로세스는 `mem_limit` 의 보호를 받지 않는다.** `mem_limit` 은 런타임 서비스에만 적용된다.
+- 그 시점 여유 ≈ 400 − db 실사용 146 ≈ **254MB**. 이 절차 전체에서 **유일하게 상한이 없는 소비자**다.
+- 프론트는 같은 이유(vite OOM)로 **로컬 빌드+rsync 로 옮겨 놓고**, 백엔드 빌드는 서버에 남겼다 — **일관성 결여**.
+- requirements 는 전부 manylinux wheel 이라 컴파일이 없어 실패 가능성은 낮다. 다만 여기서 OOM 이 나면
+  cgroup 이 아니라 **호스트 전역 OOM killer** 가 도는데, 그 희생자는 RSS 최대인 **autobtc(195MB)** 가 되기 쉽다.
+- **권고(비용 최소)**: `build api` 를 **`up -d db` 앞으로** 옮긴다 — 빌드가 400MB 를 온전히 쓴다. 한 줄 변경.
+  더 나은 방법: 로컬 빌드 후 `docker save | ssh … docker load`(프론트와 같은 원칙).
+
+### (5) 메모리 16MB 타당성 — **산술은 맞음. 단 결론 표현이 오해를 부른다**
+- 산술 검증: `332 + 68 = 400`, `192 + 192 = 384`, `400 − 384 = 16` — **맞다**.
+- 다만 384 는 **상한의 합**이지 예상 사용량이 아니다. 같은 문서의 추정(db 146 + api 158 = **304MB**)을
+  쓰면 실제 여유는 **약 96MB** 다. "16MB"는 두 컨테이너가 **동시에 상한에 붙은 최악값**이다.
+  → 문서가 최악값만 굵게 적어 실제보다 위태로워 보인다. **두 수치를 함께** 적는 편이 정확하다.
+- **autobtc 보호는 설계상 타당하다**: `memswap_limit = mem_limit` 이라 우리 컨테이너는 스왑으로 새지 않고
+  **자기 cgroup 안에서** OOM-kill 된다. 호스트를 끌고 내려가지 않으므로 autobtc 는 보호된다.
+  호스트에 swap 2GB 도 있어 완충이 한 겹 더 있다.
+- **단, 그 보호가 미치지 않는 구멍이 `DEP-3`(빌드)** 다. 스파이크 시 autobtc 가 위험해지는 경로는 사실상 이것뿐이다.
+- preflight 임계값 확인: `AFTER(400) >= NEED+32(416)` 아님 → `AFTER >= NEED(384)` 성립 →
+  **"여유가 얇다(<32MB). 사람 판단 필요"** 로 분기한다. 자동 승인하지 않고 사람에게 넘긴다 — **정직하다.**
+
+### (6) 실IP·키 유출 — **PASS**
+- 공인 IP **0건**, 하드코딩 시크릿 **0건**(정규식 전수 스캔).
+- `.env.example` 의 비밀값은 **전부 빈 값**. `deploy-target.local.md` 는 **미추적 + gitignore**
+  (`.env`, `.env.*`, `*.local.md`, `deploy-target.local.md`).
+- preflight 가 `FIELD_ENCRYPTION_KEY` 를 **길이만** 검사하고 값을 출력하지 않는다 — 좋다.
+- 도메인 `realestate.utilverse.info` 는 저장소에 있다(re-arch 자체 신고 3번). **보안상 문제 없음** —
+  공개 DNS 이며 certbot 발급 순간 **CT 로그로 어차피 공개**된다. 없으면 nginx 블록·certbot 명령이 성립하지 않는다.
+  → **수용 권고.** 다만 저장소가 그 외에는 플레이스홀더로 일관돼 있으므로, 일관성을 원하면
+  `<APP_DOMAIN>` + 배포 시 `sed` 로 바꾸면 된다. **보안 판단이 아니라 취향 결정이라 사람 몫**이다.
+- 비차단: `backend/.dockerignore` **부재** → `tests/`·`__pycache__` 가 빌드 컨텍스트·이미지에 실린다.
+  비밀은 없으나 디스크가 빠듯한 서버에서 이미지가 커진다. 권고 수준.
+
+### 판정
+**FAIL.** 안전성(파괴성·격리·롤백·유출)은 **전부 통과**했으나, `DEP-2` 로 **절차가 §5-4 에서 막히고**
+`DEP-1` 로 **본 화면의 클릭재킹 방어가 사라진다.**
+**G5 전 필수: `DEP-2`(인증서 순서) · `DEP-1`(헤더 재명시). 강력 권고: `DEP-3`(빌드를 db 기동 앞으로).**
+이 3건 수정 후 재검증하면 통과 가능하다 — 재설계가 필요한 사안은 없다.

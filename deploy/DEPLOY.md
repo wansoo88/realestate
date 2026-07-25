@@ -45,12 +45,18 @@ bash deploy/preflight.sh
 |---|---:|---|
 | `realestate-db` | **192 MB** | shared_buffers 64 + wal 2 + 백엔드 20×~3 + 상시 ~20 ≈ **146MB** → 여유 46MB |
 | `realestate-api` | **192 MB** | 파이썬 런타임 ~120 + Argon2 2×19MiB=38 ≈ **158MB** → 여유 34MB |
-| **합계** | **384 MB** | |
+| **합계** | **384 MB (상한)** | **304 MB (추정 실사용)** |
 
-| 시나리오 | 여유 | 판정 |
-|---|---:|---|
-| 지금 그대로 | 332 MB | ❌ 384 > 332 — **부족** |
-| itsmine 중지 후 | 332 + 68 = **400 MB** | ✅ 400 − 384 = **16 MB 남음** |
+**두 수치를 구분해서 봐야 한다.** 384MB 는 *두 컨테이너가 동시에 상한에 붙은 최악값*이고,
+304MB(146+158)가 *평상시 예상 사용량*이다. 아래 표는 둘 다 적는다.
+
+| 시나리오 | 여유 | vs 상한 384 | vs 추정 304 |
+|---|---:|---|---|
+| 지금 그대로 | 332 MB | ❌ 부족 (−52) | ⚠️ 28MB 남음 |
+| **itsmine 중지 후** | **400 MB** | ✅ **16 MB 남음** | ✅ **96 MB 남음** |
+
+즉 **평상시에는 96MB 정도 여유**가 있고, 16MB 는 최악의 순간에만 해당한다.
+운영 판단은 최악값 기준으로 하되, "항상 16MB 밖에 없다"고 오해하지 말 것.
 
 > **여유 16MB 는 얇다.** 그래서 두 가지를 미리 걸어 뒀다.
 > 1. `ARGON2_CONCURRENCY=2` — 동시 해시를 4→2 로 줄여 api 를 38MB 아꼈다.
@@ -136,7 +142,30 @@ free -m
 ```
 `docker stop` 만 한다. 컨테이너·이미지·볼륨을 지우지 않으므로 언제든 되돌아온다.
 
-### 5-2. DB 기동 + 마이그레이션
+### 5-2. API 이미지 빌드 — **db 를 올리기 전에 한다**
+
+```bash
+docker compose -f docker-compose.deploy.yml build api    # 수 분 소요
+docker images realestate-api:local
+```
+
+> ⚠️ **왜 db 보다 먼저인가.** `docker build` 는 **`mem_limit` 의 보호를 받지 않는다.**
+> 상한은 런타임 서비스에만 적용된다. 즉 이 절차 전체에서 **유일하게 상한이 없는
+> 메모리 소비자**가 빌드다. db 를 먼저 띄우면 그만큼(약 146MB) 줄어든 자리에서
+> 빌드하게 되고, 여기서 OOM 이 나면 cgroup 이 아니라 **호스트 전역 OOM killer** 가 돈다.
+> 그 희생자는 RSS 가 가장 큰 **autobtc(195MB)** 가 되기 쉽다.
+> 순서만 바꾸면 빌드가 400MB 를 온전히 쓴다.
+>
+> 더 안전한 대안(프론트와 같은 원칙 — 서버에서 빌드하지 않기):
+> ```bash
+> # [로컬 PC 에서] 빌드해서 이미지만 옮긴다
+> docker build -t realestate-api:local ./backend
+> docker save realestate-api:local | gzip | \
+>   ssh <DEPLOY_USER>@<DEPLOY_HOST> 'gunzip | docker load'
+> ```
+> 이 경우 compose 가 다시 빌드하지 않도록 `up -d --no-build api` 로 올린다.
+
+### 5-3. DB 기동 + 마이그레이션
 ```bash
 docker compose -f docker-compose.deploy.yml up -d db
 docker compose -f docker-compose.deploy.yml logs -f db     # "database system is ready" 까지
@@ -153,10 +182,9 @@ docker exec realestate-db psql -U realestate -d realestate \
   -c "SELECT count(*) FROM pg_tables WHERE schemaname='public';"   # 34 예상
 ```
 
-### 5-3. API 빌드·기동
+### 5-4. API 기동
 ```bash
-docker compose -f docker-compose.deploy.yml build api    # 수 분 소요
-docker compose -f docker-compose.deploy.yml up -d api
+docker compose -f docker-compose.deploy.yml up -d api    # 5-2 에서 이미 빌드됨
 docker compose -f docker-compose.deploy.yml ps
 curl -fsS http://127.0.0.1:8013/api/v1/health            # {"status":"ok","role":"api"}
 ```
@@ -166,36 +194,110 @@ curl -fsS http://127.0.0.1:8013/api/v1/health            # {"status":"ok","role"
 docker compose -f docker-compose.deploy.yml logs api | tail -50
 ```
 
-### 5-4. 호스트 nginx 서버블록
+### 5-5. 호스트 nginx + TLS — **반드시 이 순서로**
+
+> ⚠️ **인증서가 먼저다.** 본 설정(`nginx-realestate.conf`)의 443 블록은
+> `ssl_certificate .../fullchain.pem` 을 요구하는데 그 파일은 certbot 이 만든다.
+> 없는 상태로 배치하면 `nginx -t` 가
+> `[emerg] cannot load certificate ... No such file or directory` 로 실패하고,
+> 이어지는 `certbot --nginx` 도 깨진 설정을 파싱하다 실패해 **절차가 막힌다.**
+> 그래서 HTTP 전용 부트스트랩 블록으로 먼저 발급받는다.
+
+**(1) 부트스트랩 블록 배치 — HTTP 전용, 인증서 참조 없음**
 ```bash
-# 1) 배치 (기존 서버블록은 건드리지 않는다)
+sudo mkdir -p /var/www/certbot
+sudo cp deploy/nginx-realestate-bootstrap.conf /etc/nginx/sites-available/realestate.conf
+sudo ln -sfn ../sites-available/realestate.conf /etc/nginx/sites-enabled/realestate.conf
+sudo nginx -t                       # 인증서를 참조하지 않으므로 통과한다
+sudo systemctl reload nginx         # 통과했을 때만
+```
+
+**(2) 인증서 발급 (`certonly --webroot`)**
+```bash
+sudo certbot certonly --webroot -w /var/www/certbot -d realestate.utilverse.info
+sudo ls -l /etc/letsencrypt/live/realestate.utilverse.info/fullchain.pem   # 존재 확인
+```
+> `--nginx` 가 아니라 `certonly --webroot` 를 쓰는 이유: `--nginx` 는 nginx 설정을
+> **자동으로 고쳐 쓴다.** 동거 서비스 설정이 있는 서버에서 자동 수정은 위험하다.
+> `certonly` 는 인증서만 받고 설정은 건드리지 않는다.
+
+**(3) 본 설정으로 교체**
+```bash
 sudo cp deploy/nginx-realestate.conf /etc/nginx/sites-available/realestate.conf
 sudo sed -i "s|<APP_ROOT>|$(pwd)|g" /etc/nginx/sites-available/realestate.conf
-sudo ln -sfn ../sites-available/realestate.conf /etc/nginx/sites-enabled/realestate.conf
+grep -n '<APP_ROOT>' /etc/nginx/sites-available/realestate.conf && \
+  echo "치환 안 된 자리가 남았다 — 진행 금지"
 
-# 2) ⚠️ 반드시 문법 검사부터. 실패한 채 reload 하면 **동거 서비스까지 같이 죽는다.**
+# ⚠️ 반드시 문법 검사부터. 실패한 채 reload 하면 **동거 서비스까지 같이 죽는다.**
 sudo nginx -t
 
-# 3) 통과했을 때만
+# 통과했을 때만
 sudo systemctl reload nginx
 ```
 
-### 5-5. TLS 발급
+**(4) 자동 갱신 확인**
 ```bash
-sudo certbot --nginx -d realestate.utilverse.info
+sudo certbot renew --dry-run
+```
+> 갱신도 `--webroot` 로 돌아간다(발급 때 쓴 방식이 기록된다).
+> 부트스트랩 블록은 (3)에서 대체돼 사라졌지만, 본 설정의 80 블록에도
+> `/.well-known/acme-challenge/` 가 남아 있어 갱신이 계속 동작한다.
+
+**막혔을 때** — `nginx -t` 가 실패하면 **손으로 고치지 말고** 아래로 되돌린 뒤 보고한다.
+그 상태에서 임의 수정이 동거 서비스를 위태롭게 하는 유일한 경로다.
+```bash
+sudo rm /etc/nginx/sites-enabled/realestate.conf
 sudo nginx -t && sudo systemctl reload nginx
-sudo certbot renew --dry-run        # 자동 갱신 확인
 ```
 
 ### 5-6. 최종 확인
+
+**(1) 앱 응답**
 ```bash
-curl -fsS https://realestate.utilverse.info/api/v1/health
-curl -sI https://realestate.utilverse.info | grep -i strict-transport
+curl -fsS https://realestate.utilverse.info/api/v1/health   # {"status":"ok","role":"api"}
+```
+
+**(2) 보안헤더 — 4종이 전부 나와야 한다 (DEP-1 회귀 검사)**
+
+`add_header` 는 상속되지 않으므로 **경로마다** 확인한다. 아래는 하나라도 빠지면
+`[실패]` 를 찍는다 — grep 결과를 눈으로 보고 넘기지 말 것(그렇게 해서 놓쳤던 항목이다).
+
+```bash
+check_headers() {
+  local url="$1" out
+  out=$(curl -sI "$url")
+  echo "  --- $url"
+  for h in strict-transport-security x-frame-options \
+           x-content-type-options referrer-policy; do
+    if grep -qi "^$h:" <<<"$out"; then echo "    [OK]   $h"
+    else                               echo "    [실패] $h 없음"; fi
+  done
+}
+
+BASE=https://realestate.utilverse.info
+check_headers "$BASE/"                 # → try_files 로 index.html 을 탄다(가장 중요)
+check_headers "$BASE/index.html"
+check_headers "$BASE/api/v1/health"
+# 정적 자산 하나 (파일명은 빌드마다 다르다)
+ASSET=$(curl -s "$BASE/" | grep -oE '/assets/[^"]+\.js' | head -1)
+[ -n "$ASSET" ] && check_headers "$BASE$ASSET"
+```
+`[실패]` 가 하나라도 있으면 **DEP-1 회귀**다. `nginx-realestate.conf` 에서 해당
+location 에 보안헤더 4종이 다시 적혀 있는지 확인한다.
+
+**(3) 캐시 정책**
+```bash
+curl -sI https://realestate.utilverse.info/index.html | grep -i cache-control
+# → no-store  (이게 없으면 배포해도 옛 화면이 남는다)
+```
+
+**(4) 리소스**
+```bash
 docker stats --no-stream
 free -m
 ```
 `docker stats` 의 MEM% 가 90% 를 넘으면 상한을 올리기 전에 **PM 에 보고**한다
-(여유가 16MB 뿐이라 임의로 올리면 동거 서비스가 위험하다).
+(최악 여유가 16MB 뿐이라 임의로 올리면 동거 서비스가 위험하다).
 
 ---
 
