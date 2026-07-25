@@ -274,3 +274,45 @@
 ### 판정
 **CR-004~006 CONFIRM PASS.** 구현 코드의 정확성·레이어·테스트는 견고하다. 보안 측면은
 SR-006 참조 — **G1 코드리뷰는 통과, 단 SR4-2(자산유출 방어)는 SR-006에서 반려**한다.
+
+---
+
+## CR-008 · 2026-07-25 · PostGIS 마이그레이션 실검증 (배포 서버)
+
+**판정: PASS** · CR-004 의 "PostGIS 마이그레이션 미검증" / SR4-1 **해소**
+
+### 검증 환경
+로컬에 Docker 부재로 미뤄졌던 실검증을, 사용자 승인 하에 배포 VPS 에서 수행.
+⚠️ 실서비스 서버(autobtc·itsmine 운영 중, 메모리 여유 332MB)이므로 **전체 스택을 띄우지 않고**
+PostGIS 컨테이너 1개만 256MB 제한으로 임시 기동 → 검증 → **완전 삭제**(원상복구 확인).
+
+### 마이그레이션 실적용 (DoD 1) — 전부 통과
+`001_init.sql` + `002_add_user_preference_unique.sql` 을 `docker-entrypoint-initdb.d` 로 자동 적용.
+
+| 항목 | 결과 |
+|---|---|
+| `CREATE EXTENSION postgis` | ✅ PostGIS 3.4 (re-arch 가 superuser 권한 우려했던 지점 — postgis 이미지 initdb 로 통과) |
+| 테이블 | 34개 (base 21 + trade 파티션 13) |
+| trade 파티션 | ✅ 13개 (2016~2027 + default) |
+| GiST 공간 인덱스 | ✅ 6개 |
+| user_preference UNIQUE(user_id) | ✅ 002 적용 |
+| agent_finding CHECK | ✅ evidence·confidence |
+| **파티션 라우팅 실동작** | ✅ 2026 거래 INSERT → `trade_2026` 로 정확히 라우팅 |
+| **GiST 인덱스 스캔** | ✅ `Index Scan using idx_complex_geom` (seqscan 아님 — 지도 조회 성능 근거) |
+
+### 앱 동작 (DoD 2) — needs_db **28 passed / 1 failed**
+PostGIS 실 DB 위에서 register·login·프로필 암복호화·bbox 조회·IDOR·파티션·GiST 전부 통과.
+
+**실패 1건은 프로덕션 무관 — 테스트 코드 버그:**
+`test_근거없는_agent_finding은_저장되지_않는다` 의 2번째 케이스에서 SQLAlchemy `text()` 가
+JSON 리터럴 `'{"a":1}'` 의 **`:1` 을 바인드 파라미터로 오해석**. agent_finding CHECK 자체는
+정상(1번째 케이스 `'[]'` 거부 = IntegrityError 확인). → re-arch 전달(다음 라운드):
+`text()` → `exec_driver_sql` 또는 콜론 이스케이프.
+
+### 부수 발견 (다음 라운드 반영)
+- `backend/requirements.txt` 에 `pytest` 누락 — 런타임 의존성만 있어 테스트 실행 시 별도 설치 필요.
+  dev 의존성 분리(`requirements-dev.txt`) 권장.
+
+### 결론
+**마이그레이션은 실제로 돈다.** CR-004 최우선 이월 항목과 SR4-1 이 실측으로 해소됨.
+서버는 원상복구(실서비스 무영향) 확인.
