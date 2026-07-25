@@ -31,3 +31,4 @@
 | 2026-07-25-16-review | 2026-07-25 | re-review | SR8-1 재검증 | none | done | **SR8-1 CLOSE**(SR-009): 실측 계측 최악76MiB·폭주격리·하한차단·해시호환 전부 PASS. **CR9-1 CLOSE**. 통과조건④ 부분충족→**SR8-2(low) 승계**(argon2 HashingError 여전히 500). 320 passed 5회연속. argon2 flake 기전해소 | 체크포인트 7. 통과시 open finding 닫기 |
 | 2026-07-25-18-domain | 2026-07-25 | re-domain | CR10-1: target_region_code 필드 제거(권장 ⓐ) | review-required | working | 문서-현실 일치. 우회 원천차단 |
 | 2026-07-25-17-arch | 2026-07-25 | re-arch | SR8-2: argon2 HashingError→503 매핑 | review-required | working | 500(버그)→503(자원부족·재시도가능) |
+| 2026-07-25-19-arch | 2026-07-25 | re-arch | 배포 준비: 최소구성(api+db) compose·nginx블록·itsmine중지·DEPLOY.md | human-approval(G5) | 하달대기 | worker.py 미구현→1차 동기기능만. 준비물만, 서버 무변경. SR8-2/CR10-1 완료 후 하달 |
