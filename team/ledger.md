@@ -28,3 +28,5 @@
 | 2026-07-25-SR8-1 | 2026-07-25 | (open) | Argon2 OOM 배포차단 | human-approval(G5) | open→13-arch 처리중 | 배포 전 필수 해소 |
 | 2026-07-25-PM판단1 | 2026-07-25 | (사람) | 전체 스택(상한합 640MB+)이 서버여유(332MB) 초과 — 배포범위 축소 or 증설 | human-approval(G5) | escalated | re-arch 13-arch 발견. 상시 배포 불가, 결정 필요 |
 | 2026-07-25-PM판단2 | 2026-07-25 | re-arch | worker.py 미구현(exit2)+restart:unless-stopped=무한재시작 루프 | review-required | 대기 | compose worker restart 조정 or worker 구현 전 비활성. 배포 전 필수 |
+| 2026-07-25-16-review | 2026-07-25 | re-review | SR8-1(Argon2) 재검증 + CR9-1/CR10-1 정리 | none | working | 체크포인트 7. 통과시 open finding 닫기 |
+| 2026-07-25-CR10-1 | 2026-07-25 | (re-be/re-domain) | target_region_code 문서-현실 불일치 수정 | review-required | 대기 | re-review 통과조건 후 |
