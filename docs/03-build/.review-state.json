@@ -19,6 +19,30 @@
   },
   "open_findings": [
     {
+      "id": "CR10-1",
+      "verdict": "OPEN",
+      "severity": "low",
+      "blocks": "없음 (비차단 — 현재 무시되므로 활성 취약점 아님. 단 배선 한 줄이면 G2 구멍)",
+      "found_by": "CR-010 (re-review, 지시 2026-07-25-12-review(B))",
+      "date_found": "2026-07-25",
+      "owner": "re-arch (API 계약) / re-domain (docstring)",
+      "title": "target_region_code 가 클라이언트 입력인데 무시된다 — API 계약·docstring 이 현실과 불일치",
+      "evidence": [
+        "app/api/schemas.py:52 AffordabilityIn.target_region_code 는 공개 API 가 받는 클라이언트 값",
+        "app/api/routes.py:222 PropertyFacts(area_m2=, is_regulated_area=, purpose=) 로 이 값을 넘기지 않음 — routes.py 는 14-domain 에서 미변경",
+        "전수 grep: target_region_code 정의(schemas.py:52, models.py:59) 외 생산 사용처 0건 → 조용히 무시됨",
+        "프론트엔드 미사용 확인(frontend/src grep 0건)",
+        "현재 동작은 안전: 무시 → effective_region_group 기본 '수도권' → 캡 항상 적용",
+        "그러나 models.py:55-57 docstring 은 '사용자(클라이언트)가 보내는 값이 아니다 … 서버가 단지 region(PostGIS)에서 판정한다'고 서술 — 실제 API 표면과 불일치(SR-005 에서 반려했던 문서-현실 불일치와 동일 범주)"
+      ],
+      "pass_conditions": [
+        "ⓐ AffordabilityIn 에서 target_region_code 제거(서버가 단지 region 으로 판정할 때까지) — 또는",
+        "ⓑ 필드 유지하되 서버 판정값으로 덮어쓰고 docstring 을 실제 동작에 맞게 정정",
+        "어느 쪽이든 '클라이언트가 못 바꾼다'는 서술과 코드가 일치해야 한다"
+      ],
+      "note": "잠재 위험: 필드명이 배선을 유도하고 docstring 이 그 배선을 정답처럼 서술한다. body.target_region_code 를 한 줄 연결하는 순간 사용자가 비수도권 코드로 6억캡을 끄고 실구매 가능액을 13.6억 부풀릴 수 있다 — 이 작업 전체가 고치려던 버그로 회귀."
+    },
+    {
       "id": "SR8-1",
       "verdict": "OPEN",
       "severity": "high",

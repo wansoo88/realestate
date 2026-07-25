@@ -26,9 +26,10 @@ f(P) 는 P 에 대해 단조 비감소(세율 구간 점프 포함)이므로 이
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
-from app.domain.rules.loader import Bracket, RuleSet
+from app.domain.rules.loader import RuleSet
 from app.domain.affordability.models import (
     AffordabilityResult,
     Borrower,
@@ -78,13 +79,6 @@ def dti_limit(borrower: Borrower, terms: LoanTerms, dti_pct: float) -> int:
 # 취득 부대비용
 # ---------------------------------------------------------------------------
 
-def _pct_total(bracket: Bracket) -> float:
-    """본세율 + 부가세율(모두 거래금액 대비 %)."""
-    return bracket.rate_pct + sum(
-        v for k, v in bracket.extras.items() if k.endswith("_pct")
-    )
-
-
 def acquisition_cost(price_krw: int, rules: RuleSet, borrower: Borrower,
                      prop: PropertyFacts) -> CostBreakdown:
     """취득세 + 중개보수 + 등기·법무. 구간을 못 찾으면 추정하지 않고 예외를 던진다."""
@@ -95,7 +89,11 @@ def acquisition_cost(price_krw: int, rules: RuleSet, borrower: Borrower,
         area=prop.area_m2,
         regulated=prop.is_regulated_area,
     )
-    tax = int(price_krw * _pct_total(acq) / 100.0)
+    # 누진 밴드(6~9억)면 산식으로, 고정구간이면 기존과 같은 값. `total_rate_pct` 가
+    # 본세 + 정률부가세(extras.*_pct) + 본세연동부가세(extras_ratio)를 전부 합산한다.
+    tax = int(price_krw * acq.total_rate_pct(
+        price=price_krw, area=prop.area_m2,
+        houses_owned=houses_after, regulated=prop.is_regulated_area) / 100.0)
 
     brk = rules.brokerage_bracket(price=price_krw)
     fee = int(price_krw * brk.rate_pct / 100.0)
@@ -118,16 +116,23 @@ def acquisition_cost(price_krw: int, rules: RuleSet, borrower: Borrower,
 
 def _limits_at(price_krw: int, borrower: Borrower, terms: LoanTerms,
                rules: RuleSet, ltv_pct: float, dsr_pct: float,
-               dti_pct: float | None) -> LoanLimits:
+               dti_pct: float | None, *,
+               stress_terms: LoanTerms | None = None,
+               cap_krw: int | None = None) -> LoanLimits:
     ltv = int(price_krw * ltv_pct / 100.0)
-    dsr = dsr_limit(borrower, terms, dsr_pct)
+    # DSR 한도는 **스트레스 금리**로 산정한다(더 보수적). 실제 상환액 계산엔 쓰지 않는다.
+    dsr = dsr_limit(borrower, stress_terms or terms, dsr_pct)
     dti = dti_limit(borrower, terms, dti_pct) if dti_pct is not None else None
 
     candidates: list[tuple[str, int]] = [("LTV", ltv), ("DSR", dsr)]
     if dti is not None:
         candidates.append(("DTI", dti))
+    if cap_krw is not None:
+        # 절대한도도 경합 후보 — 가장 작은 게 실제 제약이다.
+        # 큰 쪽을 고르면 빌릴 수 없는 금액을 빌릴 수 있다고 말하게 된다.
+        candidates.append(("CAP", cap_krw))
     binding, effective = min(candidates, key=lambda kv: kv[1])
-    return LoanLimits(ltv_krw=ltv, dsr_krw=dsr, dti_krw=dti,
+    return LoanLimits(ltv_krw=ltv, dsr_krw=dsr, dti_krw=dti, cap_krw=cap_krw,
                       effective_krw=effective, binding=binding)
 
 
@@ -150,14 +155,29 @@ def compute_affordability(
     dsr_pct = dsr_rule.rate_pct
     dti_pct = dti_rule.rate_pct if dti_rule else None
 
+    # 권역은 서버 판정(사용자 입력 아님). 대상지역이 수도권 전체라 기본이 수도권=캡 적용.
+    region_group = prop.effective_region_group
+    cap_facts = dict(region_group=region_group, regulated=prop.is_regulated_area,
+                     purpose=prop.purpose)
+    cap_rule = rules.absolute_cap(**cap_facts)
+    cap_krw = cap_rule.cap_krw if cap_rule else None
+
+    # 스트레스 DSR: 한도 산정용 **가정 금리**. 실제 상환금리가 아니다(둘을 섞으면 상환액이 커 보인다).
+    stress_rule = rules.stress_rule(**cap_facts)
+    stress_pct = stress_rule.stress_rate_pct if stress_rule else 0.0
+    stress_terms = replace(terms, annual_rate=terms.annual_rate + stress_pct / 100.0)
+
+    def limits_at(price: int) -> LoanLimits:
+        return _limits_at(price, borrower, terms, rules, ltv_pct, dsr_pct, dti_pct,
+                          stress_terms=stress_terms, cap_krw=cap_krw)
+
     reserve = int(rules.fixed_costs.get("moving_reserve_krw", 0))
     usable_cash = max(0, borrower.cash_krw - reserve)
 
     def shortfall(price: int) -> int:
         """f(P) − 가용현금. 0 이하이면 감당 가능."""
         cost = acquisition_cost(price, rules, borrower, prop)
-        limits = _limits_at(price, borrower, terms, rules, ltv_pct, dsr_pct, dti_pct)
-        return price + cost.total_krw - limits.effective_krw - usable_cash
+        return price + cost.total_krw - limits_at(price).effective_krw - usable_cash
 
     # 이분탐색: shortfall(P) <= 0 인 최대 P
     lo, hi = 0, _UPPER_BOUND_KRW
@@ -177,35 +197,50 @@ def compute_affordability(
 
     if max_price <= 0:
         costs = CostBreakdown(0, 0, 0, 0)
-        limits = _limits_at(0, borrower, terms, rules, ltv_pct, dsr_pct, dti_pct)
+        limits = limits_at(0)
         loan = 0
         binding = "CASH"
     else:
         costs = acquisition_cost(max_price, rules, borrower, prop)
-        limits = _limits_at(max_price, borrower, terms, rules, ltv_pct, dsr_pct, dti_pct)
+        limits = limits_at(max_price)
         loan = max(0, max_price + costs.total_krw - usable_cash)
         loan = min(loan, limits.effective_krw)
         # 대출을 한도까지 안 쓰고도 살 수 있으면 현금이 아니라 한도가 아닌 게 제약
         binding = limits.binding if loan >= limits.effective_krw - 10_000 else "CASH"
 
     evidence: list[dict[str, Any]] = []
-    for label, rule in (("취득세", rules.acquisition_bracket(
-                            houses_owned=borrower.owned_houses + 1,
-                            price=max(max_price, 1),
-                            area=prop.area_m2,
-                            regulated=prop.is_regulated_area) if max_price > 0 else None),
-                        ("LTV 상한", ltv_rule), ("DSR 상한", dsr_rule),
+    if max_price > 0:
+        acq_rule = rules.acquisition_bracket(
+            houses_owned=borrower.owned_houses + 1, price=max_price,
+            area=prop.area_m2, regulated=prop.is_regulated_area)
+        if acq_rule.provenance is not None:
+            acq_pct = acq_rule.total_rate_pct(
+                price=max_price, area=prop.area_m2,
+                houses_owned=borrower.owned_houses + 1,
+                regulated=prop.is_regulated_area)
+            evidence.append(acq_rule.provenance.to_evidence(f"취득세 {acq_pct:.3f}%"))
+    for label, rule in (("LTV 상한", ltv_rule), ("DSR 상한", dsr_rule),
                         ("DTI 상한", dti_rule)):
         if rule is None or rule.provenance is None:
             continue
-        pct = _pct_total(rule) if label == "취득세" else rule.rate_pct
-        evidence.append(rule.provenance.to_evidence(f"{label} {pct}%"))
+        evidence.append(rule.provenance.to_evidence(f"{label} {rule.rate_pct}%"))
+    if cap_rule is not None and cap_rule.provenance is not None:
+        evidence.append(cap_rule.provenance.to_evidence(
+            f"주담대 절대한도 {cap_rule.cap_krw:,}원"))
+    if stress_rule is not None and stress_rule.provenance is not None:
+        evidence.append(stress_rule.provenance.to_evidence(
+            f"스트레스 DSR 가산 {stress_rule.stress_rate_pct}%p"))
 
     assumptions = [
         f"금리 연 {terms.annual_rate * 100:.2f}% · 만기 {terms.years}년 원리금균등 가정",
         f"이사·수리 예비비 {reserve:,}원을 가용현금에서 제외",
         f"세율 설정 버전 {rules.version}",
     ]
+    if stress_pct > 0:
+        assumptions.append(
+            f"스트레스 DSR {stress_pct}%p 가산 적용(한도 산정용 가정 금리, 실제 상환금리 아님)")
+    if cap_krw is not None:
+        assumptions.append(f"{region_group} 주담대 절대한도 {cap_krw:,}원 적용")
     if not terms.apply_dti:
         assumptions.append("DTI 미적용 지역으로 가정")
 

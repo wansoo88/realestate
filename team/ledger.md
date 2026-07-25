@@ -22,7 +22,9 @@
 | 2026-07-25-10-arch | 2026-07-25 | re-arch | 로더 스키마 확장: 6~9억 누진밴드(L1)·수도권6억캡·스트레스DSR(L2) + 003(학구도 기준연도·도로선형) | review-required | working | re-data 에스컬레이션. 6억캡이 핵심. engine은 re-domain, 값은 re-data 후속 |
 | 2026-07-25-11-data | 2026-07-25 | re-data | (다음) MOLIT 키 발급 후 실수집 + poi.category/attrs 데이터계약 | review-required | 대기(키 발급 후) | re-arch 요청. 실호출 검증 |
 | 2026-07-25-12-review | 2026-07-25 | re-review | (재하달) CR-008 독립확인 + 10-arch 후속 최종 재감사 대기 | none | working | pane 재기동 후 재하달. 6억캡 검증이 핵심 |
-| 2026-07-25-13-arch | 2026-07-25 | re-arch | SR8-1 해소: Argon2 19MiB+compose 메모리제한+동시성 | review-required | working | re-review 발견 배포차단. OWASP 하한 |
-| 2026-07-25-14-domain | 2026-07-25 | re-domain | engine 6억캡·스트레스DSR·누진 계산 + PropertyFacts region_group | review-required | working | contract §3+§1. 과대산정 해소 핵심 |
-| 2026-07-25-15-data | 2026-07-25 | re-data | tax_rules 값: 6억캡·스트레스DSR·누진밴드(출처) | review-required | working | contract §5 |
+| 2026-07-25-13-arch | 2026-07-25 | re-arch | SR8-1 해소 | review-required | done | Argon2 19MiB/t2/p1(OWASP하한)+ARGON2_* 5종 설정화, 세마포어 동시성4(최악 76MiB), 하한미만 두겹 기동차단, 인증폭주 503, 기존해시 재검증 호환. compose api256m/worker192m. 보안테스트 36건, 인증 10회 반복 통과. **자체 PASS 선언 안함** → re-review 재검증(체크포인트 7) | re-review 발견 배포차단. OWASP 하한 |
+| 2026-07-25-14-domain | 2026-07-25 | re-domain | engine 6억캡·스트레스DSR·누진 + region_group | review-required | done | total_rate_pct·absolute_cap·stress·region_group 전환. **effective_region_group 기본=수도권**(re-review C2 반영: 지역미상도 보수적 캡적용). 근사 없이 정확. re-review 재검증 대기 | contract §3+§1. 과대산정 해소 핵심 |
+| 2026-07-25-15-data | 2026-07-25 | re-data | tax_rules 확장값 3종(출처) | review-required | done | 6억캡(6.27대책)·스트레스DSR(수도권1.5%p)·6~9억 progressive. 계약서 검산 정확일치, 근사 없음. test_tax_rules_real 갱신. 286 passed. 잔여: ltv/dsr 규제지역·생애최초 차등 미반영 | contract §5 |
 | 2026-07-25-SR8-1 | 2026-07-25 | (open) | Argon2 OOM 배포차단 | human-approval(G5) | open→13-arch 처리중 | 배포 전 필수 해소 |
+| 2026-07-25-PM판단1 | 2026-07-25 | (사람) | 전체 스택(상한합 640MB+)이 서버여유(332MB) 초과 — 배포범위 축소 or 증설 | human-approval(G5) | escalated | re-arch 13-arch 발견. 상시 배포 불가, 결정 필요 |
+| 2026-07-25-PM판단2 | 2026-07-25 | re-arch | worker.py 미구현(exit2)+restart:unless-stopped=무한재시작 루프 | review-required | 대기 | compose worker restart 조정 or worker 구현 전 비활성. 배포 전 필수 |

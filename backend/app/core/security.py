@@ -18,11 +18,13 @@ AAD 바인딩
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import os
+import threading
 from typing import Any
 
 import jwt
-from argon2 import PasswordHasher
+from argon2 import PasswordHasher, Type
 from argon2.exceptions import InvalidHashError, VerifyMismatchError
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -41,11 +43,24 @@ SENSITIVE_FIELDS: frozenset[str] = frozenset({
     "field_encryption_key", "jwt_secret",
 })
 
-_hasher = PasswordHasher()
+#: OWASP Password Storage Cheat Sheet 의 Argon2id 권장 하한.
+#: **이 아래로는 내리지 않는다.** 메모리가 모자라면 파라미터가 아니라
+#: 동시성(`argon2_concurrency`)을 줄인다 — 파라미터를 깎으면 오프라인 크래킹
+#: 난이도가 그대로 내려가지만, 동시성을 줄이면 느려질 뿐 강도는 유지된다.
+OWASP_MIN_MEMORY_KIB = 19456   # 19 MiB
+OWASP_MIN_TIME_COST = 2
+OWASP_MIN_PARALLELISM = 1
 
 
 class DecryptionError(Exception):
     """복호화 실패. 키가 다르거나, 데이터가 변조됐거나, 다른 사용자의 암호문이다."""
+
+
+class HashCapacityError(Exception):
+    """해시 동시 실행 슬롯을 못 얻었다 — 과부하.
+
+    대기하다 스레드풀이 전부 막히면 지도·리포트 같은 **다른 기능까지 죽는다.**
+    인증만 잠깐 503 으로 흘려보내는 편이 낫다(main.py 가 503 으로 변환)."""
 
 
 # ---------------------------------------------------------------------------
@@ -104,22 +119,123 @@ def decrypt_amount(blob: bytes | None, *, user_id: int, field: str, key: bytes) 
 MIN_PASSWORD_LEN = 12
 
 
+def argon2_parameter_problems(settings: Any) -> list[str]:
+    """설정된 Argon2 파라미터가 OWASP 하한을 만족하는지. 정상이면 빈 목록."""
+    problems: list[str] = []
+    if settings.argon2_memory_kib < OWASP_MIN_MEMORY_KIB:
+        problems.append(
+            f"ARGON2_MEMORY_KIB={settings.argon2_memory_kib} 는 OWASP 하한"
+            f" {OWASP_MIN_MEMORY_KIB}KiB(19MiB) 미만입니다. 메모리가 부족하면"
+            " 파라미터가 아니라 ARGON2_CONCURRENCY 를 줄이세요"
+        )
+    if settings.argon2_time_cost < OWASP_MIN_TIME_COST:
+        problems.append(
+            f"ARGON2_TIME_COST={settings.argon2_time_cost} 는 OWASP 하한"
+            f" {OWASP_MIN_TIME_COST} 미만입니다"
+        )
+    if settings.argon2_parallelism < OWASP_MIN_PARALLELISM:
+        problems.append(
+            f"ARGON2_PARALLELISM={settings.argon2_parallelism} 는"
+            f" {OWASP_MIN_PARALLELISM} 이상이어야 합니다"
+        )
+    if settings.argon2_concurrency < 1:
+        problems.append("ARGON2_CONCURRENCY 는 1 이상이어야 합니다")
+    return problems
+
+
+@functools.lru_cache(maxsize=8)
+def _build_hasher(memory_kib: int, time_cost: int, parallelism: int) -> PasswordHasher:
+    """파라미터별 해셔. 값이 바뀌면 새로 만든다(설정을 바꾼 테스트도 그대로 동작).
+
+    하한 검증을 여기서도 한 번 더 한다. `validate_runtime` 은 기동 점검일 뿐
+    호출을 강제할 수 없어서, **실제로 해시를 만드는 길목**에 문을 달아 둔다.
+    """
+    if (memory_kib < OWASP_MIN_MEMORY_KIB or time_cost < OWASP_MIN_TIME_COST
+            or parallelism < OWASP_MIN_PARALLELISM):
+        raise ValueError(
+            f"Argon2 파라미터가 OWASP 하한 미만입니다 "
+            f"(m={memory_kib}KiB t={time_cost} p={parallelism} < "
+            f"m={OWASP_MIN_MEMORY_KIB} t={OWASP_MIN_TIME_COST} "
+            f"p={OWASP_MIN_PARALLELISM}). 비밀번호 강도를 낮추는 대신 "
+            f"ARGON2_CONCURRENCY 를 줄이세요"
+        )
+    return PasswordHasher(memory_cost=memory_kib, time_cost=time_cost,
+                          parallelism=parallelism, type=Type.ID)
+
+
+@functools.lru_cache(maxsize=8)
+def _build_gate(concurrency: int) -> threading.BoundedSemaphore:
+    return threading.BoundedSemaphore(concurrency)
+
+
+def _current() -> tuple[PasswordHasher, threading.BoundedSemaphore, float]:
+    from app.core.config import get_settings
+
+    s = get_settings()
+    return (
+        _build_hasher(s.argon2_memory_kib, s.argon2_time_cost, s.argon2_parallelism),
+        _build_gate(s.argon2_concurrency),
+        s.argon2_wait_timeout_sec,
+    )
+
+
+def get_hasher() -> PasswordHasher:
+    """현재 설정의 해셔. 테스트·점검용."""
+    return _current()[0]
+
+
+class _Slot:
+    """해시 연산 슬롯. 못 얻으면 기다리지 않고 `HashCapacityError`.
+
+    동기 엔드포인트는 anyio 스레드풀(기본 40개)에서 돈다. 문을 안 달면
+    로그인 폭주 하나로 40 × 19MiB = 760MiB 를 잡고 서버가 넘어간다.
+    """
+
+    def __init__(self, gate: threading.BoundedSemaphore, timeout: float) -> None:
+        self._gate = gate
+        self._timeout = timeout
+
+    def __enter__(self) -> None:
+        if not self._gate.acquire(timeout=self._timeout):
+            raise HashCapacityError(
+                f"비밀번호 해시 동시 실행 한도에 걸렸습니다({self._timeout}s 대기)"
+            )
+
+    def __exit__(self, *exc: Any) -> None:
+        self._gate.release()
+
+
 def hash_password(password: str) -> str:
     if len(password) < MIN_PASSWORD_LEN:
         raise ValueError(f"비밀번호는 최소 {MIN_PASSWORD_LEN}자여야 합니다")
-    return _hasher.hash(password)
+    hasher, gate, timeout = _current()
+    with _Slot(gate, timeout):
+        return hasher.hash(password)
 
 
 def verify_password(password: str, hashed: str) -> bool:
+    """저장된 해시로 검증.
+
+    ⚠️ 파라미터를 바꿔도 **기존 해시는 그대로 검증된다.** argon2 는 m·t·p 를
+    해시 문자열 안에 담고, 검증은 거기 적힌 값을 쓰기 때문이다.
+    (그래서 SR8-1 수정에 재해시·마이그레이션이 필요 없다.)
+    """
+    hasher, gate, timeout = _current()
     try:
-        return _hasher.verify(hashed, password)
+        with _Slot(gate, timeout):
+            return hasher.verify(hashed, password)
     except (VerifyMismatchError, InvalidHashError, ValueError):
         return False
 
 
 def needs_rehash(hashed: str) -> bool:
+    """현재 파라미터와 다른 해시인가.
+
+    ⚠️ 파라미터를 **낮춘** 지금은 옛 64MiB 해시가 True 로 나온다. 그렇다고
+    자동 재해시하면 더 약한 해시로 내려가는 셈이라, 호출부를 두지 않았다.
+    """
     try:
-        return _hasher.check_needs_rehash(hashed)
+        return _current()[0].check_needs_rehash(hashed)
     except (InvalidHashError, ValueError):
         return True
 

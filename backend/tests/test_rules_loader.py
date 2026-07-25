@@ -172,19 +172,24 @@ def test_evidence_형식(test_rules):
 
 # --- 하위호환 --------------------------------------------------------------
 
-def test_확장필드가_없어도_그대로_로딩된다(test_rules, production_rules_path):
-    """기존 설정 파일(절대한도·스트레스 없음)이 깨지지 않아야 한다."""
-    for rules in (test_rules, load_rules(production_rules_path)):
-        assert rules.lending_caps == ()
-        assert rules.lending_stress == ()
-        # 없으면 '한도 없음'·'가산 0' — 기존 계산 결과와 동일하다
-        assert rules.absolute_cap_krw(region_group="수도권") is None
-        assert rules.stress_rate_pct(region_group="수도권") == 0.0
-        # 고정 요율 구간은 예전처럼 동작
-        acq = rules.acquisition_bracket(houses_owned=1, price=500_000_000,
-                                        area=84.0, regulated=False)
-        assert acq.is_progressive is False
-        assert acq.rate_pct_for(price=500_000_000) == acq.rate_pct
+def test_확장필드가_없어도_그대로_로딩된다(test_rules):
+    """확장 필드가 없는 설정(픽스처)은 깨지지 않고 '한도 없음·가산 0'으로 동작한다.
+
+    (운영 config/tax_rules.yaml 은 ORDER 2026-07-25-15-data 로 절대한도·스트레스 DSR·
+     누진밴드가 채워졌다 — 더는 '확장 없음' 예시가 아니다. 그 실제값 검증은
+     test_tax_rules_real.py 가 담당한다.)
+    """
+    rules = test_rules
+    assert rules.lending_caps == ()
+    assert rules.lending_stress == ()
+    # 없으면 '한도 없음'·'가산 0' — 기존 계산 결과와 동일하다
+    assert rules.absolute_cap_krw(region_group="수도권") is None
+    assert rules.stress_rate_pct(region_group="수도권") == 0.0
+    # 고정 요율 구간은 예전처럼 동작
+    acq = rules.acquisition_bracket(houses_owned=1, price=500_000_000,
+                                    area=84.0, regulated=False)
+    assert acq.is_progressive is False
+    assert acq.rate_pct_for(price=500_000_000) == acq.rate_pct
 
 
 # --- 수도권 6억 절대한도 ---------------------------------------------------

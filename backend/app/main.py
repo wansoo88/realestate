@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 
 from app.api.routes import router
 from app.core.config import get_settings
-from app.core.security import mask_sensitive
+from app.core.security import HashCapacityError, mask_sensitive
 
 logger = logging.getLogger("app")
 
@@ -68,6 +68,22 @@ def create_app(*, repo=None) -> FastAPI:
         response.headers.setdefault(
             "Strict-Transport-Security", "max-age=31536000; includeSubDomains")
         return response
+
+    @app.exception_handler(HashCapacityError)
+    async def hash_overloaded(request: Request, exc: HashCapacityError):
+        """인증 폭주는 **인증만** 거절한다 (SR8-1).
+
+        해시 슬롯을 기다리며 스레드풀이 다 막히면 지도·리포트까지 함께 죽는다.
+        여기서 잘라내면 나머지 기능은 계속 응답한다.
+        비밀번호·계정 존재 여부는 어떤 식으로도 드러내지 않는다.
+        """
+        logger.warning("인증 해시 동시 실행 한도 초과: %s", request.url.path)
+        return JSONResponse(
+            status_code=503,
+            content={"error": {"code": "BUSY",
+                               "message": "요청이 많아 잠시 후 다시 시도해 주세요"}},
+            headers={"Retry-After": "1"},
+        )
 
     @app.exception_handler(Exception)
     async def unhandled(request: Request, exc: Exception):  # pragma: no cover

@@ -8,6 +8,15 @@
 # 네트워크 분리
 #   edge : 외부 통신 가능. nginx 인바운드 + 워커의 아웃바운드(공공API·Claude API)
 #   data : internal=true → 외부 인터넷 단절. db·redis 는 여기에만 둔다.
+#
+# 메모리 제한 (SR8-1)
+#   이 서버에는 **다른 실서비스가 함께 돈다.** 우리 스택이 폭주해도 그쪽으로
+#   번지지 않도록 컨테이너마다 상한을 둔다. 제한이 없으면 OOM Killer 가
+#   "가장 큰 프로세스"를 고르는데, 그게 우리가 아닐 수 있다.
+#   memswap_limit 을 mem_limit 과 같게 둬 스왑으로 새는 것도 막는다
+#   (스왑으로 넘어가면 안 죽고 대신 서버 전체가 느려진다 — 더 나쁘다).
+#   ⚠️ 아래 합계는 이 서버의 관측 여유(332MB)를 넘는다. 전체 스택 동시 기동은
+#      배포 전에 사양을 다시 봐야 한다(re-pm 보고 · G5 판단 사항).
 
 name: realestate
 
@@ -38,6 +47,9 @@ services:
       redis: { condition: service_started }
     networks: [edge, data]
     # ports 없음 — nginx 를 통해서만 접근
+    # 파이썬 런타임(~120MB) + Argon2 동시 4건(4×19MiB≈76MB) + 여유
+    mem_limit: 256m
+    memswap_limit: 256m
 
   worker-agent:
     build: ./backend
@@ -50,6 +62,9 @@ services:
       db: { condition: service_healthy }
       redis: { condition: service_started }
     networks: [edge, data]   # edge 필요: Claude API 아웃바운드
+    # LLM 응답 JSON 을 다루는 정도 — 해시 연산 없음
+    mem_limit: 192m
+    memswap_limit: 192m
 
   worker-ingest:
     build: ./backend
@@ -62,6 +77,9 @@ services:
       db: { condition: service_healthy }
       redis: { condition: service_started }
     networks: [edge, data]   # edge 필요: 공공 오픈API 아웃바운드
+    # 공공API 응답 파싱 — 대량 배치 시 여기가 먼저 늘어난다
+    mem_limit: 192m
+    memswap_limit: 192m
 
   redis:
     image: redis:7-alpine

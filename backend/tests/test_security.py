@@ -5,16 +5,25 @@
 from __future__ import annotations
 
 import datetime as dt
+import threading
+import time
 
+import argon2
 import jwt
 import pytest
 
 from app.core.security import (
+    OWASP_MIN_MEMORY_KIB,
+    OWASP_MIN_PARALLELISM,
+    OWASP_MIN_TIME_COST,
     DecryptionError,
+    HashCapacityError,
+    argon2_parameter_problems,
     decode_token,
     decrypt_amount,
     encrypt_amount,
     generate_key,
+    get_hasher,
     hash_password,
     load_key,
     mask_sensitive,
@@ -113,6 +122,161 @@ def test_짧은_비밀번호는_거부():
 
 def test_잘못된_해시로_검증하면_False():
     assert not verify_password("anything", "not-a-hash")
+
+
+# ---------------------------------------------------------------------------
+# Argon2 파라미터 · 동시성 (SR8-1)
+#   64MiB × 동시 5건 = 320MiB 로 동거 실서비스를 OOM 위협하던 문제.
+#   **보안을 낮춘 게 아니라** OWASP 하한으로 맞추고 동시성을 제한했다.
+# ---------------------------------------------------------------------------
+
+def test_해시_파라미터가_OWASP_하한을_만족한다():
+    """기본 64MiB·t3·p4 → 19MiB·t2·p1. 하한 밑으로는 내려가지 않는다."""
+    h = get_hasher()
+    assert h.memory_cost >= OWASP_MIN_MEMORY_KIB
+    assert h.time_cost >= OWASP_MIN_TIME_COST
+    assert h.parallelism >= OWASP_MIN_PARALLELISM
+    assert h.type == argon2.low_level.Type.ID
+
+    # argon2-cffi 기본값(64MiB)을 그대로 쓰고 있지 않다는 것 자체가 이 수정의 핵심
+    assert h.memory_cost < 65536, "기본값 64MiB 로 돌아갔습니다 (SR8-1 회귀)"
+
+
+def test_해시_문자열에_파라미터가_기록된다():
+    """검증이 설정이 아니라 **해시에 적힌 값**을 쓴다는 근거."""
+    params = argon2.extract_parameters(hash_password("correct horse battery"))
+    assert params.memory_cost == get_hasher().memory_cost
+    assert params.time_cost == get_hasher().time_cost
+    assert params.parallelism == get_hasher().parallelism
+
+
+def test_다른_파라미터로_만든_기존_해시도_검증된다():
+    """파라미터를 바꿔도 **재해시·마이그레이션이 필요 없다**.
+
+    운영 DB 에 이미 64MiB 로 저장된 해시가 있어도 로그인이 깨지지 않는다.
+    (여기서는 64MiB 를 실제로 할당하지 않으려고 다른 값으로 검증한다 —
+     검증하는 성질은 '설정과 다른 파라미터'라는 점이라 값 자체는 무관하다.)
+    """
+    legacy = argon2.PasswordHasher(memory_cost=16384, time_cost=1, parallelism=2)
+    old_hash = legacy.hash("correct horse battery")
+
+    p = argon2.extract_parameters(old_hash)
+    assert (p.memory_cost, p.time_cost, p.parallelism) != (
+        get_hasher().memory_cost, get_hasher().time_cost, get_hasher().parallelism)
+
+    assert verify_password("correct horse battery", old_hash)
+    assert not verify_password("wrong password!!", old_hash)
+
+
+def test_64MiB_해시_문자열도_파라미터가_읽힌다():
+    """실제 운영에 남아 있을 옛 해시 형식(64MiB·t3·p4) 파싱 확인.
+
+    문자열 파싱만 한다 — 검증까지 하면 이 테스트가 64MiB 를 잡아
+    지금 고치려는 그 문제를 테스트가 스스로 일으킨다.
+    """
+    legacy = ("$argon2id$v=19$m=65536,t=3,p=4$"
+              "c29tZXNhbHRzb21lc2FsdA$RdescudvJCsgt3ub+b+dWRWJTmaaJObG")
+    p = argon2.extract_parameters(legacy)
+    assert (p.memory_cost, p.time_cost, p.parallelism) == (65536, 3, 4)
+
+
+@pytest.mark.parametrize("field, value, expect", [
+    ("argon2_memory_kib", OWASP_MIN_MEMORY_KIB - 1, "OWASP 하한"),
+    ("argon2_time_cost", OWASP_MIN_TIME_COST - 1, "OWASP 하한"),
+    ("argon2_parallelism", 0, "이상이어야"),
+    ("argon2_concurrency", 0, "1 이상이어야"),
+])
+def test_하한_미만_설정은_기동_점검에서_걸린다(field, value, expect):
+    """메모리가 부족하다고 파라미터를 깎는 '해결'을 막는다."""
+    from app.core.config import Settings
+
+    s = Settings(jwt_secret="x" * 40, field_encryption_key="k" * 32,
+                 postgres_password="pw", **{field: value})
+    problems = argon2_parameter_problems(s)
+    assert any(expect in p for p in problems), problems
+    # validate_runtime 에도 그대로 올라온다
+    assert any(expect in p for p in s.validate_runtime())
+
+
+def test_하한_미만이면_해셔를_만들_수_없다():
+    """기동 점검을 건너뛰어도 해시 경로에서 막힌다."""
+    from app.core.security import _build_hasher
+
+    with pytest.raises(ValueError, match="OWASP 하한"):
+        _build_hasher(8192, 2, 1)
+
+
+def test_동시_해시가_설정값을_넘지_않는다(monkeypatch):
+    """스레드풀 40개가 전부 해시에 들어가 760MiB 를 잡는 걸 막는다."""
+    from app.core.config import get_settings
+
+    monkeypatch.setenv("ARGON2_CONCURRENCY", "2")
+    monkeypatch.setenv("JWT_SECRET", "x" * 40)
+    monkeypatch.setenv("FIELD_ENCRYPTION_KEY", "k" * 32)
+    get_settings.cache_clear()
+    try:
+        inside = 0
+        peak = 0
+        lock = threading.Lock()
+        start = threading.Event()
+
+        def work():
+            nonlocal inside, peak
+            start.wait()
+            from app.core.security import _Slot, _current
+            _, gate, timeout = _current()
+            with _Slot(gate, timeout):
+                with lock:
+                    inside += 1
+                    peak = max(peak, inside)
+                time.sleep(0.05)
+                with lock:
+                    inside -= 1
+
+        threads = [threading.Thread(target=work) for _ in range(8)]
+        for t in threads:
+            t.start()
+        start.set()
+        for t in threads:
+            t.join()
+
+        assert peak <= 2, f"동시 {peak}건이 해시에 들어갔습니다(한도 2)"
+    finally:
+        get_settings.cache_clear()
+
+
+def test_슬롯을_못_얻으면_HashCapacityError(monkeypatch):
+    """무한정 기다리다 스레드풀이 다 막히는 대신 인증만 거절한다."""
+    from app.core.config import get_settings
+
+    monkeypatch.setenv("ARGON2_CONCURRENCY", "1")
+    monkeypatch.setenv("ARGON2_WAIT_TIMEOUT_SEC", "0.05")
+    monkeypatch.setenv("JWT_SECRET", "x" * 40)
+    monkeypatch.setenv("FIELD_ENCRYPTION_KEY", "k" * 32)
+    get_settings.cache_clear()
+    try:
+        from app.core.security import _Slot, _current
+
+        _, gate, timeout = _current()
+        with _Slot(gate, timeout):                 # 하나뿐인 슬롯을 점유
+            with pytest.raises(HashCapacityError):
+                with _Slot(gate, timeout):
+                    pass
+        # 빠져나온 뒤에는 다시 얻을 수 있다(슬롯 누수 없음)
+        with _Slot(gate, timeout):
+            pass
+    finally:
+        get_settings.cache_clear()
+
+
+def test_해시_반복_실행에_실패가_없다():
+    """SR8-1 의 원 증상(HashingError)이 재발하지 않는지 반복 근거.
+
+    64MiB 였다면 이 반복이 훨씬 무겁고, 실제로 8회 중 1회 실패가 관측됐다.
+    """
+    for _ in range(20):
+        h = hash_password("correct horse battery staple")
+        assert verify_password("correct horse battery staple", h)
 
 
 # ---------------------------------------------------------------------------

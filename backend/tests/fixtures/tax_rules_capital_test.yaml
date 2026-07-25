@@ -1,0 +1,99 @@
+# ⚠️ 테스트 전용 가상 세율입니다. 실제 세율이 아닙니다. 절대 운영에 쓰지 마세요.
+#
+# 6억 절대한도(6.27 대책)·스트레스 DSR·6~9억 누진 취득세를 엔진이 적용하는지 검증하기 위한
+# 픽스처입니다. 값은 docs/domain/lending-rules-contract.md §2·§4 를 그대로 옮겼습니다.
+# 실제 값은 config/tax_rules.yaml 에 re-data 가 공식 출처 확인 후 채웁니다.
+
+version: "TEST-CAPITAL-FIXTURE-DO-NOT-USE"
+status: verified
+
+acquisition_tax:
+  # 6억 이하 · 85㎡ 이하 · 2주택 이하 → 고정 1.1%
+  - id: std_le6_small
+    when: { houses_owned_max: 2, price_max: 600000000, area_max: 85 }
+    rate_pct: 1.0
+    extras: { local_education_pct: 0.1, rural_special_pct: 0.0 }
+    source: "지방세법 §11①8 (6억 이하 1%) + §151 지방교육세"
+    source_url: "https://www.law.go.kr/법령/지방세법/제11조"
+    as_of: "2026-07-25"
+
+  # 6~9억 · 85㎡ 이하 · 2주택 이하 → 연속 누진: 세율% = 가액(억)×2/3 − 3
+  - id: std_6_9_small
+    when: { houses_owned_max: 2, price_min: 600000001, price_max: 900000000, area_max: 85 }
+    rate_pct: 2.0                      # 폴백 대표값(엔진이 total_rate_pct 로 대체)
+    progressive:
+      basis: price
+      unit_krw: 100000000
+      coefficient: 0.6666666666666666
+      constant: -3.0
+      min_rate_pct: 1.0
+      max_rate_pct: 3.0
+    extras_ratio: { local_education_ratio: 0.1 }   # 지방교육세 = 본세 × 1/10 (연동)
+    extras: { rural_special_pct: 0.0 }             # 85㎡ 이하 농특세 비과세
+    source: "지방세법 §11①8 (6~9억 누진산식) + §151 지방교육세"
+    source_url: "https://www.law.go.kr/법령/지방세법/제11조"
+    as_of: "2026-07-25"
+
+  # 그 외(9억 초과·대형·다주택) — 구간 미발견 예외를 막는 폴백
+  - id: std_other
+    when: {}
+    rate_pct: 3.3
+    extras: {}
+    source: "TEST 폴백"
+    source_url: "https://example.test/acq-other"
+    as_of: "2026-07-25"
+
+brokerage_fee:
+  - id: t_brk_default
+    when: {}
+    rate_pct: 0.4
+    extras: { cap_krw: 8000000 }
+    source: "TEST"
+    source_url: "https://example.test/brk"
+    as_of: "2026-07-25"
+
+lending:
+  ltv:
+    rate_pct: 70.0
+    source: "TEST"
+    source_url: "https://example.test/ltv"
+    as_of: "2026-07-25"
+  dsr:
+    rate_pct: 40.0
+    source: "TEST"
+    source_url: "https://example.test/dsr"
+    as_of: "2026-07-25"
+  dti:
+    rate_pct: 60.0
+    source: "TEST"
+    source_url: "https://example.test/dti"
+    as_of: "2026-07-25"
+
+  absolute_cap:
+    - id: cap_capital_600m
+      when: { region_group: "수도권" }
+      absolute_cap_krw: 600000000
+      source: "금융위 6.27 가계부채 관리방안(2025) — 수도권 주담대 6억 한도"
+      source_url: "https://www.fsc.go.kr/no010101/84824"
+      as_of: "2026-07-25"
+
+  stress_dsr:
+    - id: stress_capital
+      when: { region_group: "수도권" }
+      stress_rate_pct: 1.5
+      source: "금융위 스트레스 DSR 3단계(2025.7 시행) — 수도권 1.5%p"
+      source_url: "https://www.fsc.go.kr/no010101/84824"
+      as_of: "2026-07-25"
+    - id: stress_non_capital
+      when: { region_group: "비수도권" }
+      stress_rate_pct: 0.75
+      source: "금융위 스트레스 DSR 3단계(2025.7 시행) — 비수도권 0.75%p"
+      source_url: "https://www.fsc.go.kr/no010101/84824"
+      as_of: "2026-07-25"
+
+fixed_costs:
+  registration_krw: 1000000
+  moving_reserve_krw: 20000000
+  source: "TEST"
+  source_url: "https://example.test/fixed"
+  as_of: "2026-07-25"

@@ -45,15 +45,40 @@ class LoanTerms:
 
 @dataclass(frozen=True)
 class PropertyFacts:
-    """대상 주택의 세율 판정에 필요한 사실."""
+    """대상 주택의 세율·대출한도 판정에 필요한 사실."""
 
     area_m2: float = 84.0
     is_regulated_area: bool = False
     purpose: str = "live"          # live | invest
+    #: 수도권 여부. 6억 절대한도(6.27 대책)가 수도권 조건부라 이 사실이 있어야 매칭된다.
+    #: ⚠️ **사용자(클라이언트)가 보내는 값이 아니다.** 사용자가 바꿀 수 있으면 캡을 우회해
+    #: 예산을 부풀릴 수 있어 G2 위반이다. 서버가 단지 region(PostGIS)에서 판정한다.
+    #: 직접 지정하거나(`"수도권"`/`"비수도권"`) `target_region_code` 로 파생한다.
+    region_group: str | None = None
+    #: 법정동코드(앞 2자리로 region_group 파생). 서버가 단지 좌표→법정동에서 얻는다.
+    target_region_code: str | None = None
+
+    @staticmethod
+    def region_group_from_code(code: str | None) -> str | None:
+        """법정동코드 앞 2자리 → 권역. 11(서울)·41(경기)·28(인천) → 수도권, 그 외 → 비수도권.
+
+        코드가 없으면 None → `effective_region_group` 이 안전기본(수도권)으로 메운다.
+        """
+        if not code:
+            return None
+        return "수도권" if str(code)[:2] in ("11", "41", "28") else "비수도권"
 
     @property
-    def houses_after_purchase(self) -> int:  # 편의용 — 호출부에서 owned_houses+1
-        raise NotImplementedError
+    def effective_region_group(self) -> str:
+        """명시값 우선 → 코드 파생 → **기본 수도권(캡 적용)**.
+
+        이 제품 대상지역이 수도권 전체다. 모를 때 캡을 끄면(무캡) 예산이 **과대 산정**돼
+        고치려던 버그로 되돌아간다. 그래서 **안전한 기본은 캡 적용(수도권)** 이고,
+        비수도권은 명시적 예외다. 서버 판정값이라 사용자가 유리하게 바꿀 수 없다(G2).
+        """
+        return (self.region_group
+                or self.region_group_from_code(self.target_region_code)
+                or "수도권")
 
 
 @dataclass(frozen=True)
@@ -70,7 +95,9 @@ class LoanLimits:
     dsr_krw: int
     dti_krw: int | None
     effective_krw: int
-    binding: str                   # LTV | DSR | DTI
+    binding: str                   # LTV | DSR | DTI | CAP
+    #: 대출 절대한도(예: 수도권 주담대 6억). 해당 규칙이 없으면 None.
+    cap_krw: int | None = None
 
 
 @dataclass(frozen=True)
@@ -96,6 +123,7 @@ class AffordabilityResult:
                 "ltv_limit_krw": self.limits.ltv_krw,
                 "dsr_limit_krw": self.limits.dsr_krw,
                 "dti_limit_krw": self.limits.dti_krw,
+                "absolute_cap_krw": self.limits.cap_krw,
                 "binding_constraint": self.binding_constraint,
             },
             "acquisition_cost_krw": {

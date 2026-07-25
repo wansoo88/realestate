@@ -91,28 +91,69 @@ def test_다주택_중과가_1주택보다_훨씬_크다(prod_rules):
 
 
 # ---------------------------------------------------------------------------
-# 6~9억 누진 근사 — 오차 상한 검증 (L1)
+# 6~9억 누진 밴드 — 법정 산식과 '정확히' 일치 (L1 해소 · 계약서 §4)
+#   ⚠️ total_rate_pct 는 로더가 계산하는 정확값이다. 다만 engine 이 _pct_total →
+#      total_rate_pct 로 전환(계약서 §3.3)하기 전까지 /affordability 는 폴백(밴드중앙)을
+#      쓰므로, 아래는 '데이터·로더가 정확한가'를 본다(엔진 적용은 re-domain 몫).
 # ---------------------------------------------------------------------------
 
-def _legal_acq_rate_pct(price_eok: float) -> float:
-    """지방세법 §11 정확 산식(본세만). 근사 오차 비교 기준."""
-    if price_eok <= 6:
-        return 1.0
-    if price_eok <= 9:
-        return round(price_eok * 2 / 3 - 3, 2)
-    return 3.0
+def test_6_9억은_누진밴드로_표현된다(prod_rules):
+    b = prod_rules.acquisition_bracket(houses_owned=1, price=750_000_000,
+                                       area=84.0, regulated=False)
+    assert b.is_progressive is True and b.id == "std_6_9_small"
 
 
-@pytest.mark.parametrize("price_eok", [6.2, 6.7, 7.0, 7.3, 7.8, 8.4, 8.9])
-def test_6_9억_근사오차가_상한내에_있다(prod_rules, price_eok):
-    """서브밴드 근사 본세율이 법정 정확 본세율과 ±0.2%p 이내여야 한다."""
+@pytest.mark.parametrize("price_eok, expect_total_pct", [
+    (6.5, 1.4667),   # 본세 1.3333 + 지교 0.1333
+    (7.5, 2.2000),   # 본세 2.0000 + 지교 0.2000
+    (8.5, 2.9333),   # 본세 2.6667 + 지교 0.2667
+])
+def test_누진밴드가_법정산식과_정확히_일치_85이하(prod_rules, price_eok, expect_total_pct):
+    """계약서 §4 검산표(85㎡ 이하, 농특세 0). 근사가 아니라 정확값."""
     price = int(price_eok * 100_000_000)
-    b = Borrower(cash_krw=0, annual_income_krw=0, owned_houses=0)
-    bracket = prod_rules.acquisition_bracket(
-        houses_owned=1, price=price, area=84.0, regulated=False)
-    legal = _legal_acq_rate_pct(price_eok)
-    assert abs(bracket.rate_pct - legal) <= 0.2, (
-        f"{price_eok}억 근사 {bracket.rate_pct}% vs 법정 {legal}% 오차 초과")
+    b = prod_rules.acquisition_bracket(houses_owned=1, price=price,
+                                       area=84.0, regulated=False)
+    total = b.total_rate_pct(price=price, area=84.0, houses_owned=1, regulated=False)
+    assert total == pytest.approx(expect_total_pct, abs=1e-3)
+
+
+def test_누진밴드_경계가_고정구간과_연속이다(prod_rules):
+    """6억 → 1.1%(고정), 9억 → 3.3%(고정)과 매끄럽게 이어진다."""
+    # 6억 정각은 고정 구간(1.1%), 6억+1원은 누진밴드지만 경계값 1.1%로 시작
+    b6 = prod_rules.acquisition_bracket(houses_owned=1, price=600_000_000,
+                                        area=84.0, regulated=False)
+    assert b6.total_rate_pct(price=600_000_000, area=84.0) == pytest.approx(1.1, abs=1e-3)
+    b9 = prod_rules.acquisition_bracket(houses_owned=1, price=900_000_000,
+                                        area=84.0, regulated=False)
+    assert b9.total_rate_pct(price=900_000_000, area=84.0) == pytest.approx(3.3, abs=1e-3)
+
+
+def test_누진밴드_85초과는_농특세_02가_더해진다(prod_rules):
+    """85㎡ 초과 7.5억: 본세 2.0 + 지교 0.2 + 농특 0.2 = 2.4%."""
+    b = prod_rules.acquisition_bracket(houses_owned=1, price=750_000_000,
+                                       area=100.0, regulated=False)
+    assert b.id == "std_6_9_large"
+    assert b.total_rate_pct(price=750_000_000, area=100.0) == pytest.approx(2.4, abs=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# 대출 절대한도 · 스트레스 DSR (L2 — 데이터 표현. 엔진 적용은 re-domain)
+# ---------------------------------------------------------------------------
+
+def test_수도권_6억_절대한도(prod_rules):
+    """6.27 대책: 수도권만 6억 한도. 비수도권·미상은 한도 없음(모르면 적용 안 함)."""
+    assert prod_rules.absolute_cap_krw(region_group="수도권") == 600_000_000
+    assert prod_rules.absolute_cap_krw(region_group="비수도권") is None
+    assert prod_rules.absolute_cap_krw() is None
+    cap = prod_rules.absolute_cap(region_group="수도권")
+    assert cap.provenance is not None and "6.27" in cap.provenance.source
+
+
+def test_스트레스DSR_가산금리(prod_rules):
+    """스트레스 DSR 3단계: 수도권 1.5%p / 비수도권 0.75%p / 미상 0.0."""
+    assert prod_rules.stress_rate_pct(region_group="수도권") == 1.5
+    assert prod_rules.stress_rate_pct(region_group="비수도권") == 0.75
+    assert prod_rules.stress_rate_pct() == 0.0
 
 
 # ---------------------------------------------------------------------------
