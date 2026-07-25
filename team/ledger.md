@@ -28,5 +28,6 @@
 | 2026-07-25-SR8-1 | 2026-07-25 | (open) | Argon2 OOM 배포차단 | human-approval(G5) | open→13-arch 처리중 | 배포 전 필수 해소 |
 | 2026-07-25-PM판단1 | 2026-07-25 | (사람) | 전체 스택(상한합 640MB+)이 서버여유(332MB) 초과 — 배포범위 축소 or 증설 | human-approval(G5) | escalated | re-arch 13-arch 발견. 상시 배포 불가, 결정 필요 |
 | 2026-07-25-PM판단2 | 2026-07-25 | re-arch | worker.py 미구현(exit2)+restart:unless-stopped=무한재시작 루프 | review-required | 대기 | compose worker restart 조정 or worker 구현 전 비활성. 배포 전 필수 |
-| 2026-07-25-16-review | 2026-07-25 | re-review | SR8-1(Argon2) 재검증 + CR9-1/CR10-1 정리 | none | working | 체크포인트 7. 통과시 open finding 닫기 |
-| 2026-07-25-CR10-1 | 2026-07-25 | (re-be/re-domain) | target_region_code 문서-현실 불일치 수정 | review-required | 대기 | re-review 통과조건 후 |
+| 2026-07-25-16-review | 2026-07-25 | re-review | SR8-1 재검증 | none | done | **SR8-1 CLOSE**(SR-009): 실측 계측 최악76MiB·폭주격리·하한차단·해시호환 전부 PASS. **CR9-1 CLOSE**. 통과조건④ 부분충족→**SR8-2(low) 승계**(argon2 HashingError 여전히 500). 320 passed 5회연속. argon2 flake 기전해소 | 체크포인트 7. 통과시 open finding 닫기 |
+| 2026-07-25-18-domain | 2026-07-25 | re-domain | CR10-1: target_region_code 필드 제거(권장 ⓐ) | review-required | working | 문서-현실 일치. 우회 원천차단 |
+| 2026-07-25-17-arch | 2026-07-25 | re-arch | SR8-2: argon2 HashingError→503 매핑 | review-required | working | 500(버그)→503(자원부족·재시도가능) |
