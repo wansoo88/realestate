@@ -24,9 +24,15 @@ effective_region_group = region_group(명시) or 코드파생(target_region_code
 ### 2. 권역은 **서버 판정값** — 사용자 입력 금지
 `is_regulated_area` 처럼 클라이언트가 보내는 값이면, 사용자가 권역을 비수도권으로 바꿔
 6억 캡을 우회하고 **예산을 부풀릴 수 있다 → G2 위반**(사용자가 유리하게 바꿀 수 있으면 근거가 아니다).
-- `region_group` 을 **어떤 요청 스키마에도 추가하지 않았다**(AffordabilityIn 등 불변).
+- 요청 스키마(`AffordabilityIn`)에 **권역 필드가 없다.** `region_group`·`target_region_code`
+  둘 다 클라이언트가 보낼 수 없다.
 - 서버가 단지 좌표 → 법정동코드에서 판정한다: 앞 2자리 `11`/`41`/`28` → 수도권.
 - 파생 헬퍼: `PropertyFacts.region_group_from_code(code)`.
+
+> **CR10-1 정정(2026-07-25)**: 초기에 `AffordabilityIn.target_region_code` 가 클라이언트 입력으로
+> 남아 있었다(routes.py 가 안 넘겨 조용히 무시됐지만, 한 줄만 배선하면 사용자가 비수도권 코드로
+> 캡을 끄고 예산을 ~13.6억 부풀릴 수 있는 잠복 우회였다). 문서-현실 불일치를 없애기 위해
+> **필드를 스키마에서 제거**했다(개인용·수도권 전용이라 안전기본 수도권으로 충분 = 옵션 ⓐ).
 
 ### 3. 생성 지점 전부 캡 적용 (테스트초록 + 제품무캡 = 최악 방지)
 `PropertyFacts` 생성 지점 두 곳이 모두 캡 대상이어야 한다:

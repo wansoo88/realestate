@@ -216,6 +216,45 @@ def test_세율설정이_검증되지_않으면_503(client, monkeypatch, tmp_pat
     get_settings.cache_clear()
 
 
+def test_요청스키마에_권역필드가_없다():
+    """CR10-1: 권역은 서버 판정값 — 클라이언트가 보낼 수 없다."""
+    from app.api.schemas import AffordabilityIn
+    assert "target_region_code" not in AffordabilityIn.model_fields
+    assert "region_group" not in AffordabilityIn.model_fields
+    # 보내도 모델이 싣지 않는다(extra 무시) → 라우터가 실수로 읽을 수도 없다
+    m = AffordabilityIn(target_region_code="26110", region_group="비수도권", area_m2=84.0)
+    assert not hasattr(m, "target_region_code")
+    assert not hasattr(m, "region_group")
+
+
+def test_클라이언트는_권역으로_6억캡을_끌_수_없다(client, monkeypatch):
+    """CR10-1 회귀: 비수도권 코드를 보내도 캡이 꺼지지 않는다(우회 원천 차단)."""
+    token = _register_and_login(client, "a@b.co")
+    client.put("/api/v1/me/profile",
+               json={"cash_krw": 1_000_000_000, "income_krw": 300_000_000},
+               headers=_auth(token))
+
+    from app.core.config import get_settings
+    monkeypatch.setenv("TAX_RULES_PATH", str(FIXTURES / "tax_rules_capital_test.yaml"))
+    get_settings.cache_clear()
+
+    # 비수도권 코드로 캡 우회 시도
+    attack = client.post("/api/v1/affordability",
+                         json={"area_m2": 84.0, "target_region_code": "26110",
+                               "region_group": "비수도권"},
+                         headers=_auth(token))
+    assert attack.status_code == 200, attack.text
+    bd = attack.json()["breakdown"]
+    assert bd["absolute_cap_krw"] == 600_000_000    # 캡 그대로 적용
+    assert bd["binding_constraint"] == "CAP"
+
+    # 아무 것도 안 보낸 정상 요청과 결과가 동일 — 클라이언트가 바꿀 수 없다
+    normal = client.post("/api/v1/affordability",
+                         json={"area_m2": 84.0}, headers=_auth(token))
+    assert normal.json()["max_purchase_krw"] == attack.json()["max_purchase_krw"]
+    get_settings.cache_clear()
+
+
 # ---------------------------------------------------------------------------
 # 지도
 # ---------------------------------------------------------------------------

@@ -51,11 +51,12 @@ class PropertyFacts:
     is_regulated_area: bool = False
     purpose: str = "live"          # live | invest
     #: 수도권 여부. 6억 절대한도(6.27 대책)가 수도권 조건부라 이 사실이 있어야 매칭된다.
-    #: ⚠️ **사용자(클라이언트)가 보내는 값이 아니다.** 사용자가 바꿀 수 있으면 캡을 우회해
-    #: 예산을 부풀릴 수 있어 G2 위반이다. 서버가 단지 region(PostGIS)에서 판정한다.
-    #: 직접 지정하거나(`"수도권"`/`"비수도권"`) `target_region_code` 로 파생한다.
+    #: ⚠️ **사용자(클라이언트)가 보내는 값이 아니다** — API 요청 스키마에 필드가 없다(CR10-1).
+    #: 사용자가 바꿀 수 있으면 캡을 우회해 예산을 부풀릴 수 있어 G2 위반이기 때문이다.
+    #: 서버가 판정한다: 대상지역이 수도권 전체라 **기본은 수도권**, 특정 단지를 다룰 땐
+    #: 그 단지 법정동코드(PostGIS)로 채운다. 직접 `"수도권"`/`"비수도권"` 지정도 가능.
     region_group: str | None = None
-    #: 법정동코드(앞 2자리로 region_group 파생). 서버가 단지 좌표→법정동에서 얻는다.
+    #: 법정동코드(앞 2자리로 region_group 파생). **서버가** 단지 좌표→법정동에서 채운다.
     target_region_code: str | None = None
 
     @staticmethod

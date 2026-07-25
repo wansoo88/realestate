@@ -19,15 +19,22 @@ from __future__ import annotations
 
 import datetime as dt
 import functools
+import logging
 import os
 import threading
 from typing import Any
 
 import jwt
 from argon2 import PasswordHasher, Type
-from argon2.exceptions import InvalidHashError, VerifyMismatchError
+from argon2.exceptions import (
+    Argon2Error,
+    InvalidHashError,
+    VerifyMismatchError,
+)
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+logger = logging.getLogger("app.core.security")
 
 #: 암호문 포맷 버전. 키 교체·알고리즘 변경 시 올린다.
 _VERSION = b"\x01"
@@ -57,10 +64,18 @@ class DecryptionError(Exception):
 
 
 class HashCapacityError(Exception):
-    """해시 동시 실행 슬롯을 못 얻었다 — 과부하.
+    """비밀번호 해시를 **지금은** 수행할 수 없다 — 자원 부족. 재시도하면 될 수 있다.
+
+    두 가지 원인을 한 타입으로 묶는다. 호출부가 할 일이 같기 때문이다(503 + 재시도).
+      1. 동시 실행 슬롯을 못 얻음 (우리가 건 세마포어, SR8-1)
+      2. argon2 가 메모리 확보에 실패 (`HashingError`/`VerificationError`, SR8-2)
 
     대기하다 스레드풀이 전부 막히면 지도·리포트 같은 **다른 기능까지 죽는다.**
-    인증만 잠깐 503 으로 흘려보내는 편이 낫다(main.py 가 503 으로 변환)."""
+    인증만 잠깐 503 으로 흘려보내는 편이 낫다(main.py 가 503 으로 변환).
+
+    ⚠️ **500 으로 내보내면 안 된다.** 500 은 "서버 버그, 재시도해도 소용없다"는 뜻이라
+    자원 부족(잠시 뒤 되는 상태)에 붙이면 클라이언트가 재시도를 포기한다. (SR8-2)
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -210,22 +225,48 @@ def hash_password(password: str) -> str:
         raise ValueError(f"비밀번호는 최소 {MIN_PASSWORD_LEN}자여야 합니다")
     hasher, gate, timeout = _current()
     with _Slot(gate, timeout):
-        return hasher.hash(password)
+        try:
+            return hasher.hash(password)
+        except Argon2Error as exc:
+            # 슬롯은 얻었지만 argon2 가 메모리를 못 잡았다 — 자원 부족이지 버그가 아니다.
+            # `HashingError` 만 잡지 않고 `Argon2Error` 로 넓게 잡는다: 잘못된
+            # 파라미터는 이미 `_build_hasher` 가 기동 시점에 걸러내므로, 여기까지 온
+            # argon2 오류는 사실상 자원 문제다. 좁게 잡았다가 하나 놓치면 그게 500 이 된다.
+            # 예외 메시지만 남긴다(비밀번호는 어떤 경우에도 로그에 넣지 않는다).
+            logger.warning("Argon2 해시 실패(자원 부족 추정): %s: %s",
+                           type(exc).__name__, exc)
+            raise HashCapacityError("비밀번호 해시에 필요한 메모리를 확보하지 못했습니다") from exc
 
 
 def verify_password(password: str, hashed: str) -> bool:
-    """저장된 해시로 검증.
+    """저장된 해시로 검증. 비밀번호가 틀리면 False, **확인 자체가 불가하면 예외.**
+
+    이 구분이 중요하다. 메모리 부족으로 검증에 실패했는데 False 를 돌려주면
+    "비밀번호가 틀렸다"고 **거짓말**하는 셈이고, 사용자는 멀쩡한 비밀번호를 의심하며
+    계속 재시도한다. 확인을 못 했으면 못 했다고 말한다(→ 503).
 
     ⚠️ 파라미터를 바꿔도 **기존 해시는 그대로 검증된다.** argon2 는 m·t·p 를
     해시 문자열 안에 담고, 검증은 거기 적힌 값을 쓰기 때문이다.
     (그래서 SR8-1 수정에 재해시·마이그레이션이 필요 없다.)
     """
     hasher, gate, timeout = _current()
-    try:
-        with _Slot(gate, timeout):
+    with _Slot(gate, timeout):
+        try:
             return hasher.verify(hashed, password)
-    except (VerifyMismatchError, InvalidHashError, ValueError):
-        return False
+        except VerifyMismatchError:
+            # 비밀번호가 틀렸다 — 정상적인 실패.
+            # ⚠️ `Argon2Error` 의 하위 타입이라 **반드시 먼저** 잡아야 한다.
+            #    순서가 뒤바뀌면 틀린 비밀번호가 503 이 되고, 그 차이가
+            #    계정 존재 여부를 알려주는 통로가 된다.
+            return False
+        except Argon2Error as exc:
+            # 불일치가 아닌 argon2 실패 = 메모리 부족 등 자원 문제.
+            logger.warning("Argon2 검증 실패(자원 부족 추정): %s: %s",
+                           type(exc).__name__, exc)
+            raise HashCapacityError("비밀번호 확인에 필요한 메모리를 확보하지 못했습니다") from exc
+        except (InvalidHashError, ValueError):
+            # 저장된 해시 문자열이 깨졌다 — 재시도해도 같다. 로그인 실패로 본다.
+            return False
 
 
 def needs_rehash(hashed: str) -> bool:

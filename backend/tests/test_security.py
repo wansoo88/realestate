@@ -280,6 +280,125 @@ def test_해시_반복_실행에_실패가_없다():
 
 
 # ---------------------------------------------------------------------------
+# argon2 자원 부족 → 503 (SR8-2)
+#   SR8-1 로 세마포어 거절은 503 이 됐지만, argon2 가 **실제로 메모리를 못 잡아**
+#   HashingError 를 던지는 경우는 여전히 500 이었다.
+#   500 은 "서버 버그, 재시도 말라"는 뜻이라 자원 부족에 붙이면 틀리다.
+# ---------------------------------------------------------------------------
+
+class _FailingHasher:
+    """argon2 가 메모리 확보에 실패하는 상황을 흉내 낸다.
+
+    실제 argon2 와 같은 예외를 던진다 — `hash()` 는 `HashingError`,
+    `verify()` 는 `VerificationError`. (둘을 뒤섞으면 테스트가 현실과 달라져
+    통과해도 아무것도 보장하지 못한다.)
+
+    `PasswordHasher` 는 속성이 read-only 라 인스턴스를 갈아끼우는 대신
+    `_current()` 를 통째로 대체한다.
+    """
+
+    memory_cost, time_cost, parallelism = 19456, 2, 1
+
+    def __init__(self, hash_exc: Exception | None = None,
+                 verify_exc: Exception | None = None) -> None:
+        self._hash_exc = hash_exc or argon2.exceptions.HashingError("no memory")
+        self._verify_exc = verify_exc or argon2.exceptions.VerificationError("no memory")
+
+    def hash(self, password: str) -> str:
+        raise self._hash_exc
+
+    def verify(self, hashed: str, password: str) -> bool:
+        raise self._verify_exc
+
+
+def _patch_hasher(monkeypatch, *, hash_exc=None, verify_exc=None) -> None:
+    import threading as _t
+
+    from app.core import security as sec
+
+    gate = _t.BoundedSemaphore(4)
+    hasher = _FailingHasher(hash_exc, verify_exc)
+    monkeypatch.setattr(sec, "_current", lambda: (hasher, gate, 1.0))
+
+
+def test_해시_메모리부족은_HashCapacityError(monkeypatch):
+    """500(버그) 이 아니라 재시도 가능한 자원 부족으로 다룬다."""
+    _patch_hasher(monkeypatch)
+    with pytest.raises(HashCapacityError):
+        hash_password("correct horse battery staple")
+
+
+def test_검증_메모리부족은_False가_아니라_예외(monkeypatch):
+    """확인을 못 한 걸 '비밀번호 틀림'으로 돌려주면 사용자에게 거짓말이 된다."""
+    _patch_hasher(monkeypatch)
+    with pytest.raises(HashCapacityError):
+        verify_password("correct horse battery staple", "$argon2id$dummy")
+
+
+def test_비밀번호_불일치는_그대로_False(monkeypatch):
+    """VerifyMismatchError 는 Argon2Error 의 하위 타입이라 잡는 순서가 중요하다.
+
+    순서가 뒤바뀌면 **틀린 비밀번호가 503** 이 되고, 정상 로그인(200)과 구분되는
+    그 차이가 계정 존재 여부를 알려주는 통로가 된다.
+    """
+    _patch_hasher(monkeypatch,
+                  verify_exc=argon2.exceptions.VerifyMismatchError("mismatch"))
+    assert verify_password("wrong password!!", "$argon2id$dummy") is False
+
+
+def test_깨진_해시는_재시도_대상이_아니다(monkeypatch):
+    """저장된 해시가 손상된 경우는 몇 번 다시 해도 같다 — 503 이 아니라 로그인 실패."""
+    _patch_hasher(monkeypatch, verify_exc=argon2.exceptions.InvalidHashError("broken"))
+    assert verify_password("correct horse battery staple", "garbage") is False
+
+
+def test_API가_500이_아니라_503을_돌려준다(monkeypatch):
+    """SR8-2 회귀 방지의 핵심 — 실제 응답 코드로 확인한다.
+
+    가입(hash)·로그인(verify) 두 경로를 모두 태운다. `Retry-After` 가 있어야
+    클라이언트가 '재시도해도 되는 상황'임을 안다.
+    """
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("JWT_SECRET", "x" * 40)
+    monkeypatch.setenv("FIELD_ENCRYPTION_KEY", "k" * 32)
+    monkeypatch.setenv("POSTGRES_PASSWORD", "pw")
+
+    from app.core.config import get_settings
+    get_settings.cache_clear()
+    try:
+        from app.main import create_app
+        from app.repositories.memory import InMemoryRepository
+
+        email, password = "sr82@example.com", "correct horse battery"
+        repo = InMemoryRepository()
+        with TestClient(create_app(repo=repo), raise_server_exceptions=False) as client:
+            # 해셔를 망가뜨리기 전에 계정을 만들어 둔다. 없는 계정으로 로그인하면
+            # 라우터가 verify_password 를 부르기도 전에 401 로 끝나 검증이 안 된다.
+            body = {"email": email, "password": password}
+            assert client.post("/api/v1/auth/register", json=body).status_code == 201
+
+            _patch_hasher(monkeypatch)      # 이후 hash·verify 둘 다 자원 부족
+
+            cases = [
+                ("/api/v1/auth/register", {"email": "new@example.com",
+                                           "password": password}),   # hash 경로
+                ("/api/v1/auth/login", body),                         # verify 경로
+            ]
+            for path, payload in cases:
+                r = client.post(path, json=payload)
+                assert r.status_code == 503, \
+                    f"{path} → {r.status_code} (500 이면 SR8-2 회귀)"
+                assert r.json()["error"]["code"] == "BUSY"
+                assert r.headers.get("Retry-After") == "1"
+                # 자원 문제 응답에 비밀번호·계정 단서를 싣지 않는다
+                assert password not in r.text
+                assert email not in r.text
+    finally:
+        get_settings.cache_clear()
+
+
+# ---------------------------------------------------------------------------
 # JWT
 # ---------------------------------------------------------------------------
 

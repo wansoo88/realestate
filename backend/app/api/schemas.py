@@ -49,7 +49,10 @@ class PreferencesIn(BaseModel):
 
 
 class AffordabilityIn(BaseModel):
-    target_region_code: str | None = None
+    # ⚠️ 권역(region_group/target_region_code)은 **클라이언트 입력이 아니다.**
+    # 사용자가 비수도권 코드를 보내 6억 캡을 끄고 예산을 부풀릴 수 있어(약 13.6억) G2 위반이다.
+    # 권역은 서버가 판정하며(대상지역이 수도권 전체 → 안전기본 수도권), 여기에 필드를 두지 않는다.
+    # (근거: docs/domain/affordability-region-policy.md, CR10-1)
     purpose: str = Field(default="live", pattern="^(live|invest)$")
     area_m2: float = Field(default=84.0, gt=0, le=1000)
     is_regulated_area: bool = False
