@@ -1,62 +1,115 @@
-/* 디자인 토큰 — docs/02-design/ux/README.md §9
-   모바일 퍼스트: 폰(360px)을 기준으로 정하고 데스크톱에서 넓힌다. */
+/* 디자인 토큰 — 컨셉: "확신의 농도" (Confidence as Contrast)
+   애플 HIG(Deference·Clarity·Depth) + 이 앱의 정체성(사실/추정을 농도로 구분).
+   원칙: 선과 색을 빼고, 여백과 타이포로 정리한다. 강조색은 단 하나. 숫자가 주인공.
+   기준: 폰 360px. 데스크톱은 확장이지 기준이 아니다. */
 
 :root {
   color-scheme: light dark;
 
-  /* 색 — 한국 금융 관습: 상승 빨강, 하락 파랑 */
-  --price-up: #d92d20;
-  --price-down: #1570ef;
+  /* ── 강조색: 단 하나 (애플 시스템 블루) ───────────────────────── */
+  --accent: #007aff;
+  --accent-weak: rgba(0, 122, 255, 0.12); /* 선택 상태 옅은 채움 */
+  --on-accent: #ffffff;
 
+  /* 한국 금융 관습(상승 빨강/하락 파랑) 유지 · 애플 시스템 톤 */
+  --price-up: #ff3b30;
+  --price-down: #007aff;
+
+  /* ── 무채색: iOS 시스템 그레이 계열 ──────────────────────────── */
   --bg: #ffffff;
-  --bg-elev: #f9fafb;
-  --border: #e4e7ec;
-  --text: #101828;
-  --text-muted: #667085;
-  --text-estimated: #98a2b3; /* 추정치는 흐리게 — 확정치와 시각적으로 구분 */
-  --accent: #175cd3;
-  --warn: #f79009;
-  --danger: #d92d20;
+  --bg-elev: #ffffff; /* inset grouped 카드 */
+  --bg-grouped: #f2f2f7; /* grouped 화면 배경 */
+  --material: rgba(255, 255, 255, 0.72); /* blur 재질(지도가 비침) */
 
-  /* 간격 — 4px 그리드 */
+  /* 헤어라인 — 박스 대신 구분선 + 여백 */
+  --hairline: rgba(60, 60, 67, 0.18);
+  --hairline-strong: rgba(60, 60, 67, 0.29);
+
+  /* 농도 3단계 (규칙 1) — 시각적 강도 = 근거의 강도 */
+  --text: #000000; /* 확정: 실거래·법정 계산. 100%, 굵기 600 */
+  --text-secondary: #636366; /* 캡션(연식·세대·기준일) — 4.5:1 이상 */
+  --text-estimated: #8e8e93; /* 추정/폴백 — 흐리게(보조 표기용) */
+  --badge-bg: rgba(120, 120, 128, 0.12); /* 실측추정 배지: 옅은 회색 채움 */
+
+  --warn: #ff9500;
+  --warn-text: #b25000; /* 텍스트용(대비 확보) */
+  --danger: #ff3b30;
+  --danger-text: #d70015; /* 에러 텍스트(대비 확보) */
+
+  /* ── 간격: 4px 그리드(실사용은 넉넉하게) ─────────────────────── */
   --sp-1: 4px;
   --sp-2: 8px;
   --sp-3: 12px;
   --sp-4: 16px;
+  --sp-5: 20px;
   --sp-6: 24px;
+  --sp-8: 32px;
 
-  /* 타이포 */
+  /* ── 타이포: 애플 톤. 굵기 400/600 두 단계. ──────────────────── */
   --fs-caption: 13px;
-  --fs-body: 16px;
-  --fs-price: 20px;
-  --fs-title: 18px;
-  --ff: system-ui, -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+  --fs-footnote: 15px;
+  --fs-body: 17px; /* iOS 본문 */
+  --fs-title: 20px;
+  --fs-price: 26px; /* 숫자가 유일한 주인공(규칙 2) */
+  --fs-large-title: 32px;
+  --ff: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Apple SD Gothic Neo",
+    Pretendard, system-ui, "Malgun Gothic", sans-serif;
   /* 금액은 등폭 — 세로로 비교할 때 자릿수가 맞아야 읽힌다 */
-  --ff-num: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  --ff-num: "SF Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 
-  /* 터치 — 지도 위 버튼은 특히 중요 */
+  /* ── 모서리: 크고 부드럽게 ───────────────────────────────────── */
+  --r-sheet: 20px;
+  --r-card: 16px;
+  --r-btn: 12px;
+  --r-pill: 999px;
+
+  /* ── 그림자: 아주 옅게 한 겹만 ───────────────────────────────── */
+  --shadow-1: 0 1px 3px rgba(0, 0, 0, 0.06);
+  --shadow-pill: 0 1px 4px rgba(0, 0, 0, 0.14);
+
+  /* ── 터치 ────────────────────────────────────────────────────── */
   --touch-min: 44px;
   --sheet-handle: 48px;
-  --radius: 12px;
+
+  /* ── 모션: 시트 스냅 스프링 느낌 ─────────────────────────────── */
+  --ease-spring: cubic-bezier(0.32, 0.72, 0, 1);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #0c111d;
-    --bg-elev: #161b26;
-    --border: #333741;
-    --text: #f5f5f6;
-    --text-muted: #94969c;
-    --text-estimated: #85888e;
-    --accent: #84caff;
-    --price-up: #f97066;
-    --price-down: #53b1fd;
+    --accent: #0a84ff;
+    --accent-weak: rgba(10, 132, 255, 0.22);
+    --on-accent: #ffffff;
+    --price-up: #ff453a;
+    --price-down: #0a84ff;
+
+    --bg: #000000;
+    --bg-elev: #1c1c1e;
+    --bg-grouped: #000000;
+    --material: rgba(30, 30, 32, 0.72);
+
+    --hairline: rgba(84, 84, 88, 0.4);
+    --hairline-strong: rgba(84, 84, 88, 0.6);
+
+    --text: #ffffff;
+    --text-secondary: #aeaeb2;
+    --text-estimated: #8e8e93;
+    --badge-bg: rgba(120, 120, 128, 0.24);
+
+    --warn: #ff9f0a;
+    --warn-text: #ffb340;
+    --danger: #ff453a;
+    --danger-text: #ff6961;
   }
 }
 
-* { box-sizing: border-box; }
+* {
+  box-sizing: border-box;
+}
 
-html, body, #root {
+html,
+body,
+#root {
   height: 100%;
   margin: 0;
 }
@@ -67,43 +120,74 @@ body {
   color: var(--text);
   background: var(--bg);
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
   /* 바텀시트 드래그 중 페이지가 같이 움직이지 않게 */
   overscroll-behavior: none;
 }
 
+/* 버튼 기본 — 장식 최소화(테두리·배경 없음). 각 컴포넌트가 필요한 것만 얹는다. */
 button {
   font: inherit;
+  color: inherit;
   min-height: var(--touch-min);
-  min-width: var(--touch-min);
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--bg-elev);
-  color: var(--text);
+  border: none;
+  background: none;
   cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
 }
 
 button:focus-visible,
-a:focus-visible {
+a:focus-visible,
+[role="button"]:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+  border-radius: var(--r-btn);
 }
 
-.num { font-family: var(--ff-num); font-variant-numeric: tabular-nums; }
+/* 금액 — 등폭 + 자릿수 정렬(이 앱에 중요) */
+.num {
+  font-family: var(--ff-num);
+  font-variant-numeric: tabular-nums;
+}
 
-/* 추정치 표기 — 이 제품의 정체성이다. 모르는 걸 모른다고 보여준다. */
-.estimated { color: var(--text-estimated); }
+/* 추정치 — 이 제품의 정체성. 모르는 걸 모른다고 보여준다(규칙 1·5). */
+.estimated {
+  color: var(--text-estimated);
+}
 
+/* 배지 — pill · 옅은 회색 채움 · 테두리 없음(규칙 1: 실측추정 표기) */
 .badge {
   display: inline-block;
   padding: 2px var(--sp-2);
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   font-size: var(--fs-caption);
-  border: 1px solid var(--border);
-  color: var(--text-muted);
+  font-weight: 400;
+  line-height: 1.4;
+  background: var(--badge-bg);
+  color: var(--text-secondary);
 }
 
-.badge--estimated { border-style: dashed; }
+.badge--estimated {
+  color: var(--text-estimated);
+}
+
+/* 지도는 스크린리더로 못 읽는다 — 대체 경로 안내는 화면엔 숨기고 보조기기엔 남긴다 */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
 
 @media (prefers-reduced-motion: reduce) {
-  * { transition: none !important; animation: none !important; }
+  * {
+    transition: none !important;
+    animation: none !important;
+    scroll-behavior: auto !important;
+  }
 }

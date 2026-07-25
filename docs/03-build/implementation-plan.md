@@ -156,3 +156,11 @@ max_purchase = 이분탐색으로 P 를 구한다
 - 실제 공공API 키 발급·실호출
 - Claude API 실호출 비용 실측
 - React Native 앱 (웹 검증 후)
+- **SR15-3 · 서버측 토큰 폐기(jti denylist)** — refresh 는 `httpOnly` 쿠키 + 호출마다 회전 +
+  TTL 7일로 옮겼지만(SR15-1 해소), 유출된 토큰을 만료 전에 **회수할 수단이 아직 없다.**
+  `jti` 클레임은 이미 발급 중(`backend/app/core/security.py`)이므로 폐기 목록(Redis/테이블) +
+  로그아웃·비밀번호 변경 시 등록만 붙이면 된다. 잔여 위험 등재: `security.md` §8 `R-09`.
+  ※ refresh TTL 을 다시 늘리려면 **이것부터** 한다.
+- **SR15-4 · 프론트 CSP** — `deploy/nginx-realestate.conf` 에 `Content-Security-Policy` 부재.
+  XSS 2선 방어. 카카오맵 SDK 출처를 허용해야 하므로 프론트 배포 검증과 함께 넣는다.
+- **RN 이식 시**: refresh 는 `AsyncStorage`(평문) 금지 — Keychain/Keystore 강제 (security.md §2.1).

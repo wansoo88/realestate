@@ -1,64 +1,58 @@
 {
   "code_review": {
     "status": "passed",
-    "id": "CR-017",
+    "id": "CR-019",
     "date": "2026-07-25",
-    "at": "2026-07-25T13:40:00Z",
-    "scope": "F4 동별 실측(dong_effect·orchestrator·postgis)",
+    "at": "2026-07-25T22:10:00+09:00",
+    "scope": "FE-2 재검증(CR18-1 수정) + 쿠키 인증 전환(SR15-1 대응, 프론트·백엔드)",
     "reviewer": "code-reviewer (herdr re-review 대행)",
-    "notes": "apt_dong 을 F4 밸류에이션에 연결(동별 ₩/㎡ 실측 dong_effect + confidence 실측/폴백 구분). 반례 탐색 7축 전부 PASS: (1)절대가 아닌 price_krw/area_m2 정규화로 면적구성편차 보정, area_m2>0 필터로 0-나눗셈 차단(stats.py:120-121,128,134). (2)분모=단지전체 elig(동결측 포함) ₩/㎡ 중위, coverage=with_dong/elig 정확. (3)경계 off-by-one 없음: 전체 <5, 동별 <3 → 정확히 3 포함, 테스트가 3·5 경계 실검증. (4)method 4분기 정확, coverage==0.0 은 0/n=0.0 정확값이라 부동소수 문제 없음. (5)G2: available=False→to_evidence()==[], 폴백 confidence=0.0, 추정을 실측으로 내놓는 경로 없음. (6)오케스트레이터 _dong_valuation_dict 가 None/폴백/실측 3경우 처리, valuation_finding·pipeline 둘 다 months=band.period_months 동일창(target_floor 는 period 무관). (7)ratio desc 정렬로 top 대표. 문서(03-valuation-trader.md·api-spec.md·stats.py 규칙4 docstring) 정정 일치. 회귀 352 passed·50 skipped(needs_db) exit 0 재현. 비차단 3건(CR17-1 중복계산 성능·CR17-2 coverage 반올림 극단오라벨 무해·CR17-3 방어분기 전용테스트 부재) — 게이트 무차단.",
+    "notes": "CR-018 차단사유 CR18-1 해소 확인 → FE-2 CLOSE. 재현: frontend typecheck 통과 · npm test 49 passed(15/13/17/4) · build 성공 / backend 369 passed·50 skipped(CR-018 기준선 352 대비 +17). [검증방법] 초록불을 믿지 않고 변이 테스트로 가드를 하나씩 부러뜨려 해당 테스트가 실제 FAIL 하는지 확인 후 원복(md5 대조로 원상복구 확인). 5/5 전부 FAIL 발생 — A:lastPannedId 가드 제거→CR18-1 테스트가 'called 1 times, but got 3 times'로 실패(CR-018 계측치와 숫자까지 동일), B:좌표 뒤집기→CR18-5 단언 3건 동시 실패, C:single-flight 제거→CR18-2 실패, D:쿠키 삭제 path 어긋냄→2건 실패, E:refresh CSRF 관문 제거→403 테스트 실패. 구현자의 '가드 빼서 깨지는 것까지 확인' 주장은 사실이며 테스트는 자기충족적이지 않다. [CR18-1] syncFocus() 가 선택 변경 시에만 panTo. 5개 축 확인 — 같은 선택 재렌더 무이동/선택 변경 시 이동/해제 후 재선택 시 이동(기억 소거)/응답에 없으면 기억 미갱신/선택 없으면 무이동. destroy 도 lastPannedId 초기화. [동반수정] CR18-5 좌표 단언 3곳(경도>위도 값 설계로 뒤집히면 반드시 깨짐) · CR18-2 refreshInFlight 공유(테스트가 10ms 지연을 넣어 직렬통과 방지) · CR18-6 removeIdle+mapRef 정리 · CR18-3 emitAuth 단일경로+구독자 예외 격리 · CR18-8 pill ::before inset:-5px 로 34+10=44px 히트영역(의사요소는 별도 이벤트 타깃이 아니라 원본 요소로 히트 전달, pointer-events/overflow 방해 없음 확인). [쿠키 인증 전환 PASS] TestClient 로 헤더 실측(운영과 동일 Secure=on https 왕복 — 테스트가 설정 풀어 우회하지 않음). ①restoreSession 은 main.tsx 모듈 최상위 호출이라 StrictMode 무관 1회, 게다가 single-flight 로 동시 2회 호출도 refresh 1회(실측). ②checked 3상태(판정전/미인증/인증) 누락 없고 useAuth 가 구독 직전 getAuthState 재조회로 놓친 방송 보완(CR18-9 도 해소). ③로그아웃 중 refresh 부활 race 실측 차단 — refresh 를 게이트로 잡고 logout 후 200 도착시켜도 authenticated=false 유지(clearSession 이 refreshInFlight=null, then 이 refreshInFlight!==p 면 결과 폐기). ④쿠키 삭제 속성이 발급과 path/httponly/secure/samesite 4개 전부 일치 + Max-Age=0, 실제 제거 확인. expired_refresh_cookie_header 가 문자열 조립 대신 delete_refresh_cookie 를 프로브 Response 에 태워 재사용 → 구조적으로 어긋날 수 없음. ⑤401/403 분리는 부분 — 일반 API 403 은 로그아웃 안 함(정상)이나 refresh 403 은 401 과 동일 폐기(CR19-1, low). 계약 실측: login body 에 refresh_token 없음 · 5속성 쿠키 · 회전(jti 로 같은 초에도 문자열 상이) · body 경로 401 차단 · access 를 refresh 로 쓰면 401(typ) · CSRF 없으면 403+쿠키 유지(로그아웃 CSRF 방지) · CORSMiddleware 미설치 · 운영 Secure 강제 · TTL 7일/30분. 비차단 4건: CR19-1(refresh 403 을 401 과 동일 취급해 세션 폐기 — api-spec 은 '쿠키 유지, 재시도 가능'이라 적었는데 클라이언트가 그 가능성을 버림, 발생조건 드물고 자동복구 불가라 피해는 재로그인+오해) · CR19-2(restoreSession catch 가 accessToken 직접 대입으로 emitAuth 단일경로 선언을 우회 — 현재 무해) · CR19-3(로그아웃 race 방어에 테스트 0건, 한 줄짜리 방어라 리팩터링에 취약) · CR19-4(StrictMode 개발모드 script 2회 삽입, 운영 무관). CR18-7(CustomOverlay 최대 500개 전량 재생성)은 이번 게이트 비차단 유지하되 실데이터 투입 전 필수 과제로 승계 — 근거: 정확성 결함 아니고 실데이터 부재로 현재 관측 증상 없음. 통과선 제안 4개(id diff 재사용/표시상한 150~200+N개더/임계초과 dot 강등/실측 프레임타임 첨부).",
     "log": "docs/03-build/code-review-log.md"
   },
   "security_review": {
     "status": "passed",
-    "id": "SR-014",
-    "at": "2026-07-25T00:00:00+09:00",
+    "id": "SR-016",
+    "at": "2026-07-25T22:10:00+09:00",
     "date": "2026-07-25",
-    "scope": "F4 동별 실측 — valuation 소비 계층 (trade.apt_dong → dong_effect/valuation)",
-    "reviewer": "security-reviewer (herdr re-review 대행)",
-    "notes": "SR-013(저장 계층) 후속 — apt_dong 을 F4 밸류에이션에 연결하는 diff 독립 감사. ①SQLi: _TRADES_SQL 은 정적 SELECT, apt_dong 은 컬럼 식별자(사용자입력 아님), :complex_id·CAST(:limit AS int) named bind 유지, dict 파라미터 실행 — 인젝션 표면 없음. ②민감정보(SR4-2): apt_dong·₩/㎡·동별 배율은 공개 시장데이터로 자산 아님. valuation_finding rationale/evidence 는 median_krw·ask(호가)·동통계 등 시장데이터만, _dong_valuation_dict 은 응답 items(프롬프트 아님). _derive_forbidden+assert_no_secrets 회귀 유지, test_파이프라인_프롬프트에_자산금액이_없다 통과. ③G2: available=False 시 confidence=0.0·evidence []·basis 키 없음·좌표추정 폴백 명시, available 시 basis=trade_measured·0.85 — 실측/추정 구조 구분, 폴백 미둔갑. ④비밀정보 하드코딩 0. ⑤전방관찰: 동 원본문자열 응답 JSON 실림, React 기본 이스케이프(diff 밖). 회귀 352 passed·50 skipped 직접 재현. 비차단 전방관찰 1건 승계.",
-    "log": "docs/03-build/security-review-log.md"
+    "scope": "SR15-1 수정 재검증 - refresh 쿠키(HttpOnly) + access 메모리 전용 전환",
+    "reviewer": "security-reviewer (herdr re-review 대행 · SR-015 반려 당사자)",
+    "notes": "SR15-1 CLOSE. 방법: 실제 앱(TestClient, https)으로 쿠키 헤더를 문자열 단위 파싱해 43항목 계측 + 프론트 probe 10건(검증 후 삭제, 소스 미수정). (1)설계문서 무력화 여부 최우선 확인 - security.md:50(httpOnly 쿠키 요구)·:54(localStorage 금지) 무변경, 변경분은 TTL 14->7일 강화 + '구현이 표를 어겼다, 설계를 고치지 않고 구현을 맞췄다' 실패이력 기재 + 8절 R-09 등재. 기준을 낮춰 통과한 것이 아님. (2)쿠키 속성 실측: refresh_token=<jwt>; HttpOnly; Max-Age=604800; Path=/api/v1/auth; SameSite=Strict; Secure, Domain 없음(host-only). (3)우회 4종 전부 401: body refresh_token / camelCase / 쿼리스트링 / Authorization 헤더. RefreshIn 스키마 제거 확인. (4)프론트 3중 확인: src grep 실사용 0건, Object.keys(client)에 setTokens·loadTokens·configureAuthStorage 소멸 및 refresh 명 export 0개, 저장소 스파이로 login->restoreSession->logout 전과정 get/set/removeItem 0회·document.cookie setter 0회, dist 재빌드 후 localStorage/sessionStorage/document.cookie/refresh_token 전부 0건. (5)삭제헤더 속성 일치 기계비교: path·httponly·secure·samesite·domain 불일치 0 - expired_refresh_cookie_header 가 delete_refresh_cookie 를 더미 Response 에 태워 뽑는 구조라 어긋날 여지 없음. 로그아웃 후 쿠키 제거·후속 refresh 401 실측. (6)Path 스코프 계측: 지도 요청 Cookie 헤더 None, refresh 요청만 첨부 - 노출면 축소 실동작. (7)CSRF 3겹: SameSite=Strict + X-Requested-With 필수(없음/임의값 403, 대소문자 무시 200) + CORS 미들웨어 0건(preflight 차단). 403 이 쿠키 미삭제(로그아웃 CSRF 방지) 실측, 직후 정상 refresh 200. 로그인 CSRF 는 JSON 요구+CORS 부재로 불성립. (8)COOKIE_SECURE 운영 무력화 불가(debug=False면 항상 True) + validate_runtime 이 false 설정을 드러냄. typ 양방향 401x2. 쿠키 회전 실동작(jti 로 같은 초 발급도 상이). 로그아웃은 불량 access 로도 204. 계정열거 회귀 동일응답. refresh 진행중 로그아웃시 세션 부활 안 함. (9)XSS 회귀: 페이로드 5종 재투입 요소생성 0·__pwned undefined, CustomOverlay content 는 HTMLElement 유지, 위험 sink 전수 0건 - SR-015 PASS 유지. (10)잔여: HttpOnly 는 탈취(반출)를 막지만 세션 라이딩은 못 막는다(XSS 가 탭 안에서 fetch 가로채기·refresh 호출 가능) - 단 공격자 기기로 반출 불가라 '영구·이식 가능 자격증명 유출'에서 '일시적 세션 오용'으로 급이 내려감. SR15-2 는 저장소 폐기로 문제 자체 소멸(CLOSE), SR15-3 은 R-09 등재·비차단 OPEN, SR15-4(CSP)는 커밋 비차단이나 G5 배포 차단조건. 회귀 재현: backend junit tests=419 failures=0 errors=0 skipped=50 -> 369 passed, frontend 49 passed, build 성공.",
+    "log": "docs/03-build/security-review-log.md",
+    "blocking": [],
+    "g5_blockers": [
+      "SR15-4"
+    ]
   },
   "open_findings": [
     {
-      "id": "FE-1",
-      "verdict": "OPEN",
-      "severity": "high",
-      "blocks": "3단계 구현 완성 판정 · 실사용",
-      "found_by": "CR-014 (re-review — 지시 2026-07-25-30-review)",
+      "id": "SR15-3",
+      "verdict": "OPEN (재평가 - 비차단 유지)",
+      "severity": "low",
+      "blocks": "없음 - G5 배포를 막지 않음 (SR-016 판정)",
+      "found_by": "SR-015 (security-reviewer, herdr re-review 대행)",
       "date_found": "2026-07-25",
-      "owner": "re-ux / re-fe",
-      "title": "로그인 화면이 없다 — 백엔드 인증은 완성인데 사용자가 로그인할 방법이 없다",
+      "owner": "re-arch",
+      "title": "서버측 토큰 폐기 수단이 없다 — 로그아웃이 클라이언트 전용 연출",
       "evidence": [
-        "App.tsx(134줄)에 로그인 폼 없음 — token·input·form·password 어느 것도 없다",
-        "App.tsx:51 에 문자열 '로그인이 필요합니다.' 만 존재",
-        "백엔드는 /auth/register·/auth/login·JWT 전부 완성(SR-009/SR-010 검증)",
-        "이 상태로 배포하면 앱을 쓸 수 없다"
+        "backend/app 전수 grep: logout·revoke·denylist·blocklist·jti 모두 0건. /auth/logout 엔드포인트 없음",
+        "backend/app/core/security.py:289 REFRESH_TTL=14일 — 발급된 refresh 는 만료 전까지 무조건 유효",
+        "프론트 logout()(client.ts:146-148)은 저장소·메모리만 비운다 — 서버에는 아무 신호도 가지 않는다",
+        "단독으로는 low 지만 SR15-1(그 토큰이 JS 로 읽히는 곳에 있음)과 결합하면 '탈취되면 회수 수단이 없다'가 된다"
       ],
       "pass_conditions": [
-        "로그인·회원가입 폼 + 토큰 저장/첨부 + 401 처리",
-        "모바일 퍼스트 UX 기준 준수(ux/README.md)"
-      ]
-    },
-    {
-      "id": "FE-2",
-      "verdict": "OPEN",
-      "severity": "high",
-      "blocks": "3단계 구현 완성 판정 · F1 핵심기능",
-      "found_by": "CR-014 (re-review — 지시 2026-07-25-30-review)",
-      "date_found": "2026-07-25",
-      "owner": "re-ux / re-fe",
-      "title": "지도에 마커가 없다 — 지도 기반 추천(F1)의 핵심 화면이 비어 있다",
-      "evidence": [
-        "MapView.tsx(95줄)는 지도 생성 + bbox 를 onBoundsChange 로 emit 할 뿐 마커를 하나도 그리지 않는다",
-        "kakao.maps.Marker · MarkerClusterer 인스턴스화 0건",
-        "SDK 를 libraries=clusterer 로 로드해 놓고 사용하지 않는다",
-        "백엔드 /map/complexes 는 완성(bbox·클러스터 레벨 응답)"
+        "jti 클레임 + 폐기 목록(Redis) 또는 refresh 토큰 버전 컬럼으로 무효화 경로 마련",
+        "/auth/logout 이 해당 사용자의 refresh 를 폐기하고, 폐기된 토큰으로 /auth/refresh 가 401 인지 회귀 테스트"
       ],
-      "pass_conditions": [
-        "단지 마커 렌더링 + 줌 레벨별 클러스터링(CLUSTER_ZOOM_THRESHOLD 규약)",
-        "마커 탭 → 바텀시트 연동"
-      ]
+      "reassessed_by": "SR-016 (security-reviewer, herdr re-review 대행)",
+      "reassessment": [
+        "SR15-1 이 지목한 현실적 유출 경로(localStorage 반출)가 닫혀 '이미 새어나간 refresh' 시나리오 확률이 크게 하락",
+        "호출마다 쿠키 회전 + TTL 7일 + host-only(Domain 없음) + Path=/api/v1/auth + SameSite=Strict + 운영 Secure 강제",
+        "흔한 실사용 케이스(공용 기기 로그아웃)는 쿠키 삭제로 실제 해결됨 - 로그아웃 후 refresh 401 실측",
+        "사용자 개인 1명(CLAUDE.md)이라 대량 세션 관리 요구 없음",
+        "준비 완료: jti 가 이미 발급되고 있음을 토큰 디코드로 실측 - 저장소만 붙이면 됨",
+        "security.md 8절 R-09 에 재평가 트리거와 함께 정식 등재되어 조용히 사라지지 않음"
+      ],
+      "condition": "refresh TTL 을 7일보다 늘리려면 denylist 를 먼저 붙일 것 - 회수 수단 없이 노출 창만 넓히는 변경은 그 자체로 재감사 대상이다(R-09 명시)"
     },
     {
       "id": "SR10-1",
@@ -96,9 +90,190 @@
         "한계 정직 기재: 고정 지연은 평균은 맞추나 분산이 다르다(Argon2 는 부하에 흔들리고 고정 지연은 안 흔들림). 정밀 측정에는 구분 여지가 남아 완전 해소는 아니다"
       ],
       "ledger_correction": "security-review-log.md:135 의 '계정 열거 ✅ 차단' 판정을 '⚠️ 부분'으로 정정했다. 근거 테스트가 응답 본문·상태코드만 비교했고 타이밍과 register 409 를 보지 않은 과잉 주장이었다(내가 쓴 판정)."
+    },
+    {
+      "id": "SR15-4",
+      "verdict": "OPEN",
+      "severity": "medium",
+      "blocks": "커밋 게이트 아님 · G5 배포 절차의 차단 조건",
+      "found_by": "SR-015 (SR15-1 통과조건 (B)-a 로 지목) -> SR-016 에서 독립 항목으로 승격",
+      "date_found": "2026-07-25",
+      "owner": "re-arch (nginx) / re-fe (배포 검증)",
+      "title": "nginx 에 Content-Security-Policy 가 없다 - XSS 2선 방어 부재",
+      "evidence": [
+        "deploy/nginx-realestate.conf 보안헤더는 HSTS·nosniff·X-Frame-Options·Referrer-Policy 4종뿐, Content-Security-Policy 0건(전수 grep). frontend/index.html 에 CSP meta 도 없음",
+        "SR15-1 해소 후에도 남는 위험이 '세션 라이딩'인데(HttpOnly 는 반출을 막을 뿐 XSS 가 탭 안에서 fetch 가로채기·/auth/refresh 호출을 하는 것은 못 막는다), 그 마지막 층이 CSP 다",
+        "백엔드 측 지연 사유('카카오맵 SDK 출처 허용이 필요해 잘못 넣으면 지도가 죽는다')는 기술적으로 타당 - script-src 외에 지도 타일 img-src·connect-src·인라인 style-src 까지 얽혀 실제 브라우저 없이 정하면 빈 지도가 된다",
+        "다만 이 앱은 아직 배포된 적이 없어 '기존 사용자 회귀 위험'이라는 지연 사유가 없다. '배포하며 검증한다'는 옳지만 'CSP 없이 운영에 올린다'는 별개"
+      ],
+      "pass_conditions": [
+        "deploy/DEPLOY.md 5-6 check_headers() 에 Content-Security-Policy 검사 1줄 추가 - 이미 4경로를 실검증하므로 '깜빡하고 안 넣음'이 구조적으로 불가능해진다",
+        "지도가 깨지면 Content-Security-Policy-Report-Only 로 먼저 올리고 관측 후 강제 전환 허용 ('완벽한 CSP 아니면 안 넣는다'가 최악)",
+        "최소안: default-src 'self'; script-src 'self' https://dapi.kakao.com https://*.daumcdn.net; img-src 'self' data: https://*.daumcdn.net https://*.kakaocdn.net; connect-src 'self' https://dapi.kakao.com; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+      ],
+      "note": "커밋을 막지 않는다(배포 시점 통제). security.md 2.1 '후속 과제 SR15-4' 에 팀이 스스로 기재한 계획과 일치하며, 본 판정은 그 계획에 '배포 체크리스트로 고정한다'는 강제력만 더한 것이다."
     }
   ],
   "resolved_findings": [
+    {
+      "id": "SR15-1",
+      "verdict": "CLOSE (PASS)",
+      "severity": "high",
+      "blocks": "없음 (해소)",
+      "found_by": "SR-015 (security-reviewer, herdr re-review 대행)",
+      "date_found": "2026-07-25",
+      "owner": "re-fe / re-arch",
+      "title": "access·refresh 토큰을 localStorage 에 저장 — security.md §2.1 이 명문으로 금지한 항목",
+      "evidence": [
+        "frontend/src/api/client.ts:60-61(ACCESS_KEY/REFRESH_KEY) · :83-100(browserStorage) · :125-136(setTokens) 가 access·refresh 를 둘 다 localStorage 에 기록. main.tsx:8 loadTokens() 로 브라우저 재시작 후에도 복원",
+        "docs/02-design/security.md:50 — 'refresh 저장 | 웹: httpOnly + Secure + SameSite=Strict 쿠키 / RN 앱: OS 보안저장소(Keychain·Keystore)'",
+        "docs/02-design/security.md:54 — '⚠️ JWT를 localStorage에 넣지 않는다 — XSS 한 방에 토큰이 털린다'. 예외를 기록한 ADR·§8 잔여위험 항목 없음",
+        "보완통제 3종 전부 부재: ⓐ httpOnly 쿠키 없음(backend set_cookie grep 0건) ⓑ CSP 없음(deploy/nginx-realestate.conf 는 HSTS·nosniff·DENY·Referrer-Policy 4종뿐, frontend/index.html 에 CSP meta 없음) ⓒ 서버측 폐기 없음(backend/app grep logout|revoke|denylist|jti = 0건, /auth/logout 엔드포인트 자체가 없음)",
+        "backend/app/core/security.py:289 REFRESH_TTL = timedelta(days=14) → XSS 1회에 14일짜리·폐기 불가능한 자격증명이 탈취되고, 사용자가 로그아웃해도 서버에서는 계속 유효",
+        "대상 자산은 security.md §1 이 민감도 '최상'으로 분류한 보유현금·연소득·기존대출(§0: '유출되면 금융사기·표적 범죄의 직접 재료')",
+        "MapView.tsx:36-41 이 dapi.kakao.com 스크립트를 동일 오리진에 주입 — 서드파티 훼손/공급망 공격도 localStorage 를 직접 읽는 경로. httpOnly 쿠키였다면 같은 사고에서 refresh 는 생존",
+        "전파: client.ts:64 주석이 'RN 은 AsyncStorage 로 갈아끼운다'고 명시 — AsyncStorage 는 평문 저장소라 §2.1 의 Keychain·Keystore 요구를 앱에서도 위반하게 됨",
+        "※ 현재 XSS 실행 경로는 없음(SR-015 §1 에서 5개 페이로드 실측 차단). 즉 방어가 'XSS 가 앞으로 영원히 없다'는 가정 하나에만 걸려 있다는 것이 결함의 본질"
+      ],
+      "pass_conditions": [
+        "(A) 설계대로 구현 — ① refresh 를 httpOnly; Secure; SameSite=Strict; Path=/api/v1/auth 쿠키로 발급/회수(JS 접근 불가) ② access 는 메모리 전용, localStorage 미사용(loadTokens 는 쿠키 기반 무음 refresh 로 대체) ③ 쿠키 도입에 따른 CSRF 대비 명시(SameSite=Strict + Origin 검사 또는 double-submit) ④ 저장소·document.cookie 에 refresh 가 노출되지 않음을 검증하는 회귀 테스트 1건",
+        "(B) 예외를 정식 등재(사람 승인 필요 — 리뷰어 단독 수용 불가) — ① security.md §2.1 금지 문구 개정 + §8 에 R-09 로 등재(수용 사유·재평가 조건) ② 보완통제 동반: CSP 도입(최소 default-src 'self'; script-src 'self' https://dapi.kakao.com https://*.daumcdn.net; object-src 'none'; base-uri 'none'; frame-ancestors 'none') + refresh TTL 단축 + 서버측 폐기(jti denylist·/auth/logout) + RN 은 Keychain/Keystore 강제 명시"
+      ],
+      "note": "위험의 절대 크기보다 '문서가 금지한 것을 코드가 예외 기록 없이 하고 있다'는 상태가 차단 사유다. 이 원장은 SR-005→SR-006 에서 문서-현실 불일치를 리뷰어가 좋게 해석했다가 반려당한 전례가 있다. (A)·(B) 어느 쪽이든 문서와 코드가 일치하면 해소.",
+      "rejected_by": "SR-015 (security-reviewer, herdr re-review 대행)",
+      "fixed_by": "re-arch/re-fe - 통과조건 (A) 채택(설계 개정이 아니라 원래 설계로 복귀). backend/app/api/cookies.py 신설 + routes/deps/schemas/config/security 수정, frontend client.ts 저장소 계층 전면 삭제",
+      "verified_by": "SR-016 (security-reviewer, 반려 당사자 재검증)",
+      "date_closed": "2026-07-25",
+      "pass_conditions_met": [
+        "(A)-1 refresh 쿠키 4속성 실측: refresh_token=<jwt>; HttpOnly; Max-Age=604800; Path=/api/v1/auth; SameSite=Strict; Secure + Domain 없음(host-only, 형제 서브도메인 유출 차단). 로그인 응답 body 에 refresh_token 필드 없음(keys=access_token/token_type/expires_in)",
+        "(A)-2 access 메모리 전용 3중 확인: src grep 실사용 0건 / Object.keys(client) 에 setTokens·loadTokens·configureAuthStorage 소멸, refresh 명 export 0개 / 저장소 스파이로 login->restoreSession->logout 전과정 getItem·setItem·removeItem 0회 + document.cookie setter 0회 / dist 재빌드 후 localStorage·sessionStorage·document.cookie·refresh_token 전부 0건",
+        "(A)-3 CSRF 3겹 실측: SameSite=Strict + X-Requested-With 필수(누락·임의값 403 CSRF_HEADER_REQUIRED, 대소문자 무시는 200) + CORS 미들웨어 0건(preflight 차단). 403 이 쿠키를 지우지 않음(로그아웃 CSRF 방지) 확인, 직후 정상 refresh 200. 로그인 CSRF 는 JSON 본문 요구 + CORS 부재로 불성립",
+        "(A)-4 회귀 테스트: client.test.ts 저장소 0회 호출 단언 신설, 백엔드 쿠키 검증 7종 포함 +17건. junit tests=419 failures=0 errors=0 skipped=50(=369 passed), frontend 49 passed, build 성공",
+        "우회 4종 전부 401(쿠키 없는 별도 클라이언트에서 훔친 토큰 투입): body refresh_token / camelCase refreshToken / 쿼리스트링 / Authorization: Bearer. RefreshIn 스키마 제거 확인(class RefreshIn·refresh_token: str 0건)",
+        "삭제헤더 실효성: 발급/삭제 속성 기계비교 불일치 0(path·httponly·secure·samesite·domain). expired_refresh_cookie_header 가 delete_refresh_cookie 를 더미 Response 에 태워 뽑는 구조라 속성이 어긋날 여지 자체가 없다. 로그아웃 후 쿠키 실제 제거 + 후속 refresh 401",
+        "Path 스코프 계측: 지도 요청의 Cookie 헤더 None, refresh 요청에만 첨부 - 노출면 축소 실동작",
+        "부수: COOKIE_SECURE 운영 무력화 불가(debug=False면 항상 Secure) + validate_runtime 이 false 설정을 드러냄 / typ 양방향 401x2 / 쿠키 회전 실동작(jti 로 같은 초 발급도 토큰 상이) / 로그아웃은 불량·만료 access 로도 204 / 계정열거 회귀 동일응답 / refresh 진행 중 로그아웃 시 세션 부활 안 함 / restoreSession 실패 시 checked=true 확정 방송",
+        "설계문서 무력화 없음: security.md:50·:54 금지조항 무변경, 변경분은 TTL 14->7일 강화 + 실패이력 정직 기재 + 8절 R-09 등재"
+      ],
+      "residual_nonblocking": "HttpOnly 는 탈취(공격자 기기로의 반출)를 막지만 세션 라이딩은 막지 못한다 - XSS 코드는 같은 오리진이므로 탭이 살아 있는 동안 fetch 를 가로채거나 /auth/refresh 를 직접 호출할 수 있다. 위험의 성질이 '영구·이식 가능한 자격증명 유출'에서 '일시적 세션 오용'으로 내려갔을 뿐 0 이 아니다. 그래서 SR15-4(CSP)가 마지막 층으로 남는다."
+    },
+    {
+      "id": "SR15-2",
+      "verdict": "CLOSE (해소 - 설계 변경으로 문제 자체가 소멸)",
+      "severity": "low",
+      "blocks": "없음 (해소)",
+      "found_by": "SR-015 (security-reviewer, herdr re-review 대행)",
+      "date_found": "2026-07-25",
+      "owner": "re-fe",
+      "title": "다른 탭과 로그아웃이 동기화되지 않는다 — storage 이벤트 미구독",
+      "evidence": [
+        "frontend/src/api/client.ts 에 window.addEventListener('storage', ...) 0건",
+        "probe 실측: 다른 탭이 저장소를 비웠다고 가정하고 StorageEvent 발사 → 이 탭은 여전히 isAuthenticated()===true 이고 메모리 토큰을 보유",
+        "한 탭에서 로그아웃해도 다른 탭은 401 이 날 때까지 계속 인증 요청을 보낸다(access 30분)"
+      ],
+      "pass_conditions": [
+        "storage 이벤트를 구독해 ACCESS_KEY 가 사라지면 메모리 토큰도 비우고 emitAuth 로 방송",
+        "회귀 테스트 1건"
+      ],
+      "verified_by": "SR-016 (security-reviewer, herdr re-review 대행)",
+      "date_closed": "2026-07-25",
+      "pass_conditions_met": [
+        "SR15-1 수정으로 localStorage 기반 세션 자체가 사라져 'storage 이벤트 구독'이 불필요해졌다",
+        "세션의 진실이 이제 탭이 공유하는 HttpOnly 쿠키다 - 한 탭이 로그아웃하면 쿠키가 지워지므로 다른 탭은 access 만료(30분 이내) 또는 다음 refresh 에서 401 -> 자동 로그아웃(client.ts request/clearSession 경로)",
+        "실측: 로그아웃 후 동일 쿠키 저장소의 refresh 는 401"
+      ],
+      "note": "별도 수정 없이 상위 결함 해소의 부수 효과로 닫혔다. 남는 것은 '다른 탭이 최대 30분간 만료된 화면을 보여줄 수 있다'는 UX 지연이며 보안 결함이 아니다."
+    },
+    {
+      "id": "FE-2",
+      "verdict": "CLOSE (PASS)",
+      "severity": "high",
+      "blocks": "없음 (해소)",
+      "found_by": "CR-014 (re-review — 지시 2026-07-25-30-review)",
+      "date_found": "2026-07-25",
+      "owner": "re-ux / re-fe",
+      "title": "지도에 마커가 없다 — 지도 기반 추천(F1)의 핵심 화면이 비어 있다",
+      "evidence": [
+        "MapView.tsx(95줄)는 지도 생성 + bbox 를 onBoundsChange 로 emit 할 뿐 마커를 하나도 그리지 않는다",
+        "kakao.maps.Marker · MarkerClusterer 인스턴스화 0건",
+        "SDK 를 libraries=clusterer 로 로드해 놓고 사용하지 않는다",
+        "백엔드 /map/complexes 는 완성(bbox·클러스터 레벨 응답)"
+      ],
+      "pass_conditions": [
+        "단지 마커 렌더링 + 줌 레벨별 클러스터링(CLUSTER_ZOOM_THRESHOLD 규약)",
+        "마커 탭 → 바텀시트 연동"
+      ],
+      "reviewed_by": "CR-018 (code-reviewer, herdr re-review 대행)",
+      "date_reviewed": "2026-07-25",
+      "pass_conditions_met": [
+        "① panTo 를 선택 변경 시에만 실행 — MarkerLayer.lastPannedId + private syncFocus()(mapMarkers.ts:175-191). 같은 선택 재렌더 무이동 / 선택 변경 시 이동 / 해제 후 재선택 시 이동(기억 소거) / 응답에 없으면 기억 미갱신 / 선택 없으면 무이동, destroy 도 초기화",
+        "② 회귀 테스트 — '같은 selectedId 로 3회 그려도 panTo 1회' + 선택변경·해제후재선택·무선택 4건 신설",
+        "③ CR18-5 좌표 순서 단언 3곳(단지 position·panTo 대상·군집 center). 경도(127.0276)>위도(37.4979) 값 설계로 뒤집히면 반드시 실패",
+        "★변이 테스트로 그물 실효성 독립 검증: lastPannedId 가드 제거 시 CR18-1 테스트가 실제 FAIL('called 1 times, but got 3 times' — CR-018 계측치와 동일), 좌표 뒤집기 시 3건 동시 FAIL. 원복은 md5 대조 확인"
+      ],
+      "blocking_finding": {
+        "id": "CR18-1",
+        "severity": "high",
+        "title": "선택이 유지되면 지도가 사용자의 팬을 되감는다 — setComplexes 호출마다 panTo 재실행",
+        "evidence": [
+          "mapMarkers.ts:158-161 이 selectedId != null 이면 '선택이 바뀌었을 때'가 아니라 '그릴 때마다' map.panTo(선택단지) 를 부른다",
+          "반례 실행: selectedId 를 7 로 고정한 채 setComplexes 3회 호출 → map.panTo 3회 (기대 1회)",
+          "전파 경로: MapView.tsx:112-119 effect deps 에 items 포함 + App.tsx:39-46 이 조회 성공마다 새 배열로 setItems + App.tsx:71-77 onBoundsChange 가 selected 를 해제하지 않음",
+          "결과: 마커/카드를 탭한 뒤 지도를 조금 끌면 idle→350ms→조회→setItems→effect→panTo 로 지도가 원래 자리로 되감긴다. 선택 단지가 새 bbox 안에 남는 작은 팬은 거의 항상 재현되고, 크게 끌어 화면 밖으로 나가야만 팬이 유지돼 동작이 들쭉날쭉하다",
+          "부수 피해: 되감김이 다시 idle 을 일으켜 팬 1회에 서버 조회가 2회. App.tsx:30 이 '지도를 움직일 때마다 요청이 나가면 서버가 죽는다'며 넣은 350ms 디바운스의 절약분을 되돌린다",
+          "무한 루프는 아니다(두 번째 panTo 는 같은 중심이라 이동 없음 → 2사이클에서 멈춤). 문제는 무한성이 아니라 사용자 입력이 되돌려지고 요청이 2배가 된다는 점이며, 지도가 주 화면(F1)이고 방아쇠가 그 화면의 주 동작(마커 탭)이라 차단으로 판정",
+          "테스트가 못 잡은 이유: mapMarkers.test.ts 가 setComplexes 를 한 번만 부른다. 두 번 부르는 순간 드러났을 결함"
+        ],
+        "pass_conditions": [
+          "① panTo 를 선택이 바뀐 순간에만 실행 — MarkerLayer 에 lastPannedId 를 두거나, setComplexes 에서 panTo 를 떼어내 focusComplex(id) 로 분리하고 MapView 가 useEffect(..., [selectedId]) 하나에서만 호출",
+          "② 회귀 테스트 1건 — 같은 selectedId 로 setComplexes 를 2회 이상 호출해도 panTo 는 1회",
+          "③ CR18-5 동반 해소 — 좌표 순서 단언 1건(expect(pos.lat).toBe(37.5); expect(pos.lng).toBe(127.0)). 현재 구현은 옳으나 36개 테스트 중 뒤집힘을 잡는 것이 하나도 없다"
+        ]
+      },
+      "nonblocking_findings": [
+        "CR18-5(medium) 좌표 변환 회귀 테스트 부재 — 통과조건 ③에 포함",
+        "CR18-6(medium) MapView.tsx:98 addListener(map,'idle',emit) 에 대응하는 removeListener 가 cleanup(:104-108)에 없고 mapRef 도 미정리 — 로그아웃→재로그인마다 옛 map 객체와 핸들러 잔존. MarkerLayer.destroy() 는 정상",
+        "CR18-7(medium) CustomOverlay 성능 — 서버 limit=500(memory.py:80) → 최악 500 오버레이 약 2,000+ DOM 노드, 게다가 id 기준 diff 없이 매 갱신마다 전량 파괴·재생성(팬마다 500개). 완화: id 재사용 diff / 표시 상한+'N개 더' / 임계 초과 시 pill→dot 강등",
+        "CR18-8(low) MapView.css:36 주석은 '탭 영역 44px' 인데 .map-pill--complex 는 min-height 34px(:68) — 프로젝트 기준(CR-006 C8) 미달, 문서-현실 불일치",
+        "CR18-10(low) rankById 를 App.tsx:89-95 가 넘기지 않아 순위 배지 경로가 죽은 코드",
+        "참고(선재, 이 diff 아님) 줌아웃 시 bbox 폭이 _MAX_BBOX_DEGREES=2.0(routes.py:246)을 넘으면 400 — 군집이 보여야 할 구간에서 에러만 보인다. zoom=20-getLevel() 기준 카카오 level 11 이상"
+      ],
+      "fixed_by": "re-ux / re-fe (mapMarkers.ts syncFocus + 회귀 테스트, working tree)",
+      "verified_by": "CR-019 (code-reviewer, herdr re-review 대행)",
+      "date_closed": "2026-07-25",
+      "residual_nonblocking": "CR18-7(CustomOverlay 전량 재생성 성능)은 미수정 — 실데이터 투입 전 필수 과제로 승계. CR18-10(rankById 죽은 경로)은 추천 배선 시점 과제."
+    },
+    {
+      "id": "FE-1",
+      "verdict": "CLOSE (PASS)",
+      "severity": "high",
+      "blocks": "없음 (해소)",
+      "found_by": "CR-014 (re-review — 지시 2026-07-25-30-review)",
+      "date_found": "2026-07-25",
+      "owner": "re-ux / re-fe",
+      "title": "로그인 화면이 없다 — 백엔드 인증은 완성인데 사용자가 로그인할 방법이 없다",
+      "evidence": [
+        "App.tsx(134줄)에 로그인 폼 없음 — token·input·form·password 어느 것도 없다",
+        "App.tsx:51 에 문자열 '로그인이 필요합니다.' 만 존재",
+        "백엔드는 /auth/register·/auth/login·JWT 전부 완성(SR-009/SR-010 검증)",
+        "이 상태로 배포하면 앱을 쓸 수 없다"
+      ],
+      "pass_conditions": [
+        "로그인·회원가입 폼 + 토큰 저장/첨부 + 401 처리",
+        "모바일 퍼스트 UX 기준 준수(ux/README.md)"
+      ],
+      "fixed_by": "re-ux / re-fe (working tree — client.ts·useAuth.ts·AuthForm.tsx/.css·validation.ts·main.tsx)",
+      "verified_by": "CR-018 (code-reviewer, herdr re-review 대행)",
+      "date_closed": "2026-07-25",
+      "pass_conditions_met": [
+        "① 로그인·회원가입 폼 신설(AuthForm.tsx) — App.tsx:154-159 가 미인증이면 게이트로 막고, useAuth.ts:13 이 subscribeAuth 로 401 폐기를 화면 전환에 자동 연결",
+        "① 토큰 저장/첨부: client.ts:158 이 매 요청 Authorization Bearer 자동 첨부, main.tsx:8 loadTokens 로 새로고침 복원(CR-006 I-18 해소)",
+        "① 401 처리: 401→refresh 1회→실패 시 access·refresh 폐기+로그아웃 방송(client.ts:180-206). 무한 재시도 구조적 불가(request 자기재귀 없음, refresh 는 raw 직접호출) — 실행 검증",
+        "② 모바일 퍼스트: inputMode·enterKeyHint·autoComplete·autoCapitalize 지정, 입력 17px(iOS 포커스 확대 방지), 터치 타깃 44/50/44px, 에러는 alert 아닌 필드 하단 role=alert",
+        "부수: 계정열거 방지 문구 통합(messageFor 401 단일화), validation.ts 가 서버 계약(12/256)을 복사하되 더 엄격히 막지 않음"
+      ],
+      "residual_nonblocking": "CR18-2(medium 동시 refresh 단일비행 없음 — 백엔드에 refresh rotation 도입 시 강제로그아웃으로 조용히 악화) · CR18-3(low storage.set 예외 시 인증상태/화면 불일치) · CR18-4(low isAuthenticated 가 !==null) · CR18-9(low useAuth tearing). 전부 CR-018 원장에 반례와 함께 기록. 다음 라운드 권고."
+    },
     {
       "id": "APTDONG-1",
       "verdict": "CLOSE (PASS)",
@@ -484,8 +659,8 @@
     ]
   },
   "stage3_completion": {
-    "status": "NOT_COMPLETE",
-    "judged_by": "CR-014 (re-review — 지시 2026-07-25-30-review)",
+    "status": "FRONTEND_UNBLOCKED",
+    "judged_by": "CR-019 (code-reviewer, herdr re-review 대행)",
     "date": "2026-07-25",
     "done": [
       "PostGIS 리포지토리(코드)",
@@ -493,15 +668,18 @@
       "추천 실행 경로",
       "수집 파이프라인",
       "보안(SR8-1/8-2)",
-      "배포 준비물"
+      "배포 준비물",
+      "FE-1 로그인 화면 (CR-018 CLOSE)",
+      "FE-2 지도 마커 (CR-019 CLOSE)",
+      "인증 쿠키 전환 — 코드리뷰 관점 PASS (CR-019)"
     ],
-    "blocking": [
-      "FE-1 로그인 화면",
-      "FE-2 지도 마커"
-    ],
+    "blocking": [],
     "human_blocked": [
       "실데이터 수집 — MOLIT_API_KEY 사람 발급 대기(팀 책임 아님)"
     ],
-    "note": "백엔드·도메인·수집은 견고하나 사용자가 로그인할 수 없고 지도에서 아무것도 볼 수 없는 상태를 3단계 완성이라 부를 수 없다. FE-1·FE-2 해소 후 재판정."
+    "before_real_data": [
+      "CR18-7 — CustomOverlay 최대 500개를 diff 없이 전량 재생성. 실데이터가 들어오면 밀집지역 zoom>=13 에서 수백 개가 한 화면에 나온다. 통과선: id 기준 재사용 / 표시 상한 150~200 + 'N개 더' / 임계 초과 시 dot 강등 / 실측 프레임타임 첨부"
+    ],
+    "note": "코드리뷰 관점의 3단계 차단 항목(FE-1·FE-2)이 모두 해소됐다. 최종 3단계 완성 판정은 security_review(SR-015 라운드) 결과와 함께 내려야 한다 — 그쪽은 security-reviewer 소관이며 이 판정이 대신하지 않는다."
   }
 }

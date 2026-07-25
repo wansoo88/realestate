@@ -21,6 +21,7 @@ import datetime as dt
 import functools
 import logging
 import os
+import secrets
 import threading
 from typing import Any
 
@@ -286,8 +287,21 @@ def needs_rehash(hashed: str) -> bool:
 # ---------------------------------------------------------------------------
 
 ACCESS_TTL = dt.timedelta(minutes=30)
-REFRESH_TTL = dt.timedelta(days=14)
+
+#: refresh 수명. 설계(security.md §2.1)는 14일이었으나 **7일로 단축한다** (SR15-1).
+#:
+#: 근거: refresh 를 `httpOnly`+`Secure`+`SameSite=Strict` 쿠키로 옮기고 호출마다
+#: 회전시켜 탈취 난이도는 크게 올라갔다. 하지만 **서버측 폐기 수단(jti denylist)이
+#: 아직 없다** — 한 번 새어나간 refresh 는 만료될 때까지 되돌릴 방법이 없다.
+#: 회수 수단이 없는 동안은 노출 창을 시간으로 줄이는 것이 유일한 통제라 절반으로 자른다.
+#: (denylist 도입 = 후속 과제 SR15-3. 그때 이 값을 다시 논의한다.)
+REFRESH_TTL = dt.timedelta(days=7)
 _ALGORITHM = "HS256"
+
+#: 클라이언트에 알려줄 access 수명(초). 라우터가 숫자를 따로 적지 않게 여기서 판다 —
+#: 상수를 두 곳에 적으면 언젠가 어긋나고, 그러면 프론트가 만료 시각을 잘못 잡는다.
+ACCESS_TTL_SECONDS = int(ACCESS_TTL.total_seconds())
+REFRESH_TTL_SECONDS = int(REFRESH_TTL.total_seconds())
 
 
 def create_token(user_id: int, *, secret: str, kind: str = "access",
@@ -301,12 +315,21 @@ def create_token(user_id: int, *, secret: str, kind: str = "access",
         "typ": kind,
         "iat": int(now.timestamp()),
         "exp": int((now + ttl).timestamp()),
+        # 토큰 고유 식별자. 두 가지 일을 한다.
+        #   1) 같은 초에 두 번 발급해도 토큰 문자열이 달라진다 → 쿠키 회전이 실제로 회전이 된다.
+        #   2) 서버측 폐기(denylist)를 붙일 때 필요한 키. 지금은 저장하지 않는다(SR15-3).
+        "jti": secrets.token_urlsafe(12),
     }
     return jwt.encode(payload, secret, algorithm=_ALGORITHM)
 
 
 def decode_token(token: str, *, secret: str, expect: str = "access") -> int:
-    """유효한 토큰이면 user_id 를 돌려준다. 아니면 예외."""
+    """유효한 토큰이면 user_id 를 돌려준다. 아니면 예외.
+
+    ⚠️ `typ` 검증은 **선택이 아니다.** 이게 없으면 수명이 긴 refresh 로 API 를 계속
+    호출하거나(위), 반대로 access 를 refresh 쿠키에 넣어 갱신 루프를 돌릴 수 있다.
+    호출부는 항상 기대하는 종류를 `expect` 로 명시한다.
+    """
     payload: dict[str, Any] = jwt.decode(token, secret, algorithms=[_ALGORITHM])
     if payload.get("typ") != expect:
         # refresh 토큰으로 API 를 호출하는 것을 막는다.

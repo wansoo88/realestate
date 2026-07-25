@@ -1,57 +1,83 @@
+/* 단지 카드 — 박스 대신 헤어라인 + 여백(규칙 3: 카드 안에 카드 넣지 않는다) */
 .card {
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  margin-bottom: var(--sp-3);
-  background: var(--bg-elev);
-  overflow: hidden;
+  border-bottom: 0.5px solid var(--hairline);
 }
-
-.card--selected { border-color: var(--accent); border-width: 2px; }
-
-/* 예산 초과는 목록에서 지우지 않고 흐리게 — 왜 후보에 없는지 보이게 한다 */
-.card--over { opacity: .55; }
 
 .card__main {
   display: block;
   width: 100%;
   text-align: left;
-  padding: var(--sp-3) var(--sp-4);
+  padding: var(--sp-4) var(--sp-1);
   background: none;
   border: none;
-  border-radius: inherit;
+  border-radius: var(--r-card);
+}
+
+/* 선택 — 옅은 파란 채움(테두리·굵은 선 없이) */
+.card--selected .card__main {
+  background: var(--accent-weak);
+  padding-left: var(--sp-3);
+  padding-right: var(--sp-3);
+}
+
+/* 예산 초과 — opacity 로 대비를 깨지 않는다. 금액을 눌러 표시(규칙 1) */
+.card--over .card__price {
+  color: var(--text-secondary);
+}
+
+/* 금액 = 화면에서 가장 큰 요소 */
+.card__price {
+  margin: 0 0 var(--sp-1);
+  font-size: var(--fs-price);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  color: var(--text);
+}
+
+/* 실측 추정 — 값은 읽히게 두되 배지로 근거의 농도를 알린다 */
+.card__price--est {
+  color: var(--text);
+}
+
+.card__conf {
+  font-family: var(--ff);
+  font-weight: 400;
+  align-self: center;
+}
+
+.card__nodata {
+  font-size: var(--fs-body);
+  font-weight: 400;
+  color: var(--text-estimated);
 }
 
 .card__head {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-  margin-bottom: var(--sp-1);
+  margin-bottom: 2px;
 }
 
+/* 단지명 — 금액보다 작게(규칙 2: 라벨이 금액보다 커지면 안 된다) */
 .card__name {
   margin: 0;
-  font-size: var(--fs-title);
-  font-weight: 600;
+  font-size: var(--fs-footnote);
+  font-weight: 400;
+  color: var(--text-secondary);
 }
 
-.card__over-badge { border-color: var(--warn); color: var(--warn); }
-
-.card__price {
-  margin: 0 0 var(--sp-1);
-  font-size: var(--fs-price);
-  font-weight: 700;
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  flex-wrap: wrap;
+.card__over-badge {
+  color: var(--warn-text);
 }
-
-.card__conf { font-weight: 400; }
 
 .card__meta {
   margin: 0;
   font-size: var(--fs-caption);
-  color: var(--text-muted);
+  color: var(--text-secondary);
 }
 
 .card__asof {

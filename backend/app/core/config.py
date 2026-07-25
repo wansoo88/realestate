@@ -40,6 +40,14 @@ class Settings(BaseSettings):
     # 슬롯을 이만큼 기다려도 못 얻으면 503 으로 흘려보낸다(대기하다 전부 마비되는 대신).
     argon2_wait_timeout_sec: float = 2.0
 
+    # --- refresh 쿠키 (SR15-1 / security.md §2.1) ---
+    # refresh 토큰은 **응답 본문에 넣지 않는다.** `httpOnly` 쿠키로만 오간다.
+    # 문제는 `Secure` 다: 브라우저는 `Secure` 쿠키를 http 응답에서 아예 저장하지 않으므로
+    # `http://localhost` 로 개발할 때 로그인 흐름 자체가 막힌다.
+    # 그래서 설정으로 분기하되 **끄는 것은 DEBUG 에서만** 허용한다
+    # (`refresh_cookie_secure` 가 운영에서 강제 True 로 되돌린다).
+    cookie_secure: bool = True
+
     # --- DB / 캐시 ---
     postgres_host: str = "db"
     postgres_port: int = 5432
@@ -58,6 +66,18 @@ class Settings(BaseSettings):
     tax_rules_path: Path = REPO_ROOT / "config" / "tax_rules.yaml"
 
     @property
+    def refresh_cookie_secure(self) -> bool:
+        """쿠키에 실제로 붙일 `Secure` 값.
+
+        **운영(DEBUG=false)에서는 설정과 무관하게 항상 True.** 설정 실수 하나로
+        refresh 토큰이 평문 HTTP 로 흐르는 사고를 구조적으로 막는다.
+        `COOKIE_SECURE=false` 는 오직 DEBUG 개발 환경에서만 효력이 있다.
+        """
+        if not self.debug:
+            return True
+        return self.cookie_secure
+
+    @property
     def database_url(self) -> str:
         return (f"postgresql+psycopg://{self.postgres_user}:{self.postgres_password}"
                 f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}")
@@ -73,6 +93,13 @@ class Settings(BaseSettings):
             problems.append("POSTGRES_PASSWORD 가 비어 있습니다")
         if self.debug:
             problems.append("DEBUG 가 켜져 있습니다 — 운영에서는 꺼야 합니다")
+        if not self.cookie_secure:
+            # 운영에서는 `refresh_cookie_secure` 가 어차피 True 로 되돌리지만,
+            # 설정이 그렇게 적혀 있다는 사실 자체를 기동 점검에서 드러낸다.
+            problems.append(
+                "COOKIE_SECURE 가 false 입니다 — 로컬 개발 전용 값입니다"
+                "(운영에서는 무시되고 Secure 가 강제됩니다)"
+            )
         # Argon2 하한은 security.py 가 소유한다(그쪽이 실제로 강제하는 값이라
         # 여기서 숫자를 다시 적으면 언젠가 둘이 어긋난다).
         from app.core.security import argon2_parameter_problems

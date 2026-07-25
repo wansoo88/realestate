@@ -907,3 +907,294 @@ scope: F4 동별 실측(dong_effect·orchestrator·postgis) · reviewer: code-re
 지킨다. 오케스트레이터가 None/폴백/실측 3경우를 모두 처리하고 dong_effect 를 밴드와 동일 창으로 부른다.
 테스트 10건(단위 7·통합 3)이 핵심 주장을 실제로 검증하며 전체 회귀 352 passed·50 skipped 재현. 비차단 3건은
 성능·문구 사안으로 게이트를 막지 않는다.
+
+---
+
+## CR-018 · 2026-07-25 · 프론트 FE-1 로그인 · FE-2 지도 마커 (code-reviewer, herdr re-review 대행)
+
+**판정: FAIL — FE-1 PASS / FE-2 REJECT (`CR18-1` 1건)**
+scope=프론트 FE-1 로그인·FE-2 지도마커 · reviewer=code-reviewer (herdr re-review 대행)
+대상: working tree 미커밋 diff + 신규 파일(`client.ts`·`useAuth.ts`·`AuthForm.tsx`·`mapMarkers.ts`·
+`MapView.tsx`·`App.tsx`·`ComplexCard.tsx`·`BottomSheet.tsx`·`validation.ts`·`notices.ts` + 테스트 3종)
+
+### 재현
+```
+frontend: npm run typecheck  ✅ 무출력(통과)
+          npm test           ✅ 36 passed (4 files: format 15 · client 7 · mapMarkers 10 · AuthForm 4)
+          npm run build      ✅ tsc -b + vite — 42 modules, dist 161.42 kB
+backend : pytest -p no:warnings ✅ 352 passed · 50 skipped (기준선 일치, 이 diff 는 백엔드 무변경)
+```
+> ⚠️ 백엔드 3회 실행 중 1회에서 `test_security.py` 5건이 `argon2 HashingError: Memory allocation error` 로
+> 실패했다. **SR-008 에 이미 기록된 로컬 자원 flake** 이고 이 diff 와 무관하다(백엔드 파일 변경 0건).
+> 재실행 2회는 352 passed. 기록만 남긴다.
+
+### 검증 방법
+문서·주석을 믿지 않고 **임시 반례 테스트 파일을 만들어 5개 가설을 실행으로 검증**한 뒤 삭제했다
+(working tree 원상복구 확인). 아래 ✅/⛔ 는 전부 그 실행 결과다.
+
+---
+
+### FE-1 로그인 — **PASS**
+
+| # | 검증축(지시) | 결과 | 근거(파일:라인) |
+|---|---|---|---|
+| 1a | 401→refresh 1회→실패 시 폐기+로그아웃 | ✅ | `client.ts:180-206`. 재시도는 `raw()` 직접 호출이라 **정확히 1회** |
+| 1b | **무한 재시도 루프 불가** | ✅ | `request()` 는 자기 자신을 재귀호출하지 않는다. refresh 도 `request` 가 아니라 `raw("/auth/refresh")`(`:190`) — 재진입 경로가 구조적으로 없다 |
+| 1c | refresh 요청 자체가 401 이면 | ✅ | `raw` 가 던짐 → `catch{ logout(); throw e }`(`:195-198`). 원 401 을 전파하고 토큰 폐기. 테스트 `refresh 가 실패하면 토큰을 폐기하고 로그아웃을 방송한다` 가 fetch 2회로 실검증 |
+| 1d | refresh 성공 후 원 요청 1회만 재시도 | ✅ | `:199-204`. 테스트가 `fetch` 3회 + 재시도 헤더 `Bearer a2` 를 단언 |
+| 1e | 재시도도 401 이면 | ✅ | `:202` logout 후 e2 전파 |
+| 2a | localStorage 폴백 실동작 | ✅ | `browserStorage()`(`:83-98`)가 `typeof` 검사 + **probe write/remove** 로 판정 → 사파리 프라이빗처럼 setItem 이 던지는 환경에서 `memoryStorage()` 로 대체(`:100`) |
+| 2b | 로그아웃 시 access·refresh **둘 다** 소거 | ✅ | `logout()→setTokens(null,null)`(`:146`) → 메모리 2개 `null` + `storage.remove` 2개(`:132-133`) + `emitAuth`(`:135`). 누락 없음 |
+| 3 | 네트워크 오류를 401 로 오인하지 않는가 | ✅ | `:184` `!(e instanceof ApiException)` 이면 즉시 전파 — fetch reject 로 로그아웃되지 않는다 |
+| 4 | 게이트 배선 | ✅ | `App.tsx:154-159` 미인증→`AuthForm`. `useAuth.ts:13` 이 `subscribeAuth` 구독 → 401 폐기가 화면 전환으로 자동 연결 |
+| 5 | 모바일 퍼스트 UX | ✅ | `inputMode`·`enterKeyHint`·`autoComplete(username/current-password/new-password)`·`autoCapitalize=none`(`AuthForm.tsx:82-105`), 입력 `--fs-body 17px`(≥16px → iOS 포커스 확대 없음), 토글 44px·제출 50px·전환 44px, 에러는 alert 아닌 필드 하단 `role="alert"` |
+| 6 | 계정열거 방지 | ✅ | `messageFor()`(`:171-182`)가 401 을 "이메일 또는 비밀번호가 올바르지 않습니다" 하나로 합침. 테스트 있음 |
+| 7 | 서버 계약 복사 | ✅ | `validation.ts:10-11` 이 `RegisterIn` 의 12/256 을 그대로 복사하고 "서버보다 엄격히 막지 않는다"를 문서화. 권장규칙(문자종류)은 `required:false` 라 제출을 막지 않음 |
+
+#### 비차단 관찰 (FE-1 — 게이트 무차단)
+
+| ID | 심각도 | 내용 · 근거 |
+|---|:--:|---|
+| `CR18-2` | medium | **동시 refresh 중복(단일비행 없음).** 반례 재현: 401 이 될 요청 2건을 `Promise.all` 로 동시 투입 → `/auth/refresh` 가 **2회** 나갔다(기대 1회). 현재는 무해하다 — 백엔드 `routes.py:98-119` 가 stateless JWT 재발급이라 **회전·블랙리스트가 없고**, `deploy/nginx-realestate.conf:85` 의 엄격 존(1r/s)은 login/register 만 걸려 refresh 는 `re_api`(10r/s)다. 그러나 나중에 refresh rotation 을 넣는 순간 "먼저 도착한 요청이 뒤 요청의 토큰을 무효화 → 세션 중 강제 로그아웃"으로 **조용히** 바뀐다. 권고: 진행 중 refresh Promise 를 모듈 변수에 캐시해 공유 |
+| `CR18-3` | low | **저장소 런타임 쓰기 실패 시 상태 불일치.** 반례 재현: `storage.set` 이 `QuotaExceededError` 를 던지게 하고 로그인 → HTTP 는 성공했는데 `setTokens`(`:129`)가 던져 **`emitAuth`(`:135`)에 도달하지 못한다**. 결과 `isAuthenticated()===true` 인데 방송 0건 → 화면은 로그인 폼에 머물고 "가입/로그인 실패" 에러만 뜬다. 생성 시점 probe 는 통과했으나 세션 중 쿼터가 찬 경우가 경로다. 권고: `storage.set` 을 try/catch 로 감싸 저장 실패해도 메모리 토큰+방송은 진행 |
+| `CR18-4` | low | `isAuthenticated()`(`:151`)가 `accessToken !== null`. `configureAuthStorage` 로 RN AsyncStorage 어댑터를 끼웠을 때 `get` 이 `undefined` 를 돌려주면 **토큰 없이 인증 판정**이 나고 게이트가 열린다(그 뒤 401→refresh 없음→logout 으로 자가치유하나 한 프레임 노출). `!= null` 또는 truthy 판정 권고 |
+| `CR18-9` | low | `useAuth` 가 `useState(isAuthenticated)` + `useEffect` 구독이라 렌더~구독 사이 변경을 놓칠 수 있다(고전적 tearing). 실사용 위험은 사실상 0. React 18 이면 `useSyncExternalStore` 가 정석 |
+
+---
+
+### FE-2 지도 마커 — **REJECT (`CR18-1`)**
+
+| # | 검증축(지시) | 결과 | 근거(파일:라인) |
+|---|---|---|---|
+| 1 | 단지 마커 렌더링 | ✅ | `mapMarkers.ts:124-155` `setComplexes` 가 항목당 CustomOverlay 생성·`setMap(map)`. 테스트가 3건→오버레이 3개 확인 |
+| 2 | 줌 레벨별 클러스터링 | ✅ | `setClusters`(`:164-184`) + 탭 시 `panTo`+`setLevel(-2)`(`MapView.tsx:124-129`) |
+| 3 | **`CLUSTER_ZOOM_THRESHOLD` 규약 준수** | ✅ | 프론트는 **13 을 하드코딩해 분기하지 않는다.** `App.tsx:40-47` 이 오직 서버 응답 `res.level` 로만 items/clusters 를 가른다 → 백엔드 `routes.py:245 CLUSTER_ZOOM_THRESHOLD = 13` 이 바뀌어도 자동 추종. 소스의 `13` 은 `MapView.tsx:20-21,111,121` **주석 4곳뿐**(grep 전수) — 분기 코드 0건. 어긋날 여지 없음 |
+| 4a | 좌표 변환 뒤집힘 | ✅ | `mapMarkers.ts:101` `LatLng(point[1], point[0])`, `MapView.tsx:127` 동일. 백엔드 `routes.py:318 point:[c.lon,c.lat]` · `:306 center:[lon,lat]` 와 정합. **직접 실행 확인**: `point=[127.0,37.5]` → `LatLng.lat===37.5 && .lng===127.0` |
+| 4b | bbox 축 순서 | ✅ | `MapView.tsx:94` `sw.getLng(),sw.getLat(),ne.getLng(),ne.getLat()` = 백엔드 `routes.py:252` `minLon,minLat,maxLon,maxLat` |
+| 5a | 마커·리스너 정리 | ✅ | `detach()`(`:186-190`)가 click·keydown `removeEventListener` + `setMap(null)`. **실행 검증**: 재렌더 후 옛 el 클릭 → `onSelect` 미호출 / `destroy()` 후에도 미호출 + `setMap(null)` 기록 |
+| 5b | 이동마다 누수 | ✅ | `setComplexes`/`setClusters` 가 **먼저 `clear*()`** 를 호출(`:125,165`) → 이전 오버레이가 남지 않는다. 언마운트 시 `MapView.tsx:106` `layerRef.current?.destroy()` |
+| 6 | **양방향 동기화 루프** | ⛔ | **`CR18-1`** — 아래 |
+| 7 | 탭 → 바텀시트 연동 | ✅ | 마커 click/Enter → `onSelect(id)`(`:109-121`) → `App.handleSelect`(`:80-83`) `setSelected` + 시트 `peek→half` → `ComplexCard` 가 `selected` 시 `scrollIntoView({block:"nearest"})`(신규) 로 해당 카드로 스크롤. 역방향(카드 탭)도 같은 핸들러 |
+| 8 | XSS | ✅ | `buildLabelEl`(`:39-49`)이 `textContent` 만 사용, `innerHTML`·`dangerouslySetInnerHTML` 0건. 테스트가 이미지 태그 주입으로 실검증 |
+| 9 | 디자인 이탈(CustomOverlay) | ✅ 수용 | 기능 의도(렌더·줌별 군집·탭→시트) 충족 확인. 승인된 이탈이므로 이탈 자체로 반려하지 않음. 단 성능은 `CR18-7` 로 지적 |
+
+#### ⛔ `CR18-1` (high · **차단**) — 선택이 유지되면 지도가 사용자의 팬을 되감는다
+
+**결함**: `mapMarkers.ts:158-161` 이 `setComplexes` **호출될 때마다** `selectedId != null` 이면 무조건
+`map.panTo(선택단지)` 를 실행한다. "선택이 **바뀌었을 때**" 가 아니라 "**그릴 때마다**" 다.
+
+**실행 반례** (직접 재현):
+```
+selectedId 를 7 로 고정한 채 setComplexes 를 3회 호출 → map.panTo 호출 3회 (기대 1회)
+```
+
+**실제 사용자 경로로의 전파** (코드 3개가 맞물린다):
+1. `MapView.tsx:112-119` 의 마커 effect deps 에 `items` 가 있다.
+2. `App.tsx:39-46` 은 조회가 성공할 때마다 `setItems(res.items)` 로 **새 배열**을 넣는다 → 지도를 움직여
+   재조회될 때마다 effect 가 다시 돈다.
+3. `App.tsx:71-77` `onBoundsChange` 는 `setSnap` + `fetchArea` 뿐 — **`selected` 를 해제하지 않는다.**
+
+→ 마커나 카드를 한 번 탭한 뒤 사용자가 지도를 조금 끌면:
+`idle → 350ms 디바운스 → 조회 → setItems → effect → setComplexes → panTo(선택단지)` 로
+**지도가 원래 자리로 되감긴다.** 선택 단지가 새 bbox 안에 남아 있으면(화면 한 폭 미만의 팬은 거의 항상)
+확정적으로 재현되고, 크게 끌어 선택 단지가 화면 밖으로 나가야만 팬이 유지된다 — 동작이 들쭉날쭉하다.
+
+**부수 피해**: 되감김 자체가 다시 `idle` 을 일으켜 **팬 1회에 서버 조회가 2회** 나간다. 두 번째 조회는
+사용자가 아니라 우리 코드가 만든 것이다. 같은 파일(`App.tsx:30`)이 "지도를 움직일 때마다 요청이 나가면
+서버가 죽는다"며 디바운스를 넣어 놓고, 그 절약분을 이 경로가 되돌린다.
+
+> **과장하지 않는다**: 무한 루프는 **아니다**. 두 번째 `panTo` 는 이미 같은 중심이라 이동이 없어 2사이클에서
+> 멈춘다. 문제는 무한성이 아니라 **사용자 입력이 되돌려지고 요청이 2배가 된다**는 점이다.
+> 지도가 이 제품의 주 화면(F1)이고, 되감김의 방아쇠가 바로 그 화면의 주 동작(마커 탭)이라 차단으로 본다.
+
+**통과 조건**
+1. `panTo` 를 **선택이 바뀐 순간에만** 실행한다. 예: `MarkerLayer` 에 `lastPannedId` 를 두고 직전과 다를
+   때만 이동, 또는 `setComplexes` 에서 `panTo` 를 떼어내 `focusComplex(id)` 로 분리하고 `MapView` 가
+   `useEffect(..., [selectedId])` **하나에서만** 부른다.
+2. 회귀 테스트 1건 — **같은 `selectedId` 로 `setComplexes` 를 2회 이상 호출해도 `panTo` 는 1회**.
+3. (함께) `CR18-5` 해소 — 좌표 순서 단언 1건. 지금 구현은 옳지만 **그물이 없다**. `LatLng(point[0],point[1])`
+   로 한 글자만 뒤집혀도 마커 전부가 엉뚱한 곳에 찍히는데 36개 테스트 중 이를 잡는 것이 하나도 없다.
+   내가 쓴 단언은 3줄이었다: `expect(pos.lat).toBe(37.5); expect(pos.lng).toBe(127.0)`.
+
+#### 비차단 관찰 (FE-2)
+
+| ID | 심각도 | 내용 · 근거 |
+|---|:--:|---|
+| `CR18-5` | medium | **좌표 변환 회귀 테스트 부재.** `mapMarkers.test.ts` 는 `opts.position` 을 한 번도 단언하지 않는다(목 `LatLng` 이 lat/lng 을 보관하는데도). 이 기능에서 가장 조용하고 가장 치명적인 회귀축이 무방비. → `CR18-1` 통과조건 3에 포함 |
+| `CR18-6` | medium | **지도 이벤트 리스너 미해제.** `MapView.tsx:98` `addListener(map,"idle",emit)` 에 대응하는 `removeListener` 가 cleanup(`:104-108`)에 없고 `mapRef.current` 도 null 로 되돌리지 않는다. 로그아웃→재로그인마다 옛 map 객체와 그 핸들러(옛 컴포넌트의 `onBoundsRef` 를 캡처)가 남는다. `MarkerLayer.destroy()` 는 제대로 부른다 |
+| `CR18-7` | medium | **CustomOverlay 대량 DOM(승인된 이탈의 대가).** 서버 상한이 `limit=500`(`repositories/memory.py:80`)이라 최악 500 오버레이 × (div+span) + 리스너 2개 ≈ 2,000+ 노드. 게다가 `setComplexes` 가 id 기준 diff 없이 **매 갱신마다 전량 파괴 후 재생성**하므로, 팬 한 번(350ms 디바운스)마다 500개를 새로 만든다. `kakao.maps.Marker` 는 내부적으로 묶어 그리지만 CustomOverlay 는 매 이동마다 개별 DOM 을 재배치한다 — 중급 모바일에서 프레임 드랍이 예상된다. 완화안: (a) id 기준 재사용(diff), (b) 화면당 표시 상한 + "N개 더" 표기, (c) 임계 개수 초과 시 pill→점(dot) 강등 |
+| `CR18-8` | low | **문서-현실 불일치.** `MapView.css:36` 주석은 "탭 영역 44px 확보"라고 적었으나 `.map-pill--complex` 는 `min-height:34px`(`:68`)이고 `padding:8px`(border-box)라 실제 높이가 34px 다 — 프로젝트 자체 기준(CR-006 C8 터치 44px) 미달. 값을 고치든 주석을 고치든 둘을 일치시킬 것 |
+| `CR18-10` | low | `MapView` 의 `rankById`(순위 배지) 를 `App.tsx:89-95` 가 넘기지 않아 현재 **죽은 경로**다. 추천 배선 시 연결하거나 지울 것 |
+| — | 참고(선재) | 넓게 줌아웃하면 bbox 폭이 `_MAX_BBOX_DEGREES=2.0`(`routes.py:246`)을 넘어 400 `조회 범위가 너무 넓습니다` 가 뜬다. `zoom = 20 - map.getLevel()`(`MapView.tsx:92`) 매핑상 카카오 level 11 이상에서 발생 가능 — **군집이 보여야 할 구간에서 에러만 보인다.** 이 diff 가 만든 결함은 아니나(bbox emit 은 CR-006), 마커가 붙은 지금 사용자 눈에 처음 띄는 자리다 |
+
+---
+
+### 테스트의 실효성 (지시 7)
+
+목만 검증하는 자기충족적 테스트인가 — **대체로 아니다.** 근거:
+- **401 refresh 경로**: fetch 호출 **횟수**(1/2/3)와 재시도 요청의 **Authorization 헤더값**(`Bearer a2`)까지
+  단언한다. "refresh 없으면 fetch 1회" 는 재시도가 실수로 생기면 즉시 깨지는 진짜 그물이다.
+- **마커 정리 경로**: `setMapCalls` 에 `null` 이 담기는지 확인 — 오버레이 해제 회귀는 잡는다.
+  다만 **리스너 해제는 단언하지 않는다**(별도로 확인했고 실제로는 정상).
+- **AuthForm**: `userEvent` 로 실제 타이핑·클릭을 태워 disabled 전이·에러 문구·type 토글을 본다. 목은 경계인
+  `api.login/register` 에만 걸려 있어 폼 로직은 실제로 돈다.
+- **구멍 2개**: (1) 좌표 순서(`CR18-5`) (2) `CR18-1` 이 잡히지 않은 이유 — 마커 테스트가 `setComplexes` 를
+  **한 번만** 부른다. 두 번 부르는 순간 드러났을 결함이다(반례는 3회 호출).
+
+### 판정
+
+**FAIL.** FE-1 은 통과조건 1(폼·토큰 저장/첨부·401 처리) 2(모바일 퍼스트)를 모두 충족하고, 지시가 요구한
+반례 축(무한루프·refresh 401·1회 재시도·완전 로그아웃·저장소 폴백)에서 결함이 나오지 않았다 — **PASS**.
+FE-2 는 통과조건 1(마커+줌별 군집, 규약을 하드코딩하지 않고 응답 level 로 추종) 2(탭→시트)를 충족하고
+좌표 변환·마커 정리도 정확하나, **`CR18-1` 되감기 결함이 주 화면의 주 동작 뒤 지도 조작을 망가뜨리고
+요청을 2배로 만든다** — 수정 비용이 몇 줄인 반면 방치 시 실사용에서 즉시 드러나는 종류라 **REJECT**.
+
+`CR18-1` 통과조건 3개(panTo 를 선택 변경 시로 한정 · 회귀 테스트 1건 · 좌표 순서 단언 1건)를 충족하면
+FE-2 를 CLOSE 한다. `CR18-2`~`CR18-10` 은 게이트를 막지 않으며 다음 라운드 권고다.
+
+---
+
+## CR-019 · 2026-07-25 · CR18-1 수정 재검증 + 쿠키 인증 전환 (code-reviewer, herdr re-review 대행)
+
+**판정: PASS — `CR18-1` CLOSE · FE-2 CLOSE · 쿠키 인증 전환 PASS**
+scope=프론트 FE-2 재검증(CR18-1·5·6·8) + FE-1 부수수정(CR18-2·3) + **인증 계약 쿠키 전환**(SR15-1 대응, 백엔드 포함)
+reviewer=code-reviewer (herdr re-review 대행) · 대상: working tree 미커밋 diff + 신규 `backend/app/api/cookies.py`
+
+### 재현
+```
+frontend: npm run typecheck  ✅ 무출력  ·  npm test ✅ 49 passed(15/13/17/4)  ·  npm run build ✅ 성공
+backend : pytest -p no:warnings ✅ 369 passed · 50 skipped  (CR-018 기준선 352 대비 +17)
+```
+
+### 검증 방법 — **변이 테스트(mutation testing)**
+"회귀 테스트가 실제로 회귀를 잡는가"는 테스트가 초록불이라는 사실로는 증명되지 않는다.
+그래서 **가드를 하나씩 부러뜨려 해당 테스트가 실제로 FAIL 하는지** 확인하고 원복했다.
+전 파일 md5 대조로 원상복구를 확인했다(`mapMarkers.ts` `ba3063b7…`, `client.ts` `c0e2f5d5…`,
+`routes.py` `7c57ab8c…`, `cookies.py` `a63b8117…`).
+
+| # | 변이(가드 제거) | 결과 | 실제 실패 메시지 |
+|---|---|:--:|---|
+| A | `mapMarkers.ts` 의 `if (selectedId === this.lastPannedId) return;` 삭제 | ✅ **FAIL 발생** | `CR18-1 회귀 …` → `expected "spy" to be called 1 times, but got 3 times` |
+| B | `LatLng(point[1], point[0])` → `(point[0], point[1])` 로 뒤집음 | ✅ **FAIL 3건** | `expected 127.0276 to be 37.4979` (마커·panTo·군집 3곳 전부) |
+| C | `client.ts` 의 `if (refreshInFlight) return refreshInFlight;` 삭제 | ✅ **FAIL 발생** | `CR18-2 회귀 — 동시 401 이 N 개여도 refresh 는 1회만` |
+| D | `cookies.py` 삭제 쿠키 `path` 를 `/` 로 어긋냄 | ✅ **FAIL 2건** | `test_유효하지않은_refresh_쿠키는_401이면서_쿠키가_삭제된다`, `test_logout은_쿠키를_만료시킨다` |
+| E | `/auth/refresh` 의 `dependencies=[Depends(require_ajax_header)]` 제거 | ✅ **FAIL 발생** | `test_커스텀_헤더_없는_refresh는_거부` → `assert 200 == 403` |
+
+**구현자의 주장("가드를 빼서 테스트가 깨지는 것까지 확인했다")은 사실이다.** 5개 전부 자기충족적이지 않다.
+특히 A 는 CR-018 에서 내가 계측한 증상(panTo 3회)과 **숫자까지 동일**하게 재현된다.
+
+---
+
+### 1. `CR18-1` (차단이었던 결함) — **CLOSE**
+
+`mapMarkers.ts:175-191` 에 `syncFocus()` 신설. 판정 축 5개를 코드와 테스트로 확인:
+
+| 상황 | 기대 | 구현 | 확인 |
+|---|---|---|:--:|
+| 같은 선택으로 다시 그림(지도 팬 → 재조회) | panTo 없음 | `selectedId === lastPannedId` → return(`:182`) | ✅ 회귀 테스트 + 변이 A |
+| 선택이 바뀜 | panTo 1회 | `lastPannedId` 갱신(`:190`) | ✅ `선택이 바뀌면 그때는 다시 panTo` |
+| 선택 해제 후 같은 단지 재선택 | 다시 이동 | `selectedId === null` 이면 기억 소거(`:176-179`) | ✅ 전용 테스트 |
+| 선택 단지가 응답에 없음 | 이동 안 함 + **기억 남기지 않음** | `if (!sel …) return`(`:187`) — `lastPannedId` 미갱신 | ✅ 코드 |
+| 선택 없음 | 지도 안 움직임 | `selectedId == null` 경로 | ✅ 전용 테스트 |
+
+`destroy()` 가 `lastPannedId` 도 초기화한다(`:234`) — 레이어를 다시 만들면 첫 선택에서 정상 이동한다.
+**되감김 경로가 끊겼고, 그로 인해 팬 1회당 조회가 2회 나가던 부수 피해도 함께 사라진다.**
+
+### 2. 함께 처리된 비차단 지적
+
+| ID | 결과 | 확인 |
+|---|:--:|---|
+| `CR18-5` 좌표 회귀 테스트 부재 | ✅ 해소 | 단지 마커 `position`·`panTo` 대상·군집 `center` **3곳** 단언. 경도(127.0276)>위도(37.4979)로 값을 잡아 뒤집히면 반드시 깨지게 설계. 변이 B 로 3건 동시 FAIL 확인 |
+| `CR18-2` 동시 refresh 중복 | ✅ 해소 | `refreshInFlight` 공유 Promise(`client.ts:174-207`). 테스트가 **10ms 지연을 넣어** 직렬 실행으로 우연히 통과하는 것을 막는다(테스트 설계가 좋다). 변이 C 로 확인 |
+| `CR18-6` idle 리스너 미해제 | ✅ 해소 | `removeIdle` 클로저를 만들어 cleanup 에서 호출 + `layerRef.destroy()` + `mapRef.current = null`(`MapView.tsx:102,108-115`) |
+| `CR18-3` 저장소 예외로 방송 끊김 | ✅ 해소(형태 변경) | 저장소 자체가 사라졌다(메모리 전용). 상태 변경이 `setAccessToken → emitAuth` 단일 경로로 모이고, `emitAuth` 가 **구독자 예외를 삼켜** 나머지 구독자에게 도달을 보장(`client.ts:122-131`) |
+| `CR18-8` 44px 탭 영역 | ✅ 해소 | `.map-pill{position:relative}` + `.map-pill::before{content:"";position:absolute;inset:-5px}` → 34px + 5×2 = **44px**. 의사요소는 별도 이벤트 타깃이 아니라 **생성 원본 요소로 히트가 전달**되므로 리스너(`.map-pill`)가 그대로 받는다. `pointer-events:none` 없음·`overflow:hidden` 없음 확인. 시각 34px 유지로 "지도가 pill 로 덮이는" 부작용도 피했다. 군집은 46px 라 원래 충족 |
+| `CR18-10` `rankById` 죽은 경로 | ⏸ 유지 | 추천 배선 시점 과제 |
+
+---
+
+### 3. 인증 계약 쿠키 전환 (SR15-1 대응) — **PASS**
+
+정확성·설계·테스트 관점의 독립 감사. 문서 주장을 믿지 않고 **TestClient 로 실제 헤더를 떠서** 대조했다
+(운영과 동일하게 `Secure=on` 인 https 클라이언트로 왕복 — 테스트가 설정을 느슨하게 풀어 우회하지 않은 점은 좋은 설계다).
+
+#### 3-1. 지시 5개 축
+
+| # | 축 | 결과 | 근거 |
+|---|---|:--:|---|
+| ① | StrictMode/동시성에서 `restoreSession` 1회 | ✅ | `main.tsx:25` **모듈 최상위** 호출 — 이펙트가 아니므로 StrictMode 이중 마운트와 무관하게 모듈당 1회. 게다가 single-flight 가 2겹으로 받쳐 **`restoreSession()` 을 동시에 2번 불러도 refresh 는 1회**(실측) |
+| ② | `checked` 3상태 누락 없음 | ✅ | `App.tsx:160/171/172` = 판정전(boot)·미인증(AuthForm)·인증(MapHome). `useAuth.ts:16` 이 **구독 직전에 `getAuthState()` 를 한 번 당겨** 렌더~구독 사이 놓친 방송을 메운다(CR18-9 로 지적했던 tearing 도 함께 해소) |
+| ③ | 로그아웃 중 refresh 완료로 세션 부활 | ✅ **실측 차단** | `clearSession()` 이 `refreshInFlight = null`(`:145`), refresh 의 `.then` 이 `refreshInFlight !== p` 면 결과를 버린다(`:194-196`). **반례 실행**: refresh 를 게이트로 붙잡아 두고 `logout()` 실행 → 이후 refresh 200 도착 → `isAuthenticated() === false` 유지(부활 없음) |
+| ④ | 쿠키 삭제 속성 = 발급 속성 | ✅ **실측 일치** | 발급 `HttpOnly; Max-Age=604800; Path=/api/v1/auth; SameSite=Strict; Secure` / 삭제 `""; Max-Age=0; Path=/api/v1/auth; HttpOnly; SameSite=Strict; Secure` — `path·httponly·secure·samesite` **4개 전부 일치**, 클라이언트 저장소에서 쿠키가 실제로 사라짐. 401 경로도 동일(서버 발급 쿠키로 재확인) |
+| ⑤ | 401 vs 403 처리 분리 | ⚠️ **부분** | 일반 API 403 은 refresh 를 시도조차 하지 않아 로그인 상태 유지 ✅(실측). 그러나 **refresh 가 403 이면 401 과 똑같이 세션을 폐기**한다 → `CR19-1` |
+
+> ④ 가 중요한 이유: 속성이 하나만 어긋나도 브라우저는 다른 쿠키로 보고 원본을 남긴다 —
+> 로그아웃이 연출로 끝난다. 구현이 `expired_refresh_cookie_header()`(`cookies.py:68-77`)에서
+> **문자열을 손으로 조립하지 않고 `delete_refresh_cookie` 를 프로브 Response 에 태워 재사용**하는 방식이라
+> 발급·삭제가 구조적으로 어긋날 수 없다. 좋은 설계다.
+
+#### 3-2. 계약 실측 (TestClient · https)
+
+| 항목 | 실측 |
+|---|---|
+| login 응답 body | `access_token`·`token_type`·`expires_in` — **`refresh_token` 없음** ✅ |
+| login `Set-Cookie` | `HttpOnly`·`Secure`·`SameSite=Strict`·`Path=/api/v1/auth`·`Max-Age=604800`(7일) **5속성 전부** ✅ |
+| refresh 회전 | 호출마다 쿠키 값이 바뀜 ✅ (`jti` 도입으로 **같은 초에 발급해도 문자열이 다르다** — 회전이 이름뿐이 되는 함정 회피) |
+| 옛 계약(body 로 refresh) | **401** — 본문 경로 완전 차단 ✅ (`RefreshIn` 스키마 잔존 0건) |
+| access 를 refresh 쿠키에 투입 | **401** — `typ` 검증 유효 ✅ |
+| 잘못된 쿠키 | 401 + 삭제 헤더, 쿠키 실제 제거 ✅ |
+| CSRF 헤더 없는 refresh/logout | **403 + 쿠키 유지** ✅ — 로그아웃 CSRF(남의 세션 끊기)를 만들지 않는 판단이 옳다(`deps.py` 주석과 일치) |
+| 헤더 값 관용범위 | 대소문자·앞뒤 공백 허용, `fetch`·빈값 거부 ✅ (헤더의 방어력은 값이 아니라 **크로스오리진에서 붙일 수 없다**는 데서 나오므로 관용이 맞다. `CORSMiddleware` 미설치 확인 — 프리플라이트로 뚫을 경로 없음) |
+| 운영 `Secure` 강제 | `DEBUG=false` + `COOKIE_SECURE=false` → **True** ✅ 설정 실수로 평문 전송되는 경로를 구조적으로 봉쇄 |
+| TTL | refresh 604800s(7일) · access 1800s ✅ 문서와 일치 |
+
+#### 3-3. 설계·문서
+
+- **계약 문서 일치**: `api-spec.md` 가 쿠키 속성·403 코드·회전·"본문 경로 없음"을 실제 구현과 같게 기술.
+  `schemas.TokenOut` 에 *"refresh_token 필드를 다시 추가하지 마라"* 를 이유와 함께 박아둔 것도 좋다 —
+  이 저장소가 반복적으로 겪은 문서-현실 괴리를 코드 쪽에서 막는다.
+- **상수 단일 출처**: `ACCESS_TTL_SECONDS`/`REFRESH_TTL_SECONDS` 를 `security.py` 가 소유하고 라우터·쿠키가 참조 —
+  `expires_in=1800` 하드코딩이 사라졌다.
+- **레이어**: 쿠키 조립이 `cookies.py` 한 곳, CSRF 관문이 `deps.py` 한 곳. 라우터는 호출만 한다. 위반 없음.
+- **REFRESH_TTL 14→7일 단축**의 근거(서버측 폐기 수단 부재 → 노출 창을 시간으로 줄임)가 상수 옆에 기록돼 있고,
+  denylist 를 후속(SR15-3)으로 남긴 것도 정직하다.
+
+---
+
+### 4. 비차단 지적
+
+| ID | 심각도 | 내용 · 근거 |
+|---|:--:|---|
+| `CR19-1` | low | **refresh 의 403 을 401 과 똑같이 취급해 세션을 버린다.** 실측: refresh 403 → `isAuthenticated()===false`. 서버는 일부러 쿠키를 살려두고(`deps.require_ajax_header` 주석) `api-spec.md` 도 *"403 … **쿠키는 유지된다**(재시도 가능)"* 라고 적었는데, **우리 클라이언트가 그 재시도 가능성을 스스로 버린다**(`client.ts:222-225` 가 refresh 실패 사유를 구분하지 않음). 발생 조건은 중간 프록시·확장이 `X-Requested-With` 를 떼는 경우로 드물고, 같은 헤더로 재시도하면 어차피 또 403 이라 자동 복구가 불가능하므로 **피해는 "다시 로그인" + 원인을 감춘 오해 유발**에 그친다. 권고: 403 은 `clearSession()` 하지 말고 "보안 헤더가 차단되었습니다" 로 구분해 알리고 사용자가 새로고침/재시도하게 한다. 클라이언트 403 경로 테스트도 0건 |
+| `CR19-2` | low | `restoreSession()` 의 catch 가 `accessToken = null` 을 **직접** 대입한다(`client.ts:251`). 같은 파일이 *"상태 변화는 반드시 `emitAuth` 한 곳을 지난다"*(`:119`)고 선언했는데 이 한 줄만 우회한다(`finally` 의 `emitAuth` 덕에 결과는 같고, `checked=false` 동안 로그인 화면이 안 뜨므로 동시 로그인과 겹칠 수도 없다 — **현재는 무해**). `clearSession()` 으로 통일 권고 |
+| `CR19-3` | low | 로그아웃-중-refresh race(③)는 **실측으로 막혀 있으나 테스트가 없다.** `refreshInFlight !== p` 한 줄이 방어의 전부라 리팩터링 한 번에 조용히 사라질 수 있다. 내가 쓴 반례(게이트로 refresh 를 붙잡고 logout → 늦은 200 도착)를 그대로 회귀 테스트로 넣기를 권고 |
+| `CR19-4` | 정보 | StrictMode 개발 모드에서 `loadSdk` 가 `window.kakao` 확정 전에 두 번 불려 `<script>` 가 2개 붙는다(운영 무관·브라우저 캐시로 실피해 없음). 지도는 `cancelled` 가드로 1개만 생성됨을 확인 |
+
+### 5. `CR18-7`(CustomOverlay 전량 재생성) — **의견: 이번 게이트는 비차단 유지, 단 실데이터 투입 전 필수**
+
+수치로 정리한다. `/map/complexes` 는 상한 `limit=500`(memory·postgis 동일)이고 프론트는 응답 전량을 그린다.
+- 최악 500 pill × (카카오 래퍼 div + 우리 div + span 1~2) ≈ **1,500~2,000 DOM 노드**
+- CustomOverlay 는 지도 이동마다 **오버레이별로 위치를 개별 갱신**한다(Marker 처럼 묶어 그리지 않는다) → 팬/줌 중 500회 스타일 쓰기
+- 게다가 `setComplexes` 가 id 기준 diff 없이 **매 조회마다 전량 파괴 후 재생성** → 팬 1회에 요소 500개 생성 + `addEventListener` 1,000회
+
+**지금 게이트를 막지 않는 이유**: 정확성 결함이 아니고, 실데이터가 아직 없어(`MOLIT_API_KEY` 사람 대기)
+현재 관측 가능한 증상이 없다. 리뷰는 실측 없이 성능을 이유로 차단하지 않는다.
+**그러나 실데이터가 들어오면 강남·송파 같은 밀집 지역에서 zoom≥13 한 화면에 수백 개가 나온다 — 그때는 확실히 드러난다.**
+→ **실데이터 수집 완료를 게이트로 삼아 그 전에 처리할 것.** 구체적 통과선 제안:
+① id 기준 오버레이 재사용(diff) — 이동 시 재생성 0, 위치·클래스만 갱신
+② 화면당 표시 상한(150~200) + "N개 더 있음" 표기 — 상한 초과는 지도가 아니라 목록으로 유도
+③ 임계 초과 시 pill → dot 강등(라벨 DOM 제거)
+④ 실측 근거 첨부(중급 기기 팬 시 프레임 타임) — 숫자 없이 고쳤다고 하지 말 것
+
+---
+
+### 판정
+
+**PASS.** CR-018 의 차단 사유 `CR18-1` 은 해소됐고, 그 해소가 **변이 테스트로 검증된 회귀 그물**을 갖췄다
+(가드를 빼면 테스트가 실제로 깨진다 — 5/5 확인). 함께 들어온 쿠키 인증 전환도 정확성·설계·테스트 모두
+기준을 넘는다: 지시 5개 축 중 ①②③④는 **실측으로 확인**했고, ⑤만 부분 미충족(`CR19-1`, low)이다.
+발급/삭제 속성 일치처럼 "틀리면 로그아웃이 연출로 끝나는" 지점을 구조적으로(프로브 Response 재사용) 막은 점,
+테스트가 설정을 풀어 우회하지 않고 운영과 같은 `Secure=on` https 로 왕복시킨 점은 특히 좋다.
+
+**FE-2 CLOSE.** 3단계 프론트 차단 항목(FE-1·FE-2)이 모두 해소됐다.
+`CR19-1`~`CR19-4` 는 게이트를 막지 않는다. `CR18-7` 은 **실데이터 투입 전 필수 과제**로 승계한다.

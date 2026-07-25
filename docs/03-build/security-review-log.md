@@ -1009,3 +1009,435 @@ fail 조건(인증·인가 결함 / 인젝션 / 비밀정보 하드코딩 / 민�
 (G2), 비밀정보 하드코딩·민감정보 로그노출·미암호화 전송 없음. fail 조건(인증·인가 결함 / 인젝션 /
 비밀정보 하드코딩 / 민감정보 로그노출 / 미암호화 전송) 어느 것도 해당하지 않는다.
 전방관찰 1건(동 값 프론트 렌더 XSS)은 프론트 구현 시 이스케이프 확인 권고로 승계한다.
+
+---
+
+## SR-015 · 2026-07-25 · 프론트 FE-1 인증/토큰 · FE-2 마커 XSS (herdr re-review 대행)
+
+**판정: FAIL — 차단 1건(`SR15-1` 토큰 저장 위치가 2단계 설계 결정을 정면 위반)**
+reviewer: `security-reviewer (herdr re-review 대행)` · 대상: working tree(미커밋) `git diff` + 신규 파일
+scope: `frontend/src/api/client.ts` · `hooks/useAuth.ts` · `components/AuthForm.tsx` ·
+`lib/mapMarkers.ts` · `lib/validation.ts` · `lib/notices.ts` · `components/{MapView,ComplexCard,BottomSheet}.tsx` ·
+`App.tsx` · `main.tsx` · 테스트 3종 · `package.json`
+
+> 먼저 결론의 모양을 밝힌다. **지시서가 최대 표면으로 지목한 XSS(FE-2)는 깨끗하다** — 5가지
+> 페이로드를 직접 태워 실증했고 SR-014 전방관찰도 여기서 CLOSE 한다. FAIL 사유는 **단 하나**,
+> 토큰을 어디에 두느냐다. 그것 하나가 `security.md §2.1` 이 명문으로 금지한 항목이라 넘길 수 없다.
+
+### 검증 방법
+문서 판독이 아니라 **실행**했다. 임시 probe 테스트(`src/__srprobe__.test.tsx`, 검증 후 삭제)를
+작성해 악성 입력을 실제 DOM 에 태우고, 토큰 저장/삭제/URL 노출/탭 동기화를 계측했다.
+전체 회귀 `npm test` **36 passed**(4 files), `npm run build` 성공, probe **6 passed** 재현.
+
+---
+
+### 1) XSS — FE-2 마커 (지시 최우선) · **PASS · SR-014 전방관찰 CLOSE**
+
+SR-014 가 "동 원본문자열이 응답에 그대로 실린다"며 프론트 렌더로 넘긴 항목의 결론이다.
+
+| # | 점검 | 결과 | 실측 근거 |
+|:--:|---|:--:|---|
+| X1 | 라벨을 `innerHTML` 로 넣는가 | **아니다** | `mapMarkers.ts:39-49` `createElement`+`textContent`. src 전수 grep: `innerHTML`·`outerHTML`·`insertAdjacentHTML`·`document.write` **0건**(주석 언급 3건 제외) |
+| X2 | CustomOverlay `content` 로 **HTML 문자열**을 넘기는 경로가 있는가 | **없다** | `mapMarkers.ts:146-152,173-180` 은 항상 `el`(HTMLElement). probe 단언 `content instanceof HTMLElement === true`, `typeof !== "string"` — 카카오 SDK 의 HTML 문자열 파싱 분기 자체를 타지 않는다 |
+| X3 | 악의적 단지명이 실행되는가 | **안 된다** | 5개 페이로드를 `setComplexes` 로 태우고 결과 요소를 `document.body` 에 실제 부착 → `querySelector("img,script,svg,iframe")` **전부 null**, `window.__pwned` **undefined** |
+| X4 | `dangerouslySetInnerHTML` | **0건** | src 전수 grep(주석 1건뿐) |
+| X5 | 속성 경유 우회 | **차단** | `setAttribute` 사용처 3곳뿐(`role`·`aria-label`×2 — `mapMarkers.ts:107,143,170`). 속성명은 하드코딩, 값은 속성으로만 들어가 HTML 파서를 타지 않음. `on*` 을 데이터로 세팅하는 경로 0건 |
+| X6 | React 경로 | **안전** | `ComplexCard.tsx:52` `{item.name}`, `App.tsx:113` `{c.region_code}`, `MapView.tsx:138` `{error}` 모두 JSX 텍스트(자동 이스케이프). probe 로 카드 렌더 시 `img` 미생성 확인 |
+| X7 | 기타 코드실행 sink | **0건** | `eval(`·`new Function` 0건. `createElement("script")` 는 `MapView.tsx:36-41` 카카오 SDK 로더 1곳이며 URL 은 빌드타임 env(`VITE_KAKAO_JS_APP_KEY`) — 사용자 입력 아님 |
+
+**투입한 페이로드(재현용)**
+
+```
+청담<img src=x onerror="window.__pwned=1">(103)
+<script>window.__pwned=2</script>
+" onmouseover="window.__pwned=3" x="
+</span><svg onload=window.__pwned=4>
+ <iframe src=javascript:alert(1)>
+```
+
+→ 전부 텍스트로만 남고(`aria-label` 에도 원문 보존) 실행 0건.
+
+**SR-014 §5 전방관찰(동 원본문자열 프론트 렌더) → CLOSE.** 이번 diff 가 그 렌더 코드이고,
+`textContent`/JSX 두 경로 모두 실증으로 막혔다.
+
+---
+
+### 2) `SR15-1` **[차단]** 토큰을 localStorage 에 둔다 — `security.md §2.1` 명문 위반
+
+**심각도 High · CWE-522(Insufficiently Protected Credentials) · OWASP A07:2021 + A05:2021**
+
+#### 사실
+
+- `client.ts:60-61` `ACCESS_KEY`/`REFRESH_KEY`, `:83-100` `browserStorage()`, `:125-136` `setTokens`
+  → **access·refresh 를 둘 다 `localStorage`** 에 쓴다. `main.tsx:8` `loadTokens()` 로 브라우저를
+  껐다 켜도 복원된다.
+- 2단계 설계 `docs/02-design/security.md:50` — *"refresh 저장 | 웹: `httpOnly` + `Secure` +
+  `SameSite=Strict` 쿠키 / RN 앱: OS 보안저장소(Keychain·Keystore)"*
+- 같은 문서 `:54` — *"⚠️ JWT를 `localStorage`에 넣지 않는다 — XSS 한 방에 토큰이 털린다."*
+
+즉 **하지 말라고 문서에 적힌 바로 그 일**을 하고 있고, 예외를 기록한 ADR·잔여위험 항목이 없다.
+
+#### 왜 "지금 XSS 가 없으니 괜찮다"로 넘기지 않는가 — 보완통제가 **셋 다** 없다
+
+| 보완통제 | 상태 | 근거 |
+|---|:--:|---|
+| 설계가 전제한 `httpOnly` 쿠키 | **없음** | 위. 백엔드에도 `set_cookie` 0건 |
+| CSP(2선 방어) | **없음** | `deploy/nginx-realestate.conf` 보안헤더는 HSTS·nosniff·DENY·Referrer-Policy 4종뿐, `Content-Security-Policy` 0건. `frontend/index.html` 에 CSP meta 도 없음 |
+| 서버측 토큰 폐기 | **없음** | `backend/app/` 전수 grep `logout`·`revoke`·`denylist`·`jti` **0건**. `/auth/logout` 엔드포인트 자체가 없다 |
+
+여기에 **refresh TTL = 14일**(`backend/app/core/security.py:289 REFRESH_TTL = timedelta(days=14)`)
+이 겹친다. 결과:
+
+> **XSS 1회 = 자산·소득·대출을 다루는 계정의 14일짜리 · 폐기 불가능한 자격증명 탈취.**
+> 사용자가 "로그아웃" 을 눌러도 그 토큰은 계속 유효하다(클라이언트에서 지울 뿐이다).
+
+이 자산은 `security.md §1` 이 민감도 **최상**으로 분류하고 §0 에서 *"유출되면 금융사기·표적 범죄의
+직접 재료"* 라고 쓴 바로 그 데이터다.
+
+#### "XSS 만 없으면 된다"가 왜 단일 실패점인가 (구체적 경로)
+
+`MapView.tsx:36-41` 이 **`dapi.kakao.com` 스크립트를 같은 오리진에 주입**한다. 이 서드파티가
+훼손되거나 공급망 공격을 받으면 그 스크립트는 `localStorage` 를 그대로 읽는다. `httpOnly` 쿠키였다면
+같은 사고에서도 refresh 는 살아남는다. CSP 도 없어 스크립트 출처를 좁혀 두지도 않았다.
+지금의 방어는 **"이 앱과 카카오 SDK 양쪽에 앞으로 영원히 XSS 가 없다"** 는 가정 하나뿐이다.
+
+#### 전파 위험 — RN 이식 시 같은 결함이 복제된다
+
+`client.ts:64` 주석: *"웹은 localStorage, RN 은 **AsyncStorage** 로 갈아끼운다"*.
+AsyncStorage 는 **평문 저장소**다. 설계(§2.1)는 RN 에 **Keychain·Keystore** 를 요구한다.
+지금 고치지 않으면 웹·앱 **두 타깃 모두** 설계를 위반한 채로 굳는다.
+
+#### 통과 조건 (둘 중 하나 — 어느 쪽이든 문서와 코드가 일치해야 한다)
+
+- **(A) 설계대로 구현**
+  1. refresh 는 `/auth/login`·`/auth/refresh` 가 `httpOnly; Secure; SameSite=Strict; Path=/api/v1/auth` 쿠키로 발급·회수. JS 가 읽지 못하게 한다.
+  2. access 는 **메모리 전용**(모듈 변수). `localStorage` 에 쓰지 않는다 → `loadTokens()` 는 새로고침 시 쿠키로 조용히 refresh 하는 방식으로 대체.
+  3. 쿠키가 생기므로 `/auth/refresh` 한 곳에 CSRF 대비(SameSite=Strict + Origin 검사, 또는 double-submit)를 명시.
+  4. 회귀 테스트: `document.cookie`·저장소에 refresh 가 노출되지 않음 1건.
+- **(B) 예외를 정식 등재** (MVP 편의를 택할 경우 — **사람 승인 필요, 리뷰어 단독 수용 불가**)
+  1. `security.md §2.1` 의 금지 문구를 개정하고 `§8 잔여위험`에 `R-09` 로 등재(수용 사유·재평가 조건 포함).
+  2. 보완통제 동반: ⓐ nginx 에 `Content-Security-Policy`(최소 `default-src 'self'; script-src 'self' https://dapi.kakao.com https://*.daumcdn.net; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`) ⓑ refresh TTL 단축 ⓒ 서버측 폐기(`jti` denylist + `/auth/logout`) ⓓ RN 은 Keychain/Keystore 강제를 코드 주석·문서에 명시.
+
+> 어느 쪽도 대규모 작업이 아니다. 지금 막는 이유는 위험의 크기보다 **문서가 금지한 것을 코드가
+> 조용히 하고 있다**는 상태 자체다. 이 원장은 이미 SR-005→SR-006 에서 "문서-현실 불일치를
+> 리뷰어가 좋게 해석했다가 반려당한" 전례를 갖고 있다. 같은 실수를 반복하지 않는다.
+
+---
+
+### 3) 토큰 유출 경로 — **PASS**
+
+| # | 점검 | 결과 | 근거 |
+|:--:|---|:--:|---|
+| L1 | `console.log` 등으로 토큰·비밀번호 출력 | **0건** | `frontend/src` 전수 grep `console.` 0건 |
+| L2 | 토큰이 URL 쿼리스트링에 실리는가 | **아니다** | probe: `SECRET_ACCESS`/`SECRET_REFRESH` 설정 후 API 호출 → fetch URL 에 미포함. 토큰은 `client.ts:158` `Authorization` 헤더, refresh 는 `:192` 요청 **본문** |
+| L3 | 에러 메시지로 새는가 | **아니다** | `ApiException` 은 서버 `code`/`message` 만 보유(`client.ts:164-170`). `App.tsx:54`·`AuthForm.tsx:177` 이 그 문자열을 JSX 텍스트로만 출력. 토큰·요청본문을 담지 않음 |
+| L4 | 분석/텔레메트리 SDK | **없음** | dependencies = react, react-dom 뿐 |
+| L5 | **빌드 산출물에 서버 전용 키** | **없음** | `frontend/dist/assets/index-*.js` 를 `.env` 실값으로 직접 대조 → `KAKAO_REST_API_KEY` **미포함**, `MOLIT_API_KEY` **미포함**. 검출된 것은 `KAKAO_JS_APP_KEY`(=`VITE_KAKAO_JS_APP_KEY`) 1건뿐 — **원래 클라이언트 노출 키라 정상** |
+| L6 | 소스맵 유출 | **없음** | `vite.config.ts` `build.sourcemap: false` |
+| L7 | 비밀파일 커밋 | **없음** | `git check-ignore` 실검증 — `frontend/.env`(.gitignore:2), `frontend/dist`(.gitignore:24) 모두 IGNORED. 추적 중인 env 파일은 `.env.example`(빈 플레이스홀더)뿐 |
+
+- 관찰(무해): `request()` 의 refresh 재시도가 만료된 access 토큰을 `Authorization` 에 얹어
+  `/auth/refresh` 로 보낸다. 동일 오리진·이미 만료된 값이라 위험 증가 없음.
+- 이월 확인: 카카오 JS 앱키의 **허용 도메인 제한**은 `deploy/DEPLOY.md:129-130` 에 이미 지시되어
+  있다. 사람이 콘솔에서 수행하는 G5 단계 항목이므로 여기서는 검증 불가 — 배포 시 확인할 것.
+
+---
+
+### 4) 계정 열거 — **PASS(신규 결함 없음) · 기존 `SR10-1` 범위 유지**
+
+- 로그인 실패 문구가 **합쳐져 있다**: `AuthForm.tsx:174` — 401 이면 원인을 불문하고
+  `"이메일 또는 비밀번호가 올바르지 않습니다."` 백엔드(`routes.py:88-90`)도 동일 401·동일 문구라
+  **없는 계정 / 틀린 비밀번호를 화면이 구분하지 않는다.** 회귀 테스트 존재(`AuthForm.test.tsx:34`).
+- 회원가입 `EMAIL_TAKEN`(`AuthForm.tsx:173`)은 계정 존재를 드러낸다. 다만 이는 **백엔드 409 채널**
+  (`routes.py:73-76`)의 표면화이며, `SR-010` 에서 실측·트리아지해 **`SR10-1` ACCEPTED(비차단)** 로
+  이미 등재된 항목이다. 프론트가 새 채널을 만들지 않았으므로 **이번 판정의 결격 사유가 아니다.**
+- 다만 **정직하게 기록**한다: 그동안 API 호출로만 가능하던 오라클이 이제 **화면에서 두 번 탭이면**
+  확인된다. 노출 난이도가 실질적으로 내려갔다. `SR10-1` 의 재평가 트리거에
+  *"④ 로그인 UI 가 공개 노출된 뒤"* 를 추가할 것을 권고한다(비차단).
+- 참고: 가입 성공 후 즉시 로그인하는 흐름(`AuthForm.tsx:42-46`)은 자격증명을 URL 이 아닌 본문으로
+  두 번 보낼 뿐 추가 유출을 만들지 않는다.
+
+---
+
+### 5) 로그아웃 완전성 — **부분 (비차단 2건, 단 `SR15-1` 과 결합)**
+
+| 점검 | 결과 | 근거 |
+|---|:--:|---|
+| 저장소에서 access·refresh **모두** 제거 | ✅ | `setTokens(null,null)` → `remove` ×2(`client.ts:131-134`). probe: 저장소 map `size === 0` |
+| 메모리 상태 초기화 | ✅ | `accessToken`·`refreshToken` = null → `isAuthenticated() === false` (probe 실측) |
+| 401 경로에서도 확실히 폐기 | ✅ | refresh 없음(`:185-188`) / refresh 실패(`:195-197`) / 재시도도 401(`:201-203`) **세 경로 모두** `logout()` 호출. 기존 테스트 3건이 고정 |
+| 화면 전환 | ✅ | `emitAuth` → `useAuth` → `App.tsx:157` 로그인 게이트 복귀 |
+| **다른 탭과 동기화** | ❌ **`SR15-2`** | `storage` 이벤트 리스너 **0건**. probe 실측: 다른 탭이 지웠다고 가정하고 `StorageEvent` 발사 → 이 탭은 여전히 `isAuthenticated() === true`, 메모리 토큰 보유. 한 탭에서 로그아웃해도 다른 탭은 계속 요청을 보낸다 |
+| **서버측 폐기** | ❌ **`SR15-3`** | `/auth/logout` 없음, `jti` denylist 없음(backend 전수 grep 0건). 로그아웃은 **클라이언트 전용 연출**이고 발급된 14일 refresh 는 살아 있다 |
+
+`SR15-3` 은 단독으로는 low 지만 `SR15-1`(그 토큰이 JS 로 읽히는 곳에 있음)과 곱해지면
+"탈취되면 회수 수단이 없다"가 된다. `SR15-1` 통과조건 (B)-ⓒ 에 포함시킨 이유다.
+
+---
+
+### 6) 비밀번호 취급 — **PASS**
+
+| 점검 | 결과 | 근거 |
+|---|:--:|---|
+| `type="password"` 기본 | ✅ | `AuthForm.tsx:103`. 표시 토글은 사용자가 명시적으로 누를 때만 `text`(의도된 UX, 표준 관행) |
+| `autocomplete` 정확성 | ✅ | `:105` `new-password`(가입) / `current-password`(로그인) 모드별 전환. 이메일은 `:84` `autoComplete="username"` — 비밀번호 관리자가 올바르게 짝짓는다 |
+| 부수 유출 방지 | ✅ | 이메일에 `autoCapitalize="none"`·`spellCheck={false}`(`:85-86`). 비밀번호는 폼 상태에만 존재하고 성공 시 컴포넌트가 언마운트(`App.tsx:157→158`)되어 사라진다. URL·로그·저장소 어디에도 남지 않음 |
+| 서버 규칙과 일치 | ✅ | `validation.ts:10-11` `PASSWORD_MIN=12`/`MAX=256` = `schemas.py:11` `Field(min_length=12, max_length=256)`. **클라가 서버보다 엄격하지 않다**(2종 문자조합은 `required:false` 권장 표기) — 서버가 받아주는 비밀번호를 화면이 거부하는 상태가 아니다 |
+| 클라 검증이 진실 행세를 하는가 | ✅ 아니오 | `validation.ts:5-7,61-63` 이 "서버가 진실"임을 명시. 최종 판정은 서버 `EmailStr`·`Field` |
+
+---
+
+### 7) CSRF · 의존성 — **PASS**
+
+- **CSRF**: 자격증명이 `Authorization` 헤더이고 쿠키를 쓰지 않는다(백엔드 `set_cookie` 0건).
+  브라우저가 자동 첨부하는 인증정보가 없으므로 고전적 CSRF 가 성립하지 않는다.
+  ※ `SR15-1` 통과조건 (A) 를 택해 쿠키를 도입하면 **이 전제가 바뀐다** — (A)-3 에 CSRF 대비를 명시했다.
+- **의존성**: 신규는 전부 `devDependencies`(@testing-library/{dom,react,user-event}, jsdom).
+  `dist/assets/*.js` grep `testing-library|vitest` **0건** — 프로덕션 번들에 들어가지 않음(실측).
+  `npm audit --omit=dev` → **found 0 vulnerabilities**.
+- 프로덕션 dependencies 는 react·react-dom 2개뿐. 번들 161 kB.
+
+---
+
+### 이번에 새로 연 항목
+
+| ID | 심각도 | 차단 | 내용 |
+|---|---|:--:|---|
+| `SR15-1` | **High** | **예** | access·refresh 를 localStorage 에 저장 — `security.md §2.1` 명문 금지 위반. 보완통제(httpOnly 쿠키·CSP·서버측 폐기) **셋 다 부재** + refresh 14일 |
+| `SR15-2` | Low | 아니오 | 다른 탭과 로그아웃 미동기화(`storage` 이벤트 미구독) |
+| `SR15-3` | Low | 아니오 | 서버측 토큰 폐기 수단 부재(`/auth/logout`·jti denylist 없음) — `SR15-1` 과 결합 시 회수 불가 |
+
+### 닫은 항목
+
+- **SR-014 §5 전방관찰(동 원본문자열 XSS) → CLOSE.** 마커·카드 두 렌더 경로 모두 실증으로 안전.
+
+### 판정
+
+**FAIL.** 지시서가 최대 표면으로 지목한 XSS(FE-2)와 토큰 유출·비밀번호 취급·CSRF·의존성은
+전부 실측 PASS 이고, 프론트 구현 품질 자체는 견고하다. 그러나 **`SR15-1` 은 fail 조건의
+"인증 결함"에 정확히 해당**한다 — 2단계 설계가 명문으로 금지한 저장 위치를 예외 기록 없이 사용했고,
+그 결정이 전제했던 보완통제가 하나도 없으며, 결과적으로 이 프로젝트가 민감도 **최상**으로 분류한
+자산에 대해 **폐기 불가능한 14일 자격증명이 스크립트로 읽히는 곳에 놓인다.**
+`SR15-1` 통과조건 (A) 또는 (B) 중 하나를 충족하면 재감사한다. `SR15-2`·`SR15-3` 은 비차단이며
+(B) 를 택할 경우 함께 처리하기를 권고한다.
+
+---
+
+## SR-016 · 2026-07-25 · SR15-1 수정 재검증 — 쿠키+메모리 전용 전환 (반려 당사자 재감사)
+
+**판정: PASS — `SR15-1` CLOSE.** 잔여 `SR15-3`·`SR15-4` 는 비차단으로 승계(단 `SR15-4` 는 **G5 배포 절차의 차단 조건**).
+reviewer: `security-reviewer (herdr re-review 대행 · SR-015 반려 당사자)`
+scope: `backend/app/api/cookies.py`(신규) · `routes.py` · `deps.py` · `schemas.py` · `core/{config,security}.py` ·
+`frontend/src/api/client.ts` · `main.tsx` · `hooks/useAuth.ts` · `App.tsx` · `docs/02-design/{security,api-spec}.md` · `.env.example`
+
+> 방법: 문서 판독이 아니라 **직접 깨봤다.** 백엔드는 실제 앱(`TestClient`, https)으로 쿠키 헤더를
+> 문자열 단위까지 파싱해 **43개 항목**을 계측했고(우회 4종 포함), 프론트는 probe 테스트 **10건**으로
+> 저장소 접근·refresh 본문·세션 부활·XSS 회귀를 실측했다. 검증 후 probe 는 삭제했다(소스 미수정).
+> 회귀 재현: backend **369 passed / 50 skipped**(junit xml 로 tests=419·failures=0·errors=0 확인),
+> frontend **49 passed**, `npm run build` 성공. 코디네이터 보고 수치와 일치.
+
+---
+
+### 0) 먼저 — 설계 문서를 고쳐서 맞춘 것이 아닌가 (내가 가장 먼저 의심한 것)
+
+`git diff docs/02-design/security.md` 를 전수 확인했다. **금지 조항은 그대로 살아 있다.**
+
+| 확인 | 결과 |
+|---|:--:|
+| `:50` "refresh 저장 \| 웹: httpOnly + Secure + SameSite=Strict 쿠키" | **무변경** ✅ |
+| `:54` "⚠️ JWT를 localStorage에 넣지 않는다" | **무변경** ✅ |
+| 변경 내용 | ① 세션 TTL `14일 → 7일`(**강화**) ② "구현 상태" 절 신설 — *"한때 구현이 이 표를 어겼다… 설계를 고치지 않고 구현을 설계에 맞췄다"* 라고 **실패를 그대로 기록** ③ `§8` 에 `R-09`(서버측 폐기 부재) 등재 |
+
+기준을 낮춰 통과한 것이 아니라 **기준에 코드를 맞췄다.** 문서가 자기 실패 이력까지 남긴 것은
+SR-006 이 요구했던 정직성 기준을 충족한다.
+
+---
+
+### 1) SR15-1 통과조건 (A) 4개 대조 — 전부 충족
+
+| # | 통과조건(SR-015) | 판정 | 실측 근거 |
+|:--:|---|:--:|---|
+| ① | refresh 를 `HttpOnly; Secure; SameSite=Strict; Path=/api/v1/auth` 쿠키로 발급·회수 | **PASS** | 실제 `Set-Cookie` 원문 파싱: `refresh_token=<jwt>; HttpOnly; Max-Age=604800; Path=/api/v1/auth; SameSite=Strict; Secure` — 4속성 전부 확인. `Domain` 속성 **없음**(host-only 쿠키 → 형제 서브도메인으로 새지 않는다) |
+| ② | access 는 메모리 전용, `localStorage` 미사용 | **PASS** | 아래 §3 |
+| ③ | CSRF 대비 명시 | **PASS** | 아래 §5 |
+| ④ | refresh 미노출 회귀 테스트 | **PASS** | `client.test.ts` 에 저장소 스파이 0회 호출 단언 신설. 내 probe 로도 독립 재현 |
+
+---
+
+### 2) 우회로가 하나도 안 남았는가 — **본문·쿼리·헤더 4종 전부 막힘**
+
+`SR15-1` 의 핵심은 "JS 가 refresh 를 만질 수 있는 경로"였다. **공격자는 언제나 더 편한 쪽을
+고른다**는 원칙에서, 본문 경로가 하나라도 남아 있으면 쿠키 전환은 무의미하다. 훔친 refresh 토큰을
+쿠키 없는 별도 클라이언트로 들고 가 4가지로 찔러봤다.
+
+| 시도 | 결과 |
+|---|:--:|
+| `POST /auth/refresh` + body `{"refresh_token": "<훔친값>"}` | **401** ✅ |
+| 동일 + camelCase `{"refreshToken": …}` | **401** ✅ |
+| 쿼리스트링 `?refresh_token=<훔친값>` | **401** ✅ |
+| `Authorization: Bearer <훔친 refresh>` | **401** ✅ |
+| `RefreshIn` 스키마 잔재 | `schemas.py` 에서 **제거 확인**(`class RefreshIn` 0건, `refresh_token: str` 0건) |
+
+→ **쿠키 외의 입력 경로가 존재하지 않는다.** `TokenOut` docstring 에 *"refresh_token 필드를 다시
+추가하지 마라"* 는 경고까지 붙어 있어 되돌림 위험도 표시돼 있다.
+
+---
+
+### 3) 프론트가 정말 저장소를 안 쓰는가 — **소스·번들·런타임 3중 확인**
+
+| 층위 | 방법 | 결과 |
+|---|---|:--:|
+| 소스 | `frontend/src` 전수 grep | `localStorage`/`sessionStorage` **실사용 0건**(남은 건 client.ts:8 "금지" 주석 1줄 + 테스트의 스파이). `document.cookie` 0건 |
+| API 표면 | `Object.keys(client)` 런타임 검사 | `setTokens`·`loadTokens`·`configureAuthStorage` **전부 소멸**. 이름에 `refresh` 가 들어간 export **0개** — refresh 를 담을 변수 자체가 없다 |
+| 런타임 | `localStorage`·`sessionStorage` 를 스파이로 교체 후 **login → restoreSession → logout 전 과정 실행** | `getItem`·`setItem`·`removeItem` **전부 0회**. `document.cookie` setter 도 0회 |
+| 번들 | `dist/assets/*.js` 재빌드 후 grep | `localStorage`·`sessionStorage`·`document.cookie`·`refresh_token` **전부 0건** |
+
+- refresh 요청 실측: **body `undefined`** + `credentials: "include"` + `X-Requested-With: XMLHttpRequest`.
+- 서버키 재스캔: dist 에 `KAKAO_REST_API_KEY`·`MOLIT_API_KEY` **미포함**(`VITE_KAKAO_JS_APP_KEY` 만 — 정상).
+
+---
+
+### 4) 쿠키 삭제의 실효성 · Path 스코프 (지시 2·3)
+
+**삭제 헤더가 발급 헤더와 일치하는가** — 불일치하면 브라우저가 다른 쿠키로 보고 원본을 남긴다.
+속성을 파싱해 기계적으로 비교했다.
+
+```
+발급: {httponly:True, max-age:604800, path:/api/v1/auth, samesite:strict, secure:True}
+삭제: {httponly:True, max-age:0,      path:/api/v1/auth, samesite:strict, secure:True, expires:…}
+불일치 = []          ← path·httponly·secure·samesite·domain 전부 동일
+```
+- 실제로 지워지는지도 확인: 로그아웃 후 클라이언트 쿠키 저장소 **비었고**, 이어진 refresh 는 **401**.
+- 구조적으로도 좋다 — `cookies.py:68-77` 의 `expired_refresh_cookie_header` 가 헤더를 손으로
+  조립하지 않고 **`delete_refresh_cookie` 를 더미 `Response` 에 태워 뽑아낸다.** 발급·삭제·예외
+  경로가 **한 함수를 공유**하므로 속성이 어긋날 여지 자체가 없다. 이건 잘 만든 것이다.
+- 401(만료·서명오류·종류불일치·쿠키없음) 응답도 삭제 헤더를 동반한다 — 못 쓰는 쿠키를 남겨
+  "로그인했는데 안 됨"에 갇히는 상황을 방지.
+
+**Path 스코프** — 계측: 지도 요청(`/map/complexes`)의 `Cookie` 헤더 = **`None`**,
+refresh 요청의 `Cookie` = `refresh_token=…`. **노출면 축소가 실제로 작동한다.**
+매 API 호출마다 refresh 가 따라다니면 nginx 접근로그·프록시·에러리포트 등 로그가 남는
+모든 지점이 유출면이 되는데, 그 표면이 `/api/v1/auth/*` 로 좁혀졌다.
+
+---
+
+### 5) CSRF 방어가 이 위협모델에서 충분한가 (지시 4)
+
+| 겹 | 방어 | 실측 |
+|:--:|---|---|
+| 1 | `SameSite=Strict` | 크로스사이트 요청에 브라우저가 쿠키를 아예 안 붙인다 |
+| 2 | `X-Requested-With: XMLHttpRequest` 필수 | 헤더 없음 → **403 `CSRF_HEADER_REQUIRED`**, 임의값 → **403**, 대소문자 다름(`xmlhttprequest`) → **200**(정상 허용) |
+| 3 | CORS 미개방 | `backend/app` 전수 grep — **CORS 미들웨어 0건**. 즉 크로스오리진 XHR 은 preflight 에서 죽는다. 커스텀 헤더를 붙이려면 스크립트가 필요하고, 그 순간 preflight 에 걸린다 → 2겹이 서로를 받쳐준다 |
+
+**403 이 쿠키를 지우지 않는가** — 실측 확인. 403 응답에 `Set-Cookie` **없음**, 쿠키 값 **불변**,
+직후 정상 refresh **200**. 이게 맞다. 여기서 지웠다면 공격자가 헤더 없는 요청을 반복 유도해
+**남의 세션을 끊는 로그아웃 CSRF** 가 됐을 것이다. `deps.py:71-73` 주석이 그 함정을 정확히 지목하고 있다.
+
+**추가 점검 — 로그인 CSRF(강제 로그인)**: `/auth/login` 은 CSRF 헤더를 요구하지 않는다.
+성립 여부를 따져보면: HTML `<form>` 은 `application/json` 을 보낼 수 없고(허용 3종에 없음),
+XHR 로 보내려면 CORS 승인이 필요한데 없다. → **성립하지 않는다.** 결격 아님.
+
+**판정: 이 위협모델(쿠키 하나·같은 오리진 SPA·CORS 미개방)에서 충분하다.**
+
+---
+
+### 6) 부수 통제 (지시 문항 외 자체 점검)
+
+| 항목 | 결과 | 실측 |
+|---|:--:|---|
+| `COOKIE_SECURE` 운영 무력화 | **불가** | `Settings(debug=False, cookie_secure=False).refresh_cookie_secure` → **True**. `debug=True` 일 때만 False. 게다가 기동점검 `validate_runtime()` 이 `COOKIE_SECURE 가 false 입니다` 를 **드러낸다** — 조용히 넘어가지 않는다 |
+| `typ` 양방향 | **PASS** | access 를 refresh 쿠키에 심음 → **401** / refresh 로 API 호출 → **401** |
+| 쿠키 회전 | **PASS** | refresh 호출 후 쿠키 값이 **바뀜**. `jti`(`secrets.token_urlsafe(12)`)를 넣어 **같은 초에 발급해도 토큰이 달라진다** — 회전이 명목이 아니라 실제 회전임을 확인(같은 초 2회 발급 토큰 상이) |
+| TTL | **PASS** | `REFRESH_TTL = 7 days`, `Max-Age=604800`, `expires_in=1800`(=`ACCESS_TTL_SECONDS`, 상수 단일 출처) |
+| 로그아웃 가용성 | **PASS** | 인증 불요 — **불량/만료 access 로도 204**. "만료돼서 로그아웃도 못 함"이 안 생긴다 |
+| 계정 열거 회귀 | **PASS** | 없는 계정 / 틀린 비밀번호 → 상태·본문 **완전 동일**. 로그인 실패 응답에 `Set-Cookie` 없음 |
+| 프론트 세션 부활 방지 | **PASS** | refresh 진행 중 로그아웃 → 뒤늦게 도착한 refresh 성공 결과를 **폐기**(`isAuthenticated()===false`). `clearSession()` 이 `refreshInFlight` 를 끊는 설계가 실제로 동작 |
+| 로그아웃 견고성 | **PASS** | 서버 호출이 네트워크 오류로 실패해도 **로컬 세션은 반드시 비워짐** |
+| 부팅 상태 노출 | **PASS** | `restoreSession` 실패 시 `{authenticated:false, checked:true}` 확정 방송 — `App.tsx` 가 "세션 확인 중"에 영구히 갇히지 않음 |
+
+---
+
+### 7) XSS 회귀 (지시 5) — **깨지지 않았다**
+
+인증 개편으로 새 DOM 주입 경로가 생겼는지 재확인했다.
+
+- `mapMarkers.ts` 의 `buildLabelEl` 은 여전히 `createElement` + `textContent`(줄번호만 이동).
+- src 전수 재grep: `innerHTML`·`outerHTML`·`insertAdjacentHTML`·`document.write`·`eval(`·
+  `new Function`·`dangerouslySetInnerHTML` — **실사용 0건**(주석 3건뿐).
+- `setAttribute` 는 여전히 `role`·`aria-label` 3곳뿐. `createElement("script")` 는 카카오 SDK 로더 1곳(빌드타임 env).
+- **SR-015 와 동일한 악성 페이로드 5종을 재투입** → 요소 생성 0, `window.__pwned` undefined, `CustomOverlay.content` 는 여전히 `HTMLElement`.
+- 신규 화면(`AuthForm`)도 전부 JSX 텍스트 렌더. `console.*` 0건 유지.
+
+---
+
+### 8) 잔여 위험 재평가 (지시 6) — XSS 1회의 피해가 얼마나 줄었나
+
+| | 수정 전(SR-015) | 수정 후(SR-016) |
+|---|---|---|
+| 탈취 가능한 것 | **refresh 토큰 원본**(localStorage) | access 토큰뿐(메모리) |
+| 유효기간 | **14일** | **30분** |
+| 공격자 기기로 반출 | **가능** — 자기 PC 에서 무기한 재발급 | **불가** — `HttpOnly` 라 값을 읽을 수 없다(probe: `document.cookie` 접근 경로 0) |
+| 피해 종료 조건 | 없음(폐기 수단 부재, 로그아웃 무의미) | 피해 탭이 닫히거나 access 만료 |
+| 회수 | 불가 | `/auth/logout` 이 쿠키를 실제로 지움(실측 6c·6d) |
+
+**남는 위험(정직하게)**: `HttpOnly` 는 **탈취(반출)** 를 막지만 **세션 라이딩(session riding)** 은
+막지 못한다. XSS 코드는 피해자 브라우저 안에서 같은 오리진이므로 `fetch` 를 가로채 access 를 얻거나
+직접 `/auth/refresh` 를 호출해 **탭이 살아 있는 동안** 사용자를 흉내낼 수 있다. 다만 그 능력은
+**그 브라우저 세션에 갇힌다** — 공격자 서버로 자격증명을 옮길 수 없다. 위험의 성질이
+"영구·이식 가능한 자격증명 유출"에서 "일시적 세션 오용"으로 **급을 낮췄다.**
+→ 그래서 `SR15-4`(CSP)가 여전히 의미 있는 마지막 층이다.
+
+---
+
+### 9) `SR15-3` (서버측 폐기) 판정 — **G5 배포 차단 아님 · OPEN 유지** (지시 7)
+
+**차단하지 않는다.** 근거:
+1. `SR15-1` 이 지목한 현실적 유출 경로(localStorage 반출)가 **닫혔다.** 폐기 수단이 필요한
+   "이미 새어나간 refresh" 시나리오의 확률이 크게 떨어졌다.
+2. 호출마다 **회전** + **7일** + host-only + `Path` 스코프 + `SameSite=Strict` + 운영 `Secure` 강제.
+3. 흔한 실사용 케이스(공용 기기에서 로그아웃)는 **쿠키 삭제로 실제 해결**된다(실측).
+4. 사용자가 개인 1명(CLAUDE.md) — 대량 세션 관리 요구가 없다.
+5. 준비는 돼 있다: `jti` 가 **이미 발급되고 있음을 실측 확인**(토큰 디코드). 저장소만 붙이면 된다.
+6. `security.md §8 R-09` 에 **재평가 트리거와 함께 정식 등재**됐다 — 조용히 사라지지 않는다.
+
+⚠️ 단 조건을 붙인다: **`R-09` 가 명시한 대로 refresh TTL 을 7일보다 늘리려면 denylist 를 먼저
+붙여야 한다.** 회수 수단 없이 노출 창만 넓히는 변경은 그 자체로 재감사 대상이다.
+
+---
+
+### 10) `SR15-4` (CSP 부재) 판정 — **커밋 비차단 · G5 배포 절차의 차단 조건** (지시 8)
+
+"카카오맵 SDK 출처 허용이 필요해 잘못 넣으면 지도가 죽는다"는 **기술적으로 타당하다.**
+카카오맵은 `script-src`(`dapi.kakao.com`·`*.daumcdn.net`) 외에 지도 타일 `img-src`,
+`connect-src`, 인라인 스타일(`style-src`)까지 얽혀 있어 실제 브라우저 없이 정하면 빈 지도가 된다.
+**"배포하며 검증한다"는 판단 자체는 옳다.**
+
+그러나 **CSP 없이 운영에 올리는 것**은 별개다. §8 에서 확인했듯 CSP 는 이제 세션 라이딩에 대한
+**마지막 남은 층**이고, 이 앱은 아직 배포된 적이 없어 "기존 사용자 회귀 위험"이라는 지연 사유도 없다.
+
+**판정: G5 배포 체크리스트에 넣어 차단 조건으로 둔다.**
+- `deploy/DEPLOY.md §5-6` 의 `check_headers()` 가 이미 헤더를 4경로에서 실검증하므로 **거기에
+  `Content-Security-Policy` 1줄을 추가**하면 "깜빡하고 안 넣음"이 구조적으로 불가능해진다.
+- 지도가 깨지면 **`Content-Security-Policy-Report-Only` 로 먼저 올리는 것을 허용**한다.
+  관측 후 강제로 전환. "완벽한 CSP 아니면 안 넣는다"가 제일 나쁜 선택이다.
+- 최소안: `default-src 'self'; script-src 'self' https://dapi.kakao.com https://*.daumcdn.net;
+  img-src 'self' data: https://*.daumcdn.net https://*.kakaocdn.net; connect-src 'self' https://dapi.kakao.com;
+  style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`
+
+---
+
+### 종합
+
+| 항목 | 상태 |
+|---|---|
+| `SR15-1` (토큰 저장 위치) | **CLOSE (PASS)** — 통과조건 (A) 4개 전부 충족, 우회 4종 차단 실측 |
+| `SR15-2` (탭 간 로그아웃 동기화) | **CLOSE (해소)** — 저장소 방식을 폐기하면서 문제 자체가 사라졌다. 세션 진실은 이제 **탭이 공유하는 쿠키**이고, 다른 탭은 access 만료(≤30분) 또는 다음 refresh 에서 **401 → 자동 로그아웃**된다. `storage` 이벤트 구독이 애초에 불필요해졌다 |
+| `SR15-3` (서버측 폐기) | **OPEN · low · 비차단** — `R-09` 로 정식 등재. TTL 연장 시 선행 조건 |
+| `SR15-4` (CSP 부재) | **OPEN · medium · G5 배포 차단 조건** — 커밋은 막지 않음 |
+| XSS (FE-2) | **PASS 유지** — 페이로드 5종 재실측 |
+| 설계 문서 | **강화됨** — 금지 조항 무변경, TTL 단축, 실패 이력 정직 기재, R-09 등재 |
+
+**판정: PASS.** SR-015 에서 내가 FAIL 로 막았던 사유 — *"2단계 설계가 명문으로 금지한 저장 위치를
+예외 기록 없이 사용했고, 그 결정이 전제한 보완통제가 하나도 없다"* — 는 **설계를 낮추는 방식이
+아니라 구현을 설계에 맞추는 방식으로** 해소됐다. 반려 당사자로서 직접 43+10 항목을 실행해
+확인했고, 같은 입력에 같은 결과가 나온다. 커밋 게이트를 더 이상 이 건으로 막지 않는다.

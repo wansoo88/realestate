@@ -46,12 +46,47 @@
 | 항목 | 결정 |
 |---|---|
 | 비밀번호 해시 | **Argon2id** (`bcrypt` 대비 GPU 공격 저항 우수). 파라미터는 서버 사양에 맞춰 튜닝 |
-| 세션 | JWT. **access 30분 / refresh 14일** |
+| 세션 | JWT. **access 30분 / refresh 7일** ※ 설계 원안 14일에서 단축 (아래) |
 | refresh 저장 | 웹: `httpOnly` + `Secure` + `SameSite=Strict` 쿠키 / RN 앱: OS 보안저장소 (Keychain·Keystore) |
 | 로그인 시도 제한 | 계정당 5회 실패 → 15분 잠금. IP 기준 rate limit 병행 |
 | 비밀번호 정책 | 최소 12자. 복잡도 강제보다 **길이 + 유출 목록 대조**가 효과적 |
 
 > ⚠️ JWT를 `localStorage`에 넣지 않는다 — XSS 한 방에 토큰이 털린다.
+
+#### 구현 상태 (3단계 · SR15-1 해소, 2026-07-25)
+
+한때 구현이 이 표를 어겼다 — 로그인 응답 본문으로 refresh 를 주고 프론트가 `localStorage` 에
+저장했다(보안리뷰 SR-015 **FAIL**). **설계를 고치지 않고 구현을 설계에 맞췄다.**
+
+| 항목 | 구현 |
+|---|---|
+| refresh 발급 | `POST /auth/login` 이 **쿠키로만** 심는다 — `HttpOnly; Secure; SameSite=Strict; Path=/api/v1/auth; Max-Age=604800`. **응답 본문에 refresh 필드가 없다** |
+| refresh 사용 | `POST /auth/refresh` 는 **요청 본문을 받지 않는다.** 쿠키로만 인증하고, 매번 **새 쿠키로 회전**시킨다 |
+| 실패 처리 | 쿠키 없음·만료·서명오류·종류불일치 → 401 + 쿠키 즉시 삭제(`Max-Age=0`). 사유는 구분해 알려주지 않는다 |
+| 로그아웃 | `POST /auth/logout` → 204 + 쿠키 삭제(발급과 **동일한** 이름·Path·속성) |
+| access 저장 | 클라이언트 **메모리 전용**. 새로고침 시 쿠키로 조용히 재발급 |
+| 토큰 종류 | `typ` 클레임을 양방향 검증 — refresh 로 API 호출 불가, access 를 refresh 쿠키에 심어도 불가 |
+| `Secure` 분기 | `COOKIE_SECURE` 설정. **`DEBUG=false` 면 설정과 무관하게 항상 `Secure`** (`Settings.refresh_cookie_secure`) — 로컬 http 개발에서만 끌 수 있다 |
+
+**CSRF** — 쿠키를 쓰는 순간 CSRF 가 성립할 여지가 생긴다. 두 겹으로 막는다.
+1. `SameSite=Strict` — 다른 사이트에서 출발한 요청에는 브라우저가 쿠키를 붙이지 않는다.
+2. `X-Requested-With: XMLHttpRequest` 커스텀 헤더를 `/auth/refresh`·`/auth/logout` 이 **요구**한다.
+   HTML `<form>` 은 커스텀 헤더를 붙일 수 없고, 스크립트로 붙이면 CORS 사전요청에 걸린다.
+   없으면 `403 CSRF_HEADER_REQUIRED`. ⚠️ 이때 **쿠키를 지우지 않는다** — 지우면 헤더 없는
+   요청을 반복시켜 남의 세션을 끊는 로그아웃 CSRF 가 된다.
+
+**refresh TTL 14일 → 7일.** 쿠키+회전으로 탈취 난이도는 올라갔지만 **서버측 폐기 수단이 아직
+없다**(아래 SR15-3). 회수할 방법이 없는 동안은 노출 창을 시간으로 줄이는 것이 유일한 통제다.
+denylist 를 붙이기 전에는 이 값을 다시 늘리지 않는다.
+
+**후속 과제 SR15-3 (미구현 · 비차단)** — 서버측 토큰 폐기. 지금 `/auth/logout` 은 **브라우저에서
+지우는 것까지**가 전부이고, 이미 발급된 refresh 는 만료(7일)까지 서버가 유효하다고 본다.
+토큰에 `jti` 클레임은 이미 넣어 뒀으므로(`core/security.py`), 폐기 목록(Redis 또는 테이블) +
+로그아웃·비밀번호 변경 시 등록만 붙이면 된다. 그때까지의 잔여 위험은 §8 `R-09`.
+
+**후속 과제 SR15-4 (미구현 · 비차단)** — 프론트 CSP. `deploy/nginx-realestate.conf` 에
+`Content-Security-Policy` 가 없다. XSS 2선 방어이므로 프론트 배포와 함께 검증하며 넣는다
+(카카오맵 SDK 출처 허용 필요: `script-src 'self' https://dapi.kakao.com https://*.daumcdn.net`).
 
 ### 2.2 인가 (IDOR 방지 — T6)
 **모든 사용자 자원 조회에 소유권 검증을 강제한다.**
@@ -228,6 +263,7 @@ Docker Compose에서도 `db`·`redis`에 `ports:`를 **쓰지 않는다**
 | R-06 | `FIELD_ENCRYPTION_KEY`가 같은 서버 `.env`에 존재 → 서버 장악 시 복호화 가능 | **수용**. DB만 유출되는 시나리오(T1·T3)는 차단됨. 향후 KMS 검토 |
 | R-07 | 포털 수집의 약관 해석 여지 | 완화(공공API 이중화). 조건 변경 시 재검토 |
 | R-08 | Claude API 응답의 환각 | G2 근거 감사로 완화. 완전 제거 불가 → **면책 고지 유지** |
+| R-09 | **서버측 토큰 폐기 수단 없음** — 유출된 refresh 를 만료 전에 회수할 수 없다 (SR15-3) | **이월**. 완화: refresh 를 `httpOnly` 쿠키로만 취급 + 호출마다 회전 + TTL 7일. 재평가 트리거: ① 사용자가 나 외로 늘어날 때 ② 세션 유지 요구로 TTL 을 늘리려 할 때 → 그 전에 `jti` denylist 를 붙인다 |
 
 > R-06은 정직하게 말해 **완전한 방어가 아니다.** 서버가 통째로 털리면 키도 털린다.
 > 다만 실무에서 훨씬 흔한 사고(DB 덤프 유출, 백업 파일 노출)는 확실히 막는다.

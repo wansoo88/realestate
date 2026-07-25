@@ -97,14 +97,19 @@ export function BottomSheet({ snap, onSnapChange, title, children }: Props) {
   return (
     <section
       className="sheet"
-      style={{ height: `${ratio * 100}%`, transition: dragRatio === null ? "height .2s ease" : "none" }}
-      aria-label={title}
+      style={{
+        height: `${ratio * 100}%`,
+        // 스냅은 스프링 느낌. 드래그 중엔 손가락을 그대로 따라오도록 transition 을 끈다.
+        transition: dragRatio === null ? "height 0.36s cubic-bezier(0.32, 0.72, 0, 1)" : "none",
+      }}
+      aria-label="매물 목록"
     >
       <div
         className="sheet__handle"
         role="slider"
         tabIndex={0}
         aria-label="목록 크기 조절"
+        aria-orientation="vertical"
         aria-valuemin={0}
         aria-valuemax={2}
         aria-valuenow={ORDER.indexOf(snap)}
@@ -116,8 +121,9 @@ export function BottomSheet({ snap, onSnapChange, title, children }: Props) {
         onKeyDown={onKeyDown}
       >
         <div className="sheet__grip" aria-hidden="true" />
-        <h2 className="sheet__title">{title}</h2>
       </div>
+      {/* 제목은 slider 밖에 둔다 — slider 자식은 접근성 트리에서 무시돼 스크린리더에 안 읽힌다(F-04) */}
+      <h2 className="sheet__title">{title}</h2>
       <div className="sheet__body">{children}</div>
     </section>
   );

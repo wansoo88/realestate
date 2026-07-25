@@ -58,6 +58,33 @@ def get_rules(settings: SettingsDep) -> RuleSet:
         ) from exc
 
 
+#: CSRF 2차 방어용 커스텀 헤더 (security.md §2.1 / SR15-1).
+#: 쿠키를 쓰는 순간 CSRF 가 성립할 여지가 생긴다. `SameSite=Strict` 가 1차 방어이고,
+#: 이 헤더가 2차다 — **HTML `<form>` 은 커스텀 헤더를 붙일 수 없고**, 붙이려면
+#: 스크립트가 필요한데 그건 CORS 사전요청(preflight)에 걸린다. 즉 공격자가 만든
+#: 남의 페이지에서는 이 헤더를 실은 요청을 우리 서버로 보낼 수 없다.
+AJAX_HEADER = "X-Requested-With"
+AJAX_HEADER_VALUE = "XMLHttpRequest"
+
+
+def require_ajax_header(
+    x_requested_with: Annotated[str | None, Header()] = None,
+) -> None:
+    """쿠키 인증 엔드포인트(refresh·logout) 전용 관문.
+
+    ⚠️ 실패해도 **쿠키를 지우지 않는다.** 여기서 로그아웃시키면 공격자가 헤더 없는
+    요청을 반복 유도해 남의 세션을 끊는 수단이 된다(로그아웃 CSRF).
+    """
+    if (x_requested_with or "").strip().lower() != AJAX_HEADER_VALUE.lower():
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "CSRF_HEADER_REQUIRED",
+                "message": f"{AJAX_HEADER}: {AJAX_HEADER_VALUE} 헤더가 필요합니다",
+            },
+        )
+
+
 def current_user(
     settings: SettingsDep,
     repo=Depends(get_repo),

@@ -438,6 +438,110 @@ def test_알고리즘_none_공격_차단():
         decode_token(forged, secret=SECRET)
 
 
+def test_access_토큰을_refresh_자리에_쓸_수_없다():
+    """반대 방향도 막는다 — access 를 refresh 쿠키에 심어 갱신 루프를 돌리지 못하게."""
+    from app.core.security import create_token
+    access = create_token(42, secret=SECRET, kind="access")
+    with pytest.raises(jwt.InvalidTokenError):
+        decode_token(access, secret=SECRET, expect="refresh")
+
+
+def test_같은_초에_발급해도_토큰이_다르다():
+    """쿠키 회전이 실제 회전이 되려면 값이 달라져야 한다(jti)."""
+    from app.core.security import create_token
+    now = dt.datetime.now(dt.timezone.utc)
+    a = create_token(42, secret=SECRET, kind="refresh", now=now)
+    b = create_token(42, secret=SECRET, kind="refresh", now=now)
+    assert a != b
+    assert decode_token(a, secret=SECRET, expect="refresh") == 42
+
+
+def test_refresh_수명은_7일이다():
+    """SR15-1 — 서버측 폐기 수단이 생기기 전까지 노출 창을 줄여 둔다.
+
+    이 값을 늘리려면 `jti` denylist(SR15-3)를 먼저 붙여야 한다.
+    """
+    from app.core.security import REFRESH_TTL, REFRESH_TTL_SECONDS
+    assert REFRESH_TTL == dt.timedelta(days=7)
+    assert REFRESH_TTL_SECONDS == 7 * 24 * 3600
+
+
+# ---------------------------------------------------------------------------
+# refresh 쿠키 설정 (SR15-1)
+# ---------------------------------------------------------------------------
+
+def test_운영에서는_COOKIE_SECURE를_끌_수_없다():
+    """설정 실수 하나로 refresh 가 평문 HTTP 로 흐르는 사고를 구조적으로 막는다."""
+    from app.core.config import Settings
+
+    prod = Settings(jwt_secret="x" * 40, field_encryption_key="k" * 32,
+                    postgres_password="pw", debug=False, cookie_secure=False)
+    assert prod.refresh_cookie_secure is True
+    assert any("COOKIE_SECURE" in p for p in prod.validate_runtime())
+
+
+def test_개발모드에서만_Secure를_끌_수_있다():
+    """http://localhost 개발에서 쿠키가 아예 저장되지 않아 로그인이 막히는 것을 푼다."""
+    from app.core.config import Settings
+
+    dev = Settings(jwt_secret="x" * 40, field_encryption_key="k" * 32,
+                   postgres_password="pw", debug=True, cookie_secure=False)
+    assert dev.refresh_cookie_secure is False
+    # 기본값은 켜짐 — 명시적으로 꺼야만 꺼진다
+    assert Settings(jwt_secret="x" * 40, field_encryption_key="k" * 32,
+                    postgres_password="pw", debug=True).refresh_cookie_secure is True
+
+
+def test_개발_설정에서만_Secure가_빠진다():
+    """http://localhost 는 `Secure` 쿠키를 저장하지 않는다 — 개발이 막히지 않게 푸는 유일한 경로."""
+    from fastapi import Response
+
+    from app.api.cookies import set_refresh_cookie
+    from app.core.config import Settings
+
+    base = dict(jwt_secret="x" * 40, field_encryption_key="k" * 32, postgres_password="pw")
+
+    dev = Response()
+    set_refresh_cookie(dev, "jwt", Settings(**base, debug=True, cookie_secure=False))
+    assert "secure" not in dev.headers["set-cookie"].lower()
+    # 풀어주는 것은 Secure 뿐 — 나머지 방어는 개발에서도 그대로다
+    assert "httponly" in dev.headers["set-cookie"].lower()
+    assert "samesite=strict" in dev.headers["set-cookie"].lower()
+
+    prod = Response()
+    set_refresh_cookie(prod, "jwt", Settings(**base, debug=False, cookie_secure=False))
+    assert "secure" in prod.headers["set-cookie"].lower()
+
+
+def test_쿠키_삭제_속성이_발급과_동일하다():
+    """이름·Path·속성이 하나라도 다르면 브라우저는 원본 쿠키를 남긴다 = 로그아웃 실패."""
+    from fastapi import Response
+
+    from app.api.cookies import (
+        REFRESH_COOKIE_PATH,
+        delete_refresh_cookie,
+        set_refresh_cookie,
+    )
+    from app.core.config import Settings
+
+    settings = Settings(jwt_secret="x" * 40, field_encryption_key="k" * 32,
+                        postgres_password="pw")
+
+    issued = Response()
+    set_refresh_cookie(issued, "some.jwt.value", settings)
+    removed = Response()
+    delete_refresh_cookie(removed, settings)
+
+    def _attrs(header: str) -> set[str]:
+        # 값(Max-Age·Expires·쿠키 값)을 뺀 속성 집합만 비교한다
+        return {p.strip().lower() for p in header.split(";")
+                if not p.strip().lower().startswith(("refresh_token=", "max-age", "expires"))}
+
+    assert _attrs(issued.headers["set-cookie"]) == _attrs(removed.headers["set-cookie"])
+    assert f"path={REFRESH_COOKIE_PATH}" in removed.headers["set-cookie"].lower()
+    assert "max-age=0" in removed.headers["set-cookie"].lower()
+
+
 # ---------------------------------------------------------------------------
 # 로그 마스킹 (G3)
 # ---------------------------------------------------------------------------

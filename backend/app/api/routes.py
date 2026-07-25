@@ -7,12 +7,13 @@ from __future__ import annotations
 
 import datetime as dt
 import secrets
-from typing import Any
+from typing import Annotated, Any
 
 import jwt
 from fastapi import (
     APIRouter,
     BackgroundTasks,
+    Cookie,
     Depends,
     HTTPException,
     Query,
@@ -22,16 +23,25 @@ from fastapi import (
 
 from app.agents.recommend import run_recommendation_job
 from app.api import schemas
+from app.api.cookies import (
+    delete_refresh_cookie,
+    expired_refresh_cookie_header,
+    set_refresh_cookie,
+)
 from app.api.deps import (
     CurrentUser,
     SettingsDep,
     get_encryption_key,
     get_repo,
     get_rules,
+    require_ajax_header,
 )
+from app.core.config import Settings
 from app.core.security import (
+    ACCESS_TTL_SECONDS,
     DecryptionError,
     create_token,
+    decode_token,
     decrypt_amount,
     encrypt_amount,
     hash_password,
@@ -78,8 +88,9 @@ def register(body: schemas.RegisterIn, repo=Depends(get_repo)) -> dict[str, Any]
 
 
 @router.post("/auth/login", tags=["auth"])
-def login(body: schemas.LoginIn, settings: SettingsDep,
+def login(body: schemas.LoginIn, response: Response, settings: SettingsDep,
           repo=Depends(get_repo)) -> schemas.TokenOut:
+    """access 는 본문으로, **refresh 는 쿠키로만** 준다 (security.md §2.1 / SR15-1)."""
     user = repo.get_user_by_email(str(body.email))
     # 사용자 존재 여부를 응답으로 구분할 수 없게 한다(계정 열거 방지).
     ok = user is not None and verify_password(body.password, user.password_hash)
@@ -88,35 +99,80 @@ def login(body: schemas.LoginIn, settings: SettingsDep,
             status.HTTP_401_UNAUTHORIZED,
             detail={"code": "UNAUTHORIZED", "message": "이메일 또는 비밀번호가 올바르지 않습니다"},
         )
+    set_refresh_cookie(
+        response,
+        create_token(user.id, secret=settings.jwt_secret, kind="refresh"),
+        settings,
+    )
     return schemas.TokenOut(
         access_token=create_token(user.id, secret=settings.jwt_secret, kind="access"),
-        refresh_token=create_token(user.id, secret=settings.jwt_secret, kind="refresh"),
-        expires_in=1800,
+        expires_in=ACCESS_TTL_SECONDS,
     )
 
 
-@router.post("/auth/refresh", tags=["auth"])
-def refresh(body: schemas.RefreshIn, settings: SettingsDep,
-            repo=Depends(get_repo)) -> schemas.TokenOut:
-    from app.core.security import decode_token
+def _refresh_rejected(settings: Settings) -> HTTPException:
+    """갱신 거절 401. **응답과 함께 쿠키를 지운다.**
+
+    못 쓰는 쿠키를 브라우저에 남겨두면 매 요청마다 실패를 반복하고, 사용자는
+    "로그인했는데 안 된다"에 갇힌다. 실패했으면 그 자리에서 정리한다.
+    거절 사유(없음/만료/서명오류/종류불일치)는 구분해서 알려주지 않는다.
+    """
+    return HTTPException(
+        status.HTTP_401_UNAUTHORIZED,
+        detail={"code": "UNAUTHORIZED", "message": "유효하지 않은 토큰입니다"},
+        headers=expired_refresh_cookie_header(settings),
+    )
+
+
+@router.post("/auth/refresh", tags=["auth"],
+             dependencies=[Depends(require_ajax_header)])
+def refresh(
+    response: Response,
+    settings: SettingsDep,
+    refresh_token: Annotated[str | None, Cookie()] = None,
+    repo=Depends(get_repo),
+) -> schemas.TokenOut:
+    """쿠키로만 갱신한다. **요청 본문을 받지 않는다.**
+
+    본문으로 refresh 를 받는 경로를 남겨두면 쿠키를 도입한 의미가 없다 —
+    공격자는 언제나 더 편한 쪽(JS 로 읽어 본문에 실을 수 있는 쪽)을 고른다.
+
+    갱신할 때마다 **쿠키를 회전**시킨다. 쓴 토큰은 새 토큰으로 덮이므로,
+    유출본이 있더라도 정상 사용자가 한 번만 갱신하면 그 값은 브라우저에서 사라진다.
+    (아직 서버측 폐기는 없다 — 유출본 자체는 만료까지 유효하다. 후속 SR15-3)
+    """
+    if not refresh_token:
+        raise _refresh_rejected(settings)
     try:
-        user_id = decode_token(body.refresh_token, secret=settings.jwt_secret,
+        user_id = decode_token(refresh_token, secret=settings.jwt_secret,
                                expect="refresh")
     except jwt.PyJWTError as exc:
-        raise HTTPException(
-            status.HTTP_401_UNAUTHORIZED,
-            detail={"code": "UNAUTHORIZED", "message": "유효하지 않은 토큰입니다"},
-        ) from exc
+        raise _refresh_rejected(settings) from exc
     if repo.get_user(user_id) is None:
-        raise HTTPException(
-            status.HTTP_401_UNAUTHORIZED,
-            detail={"code": "UNAUTHORIZED", "message": "유효하지 않은 토큰입니다"},
-        )
+        raise _refresh_rejected(settings)
+
+    set_refresh_cookie(
+        response,
+        create_token(user_id, secret=settings.jwt_secret, kind="refresh"),
+        settings,
+    )
     return schemas.TokenOut(
         access_token=create_token(user_id, secret=settings.jwt_secret, kind="access"),
-        refresh_token=create_token(user_id, secret=settings.jwt_secret, kind="refresh"),
-        expires_in=1800,
+        expires_in=ACCESS_TTL_SECONDS,
     )
+
+
+@router.post("/auth/logout", status_code=status.HTTP_204_NO_CONTENT, tags=["auth"],
+             dependencies=[Depends(require_ajax_header)])
+def logout(settings: SettingsDep) -> Response:
+    """쿠키를 만료시킨다. 인증을 요구하지 않는다 — 이미 만료된 access 로도 나갈 수 있어야 한다.
+
+    ⚠️ 지금은 **브라우저에서 지우는 것**까지가 전부다. 이미 발급된 refresh 는
+    서버가 회수하지 못한다(폐기 목록 없음). 후속 과제 SR15-3.
+    """
+    response = Response(status_code=status.HTTP_204_NO_CONTENT)
+    delete_refresh_cookie(response, settings)
+    return response
 
 
 # ---------------------------------------------------------------------------

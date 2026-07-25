@@ -23,6 +23,7 @@
 |---|---|---|
 | 400 | `INVALID_PARAM` | 파라미터 오류 |
 | 401 | `UNAUTHORIZED` | 토큰 없음/만료 |
+| 403 | `CSRF_HEADER_REQUIRED` | 쿠키 인증 엔드포인트(`/auth/refresh`·`/auth/logout`)에 `X-Requested-With: XMLHttpRequest` 누락 |
 | 404 | `NOT_FOUND` | 대상 없음 |
 | 409 | `JOB_IN_PROGRESS` | 동일 조건 분석이 이미 실행 중 |
 | 422 | `INSUFFICIENT_DATA` | **데이터 부족으로 판단 보류** (추정하지 않고 명시적으로 거부) |
@@ -35,6 +36,18 @@
 
 ## 1. 인증
 
+> **refresh 토큰은 응답 본문에 절대 실리지 않는다.** `httpOnly` 쿠키로만 오간다
+> (security.md §2.1 / SR15-1). access 는 클라이언트 **메모리 전용**으로 보관한다 —
+> `localStorage`·`sessionStorage` 금지.
+
+### 공통 — refresh 쿠키
+| 항목 | 값 |
+|---|---|
+| 이름 | `refresh_token` (JS 는 읽을 수 없다) |
+| 속성 | `HttpOnly; Secure; SameSite=Strict; Path=/api/v1/auth; Max-Age=604800` (7일) |
+| `Secure` | 운영은 항상 붙는다. `COOKIE_SECURE=false` 는 `DEBUG=true` 인 로컬 http 개발에서만 유효 |
+| 전송 범위 | `Path` 때문에 `/api/v1/auth/*` 요청에만 실린다 (지도·추천 요청에는 따라다니지 않는다) |
+
 ### `POST /auth/register`
 ```json
 // req
@@ -42,17 +55,55 @@
 // res 201
 { "user_id": 1 }
 ```
+| 코드 | 의미 |
+|---|---|
+| 409 `EMAIL_TAKEN` | 이미 가입된 이메일 |
+| 422 | 비밀번호 12자 미만 등 형식 오류 |
 
 ### `POST /auth/login`
 ```json
-// res 200
-{ "access_token": "...", "refresh_token": "...", "expires_in": 1800 }
+// req
+{ "email": "me@example.com", "password": "..." }
+// res 200  — refresh_token 필드는 없다
+{ "access_token": "...", "token_type": "bearer", "expires_in": 1800 }
 ```
+```
+Set-Cookie: refresh_token=<jwt>; HttpOnly; Secure; SameSite=Strict; Path=/api/v1/auth; Max-Age=604800
+```
+- `expires_in` = access 수명(초, 30분). 프론트는 만료 전에 미리 갱신한다.
+- 401 은 **없는 계정과 틀린 비밀번호를 구분하지 않는다**(계정 열거 방지).
 
 ### `POST /auth/refresh`
-```json
-{ "refresh_token": "..." }
+**요청 본문 없음.** 쿠키로 인증한다.
 ```
+POST /api/v1/auth/refresh
+X-Requested-With: XMLHttpRequest        ← 필수 (CSRF 2차 방어)
+Cookie: refresh_token=...               ← 브라우저가 자동 첨부
+```
+```json
+// res 200 — 응답 본문은 login 과 동일
+{ "access_token": "...", "token_type": "bearer", "expires_in": 1800 }
+```
+- **쿠키를 회전시킨다** — 응답에 새 `Set-Cookie` 가 실리고 이전 refresh 는 브라우저에서 대체된다.
+- 401 `UNAUTHORIZED`: 쿠키 없음·만료·서명 오류·access 토큰을 쿠키에 넣은 경우.
+  **이 응답은 쿠키를 즉시 삭제한다**(`Max-Age=0`) → 클라이언트는 로그인 화면으로 보낸다.
+- 403 `CSRF_HEADER_REQUIRED`: `X-Requested-With` 누락. **쿠키는 유지된다**(재시도 가능).
+- 본문에 `refresh_token` 을 실어 보내는 경로는 **없다**(제거됨). 보내도 무시되고 401.
+
+### `POST /auth/logout`
+```
+POST /api/v1/auth/logout
+X-Requested-With: XMLHttpRequest        ← 필수
+```
+- **204 No Content** + `Set-Cookie: refresh_token=; Max-Age=0; Path=/api/v1/auth; ...`
+- 인증 헤더가 필요 없다 — access 가 이미 만료돼도 로그아웃할 수 있어야 한다.
+- 403 `CSRF_HEADER_REQUIRED`: 커스텀 헤더 누락.
+- ⚠️ 현재는 **브라우저에서 지우는 것까지**다. 서버측 폐기(jti denylist)는 후속 과제 SR15-3.
+  클라이언트는 로그아웃 시 메모리의 access 토큰도 함께 버려야 한다.
+
+> **fetch 주의**: 동일 오리진이므로 기본값(`credentials: "same-origin"`)으로 쿠키가 실린다.
+> 프록시 뒤 다른 오리진에서 호출한다면 `credentials: "include"` 가 필요하고, 그때는
+> 서버에 CORS 허용 오리진 설정이 별도로 있어야 한다(현재 없음 — 동일 오리진 전제).
 
 ---
 
@@ -161,13 +212,17 @@
 
 ```json
 { "items": [ { "contract_date": "2026-06-12", "price_krw": 1420000000,
-               "floor": 14, "area_m2": 84.97, "is_cancelled": false } ],
+               "floor": 14, "area_m2": 84.97, "apt_dong": "101", "is_cancelled": false } ],
   "stats": { "median_krw": 1400000000, "n": 37,
              "by_floor_band": { "1-5": 1310000000, "6-15": 1405000000, "16+": 1455000000 } },
-  "note": "동(棟)별 구분은 국토부 공개 데이터에 포함되지 않습니다." }
+  "note": "실거래는 신고까지 최대 30일이 걸려 최근 거래가 반영되지 않았을 수 있습니다." }
 ```
-> 마지막 `note`는 **하드코딩된 고지**다. 층·타입별은 실거래 기반이지만 **동별은 불가능**하다는 사실을
-> API 레벨에서 명시해 클라이언트가 오해하지 않게 한다.
+> ⚠️ **설계 정정(2026-07-25)**: 초안은 여기에 *"동(棟)별 구분은 국토부 공개 데이터에 포함되지 않습니다"* 를
+> 하드코딩 고지로 두고 동별 분석을 불가능으로 봤다. 그러나 **운영 API 는 `aptDong` 을 77~93% 제공**한다
+> (`erd.md` §0 정정, 실호출 실측). 그래서 `apt_dong` 을 응답에 싣고, 동별 편차는 추천 결과의
+> `dong_valuation`(§5)에서 **실측/추정을 `basis`·`confidence` 로 구분해** 제공한다.
+> `apt_dong` 은 **결측(null)일 수 있다** — 클라이언트는 없는 경우를 반드시 처리해야 하고,
+> 없는 값을 추정해 채워 넣으면 안 된다(G2).
 
 ### `GET /complexes/{id}/listings` — 현재 호가
 ```json

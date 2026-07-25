@@ -4,45 +4,84 @@
   overflow: hidden;
 }
 
+/* 세션 확인 중 — 스피너 대신 조용한 한 줄(규칙 5: 소란 떨지 않는다) */
+.app--boot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.app__boot {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--fs-footnote);
+}
+
 .app__status,
 .app__hint {
-  margin: var(--sp-4) 0;
-  color: var(--text-muted);
-  font-size: var(--fs-caption);
+  margin: var(--sp-4) var(--sp-1);
+  color: var(--text-secondary);
+  font-size: var(--fs-footnote);
 }
 
 .app__error {
   margin: var(--sp-3) 0;
-  padding: var(--sp-3);
-  border: 1px solid var(--danger);
-  border-radius: 8px;
-  color: var(--danger);
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--r-card);
+  background: var(--badge-bg);
+  color: var(--danger-text);
+  font-size: var(--fs-footnote);
+}
+
+/* 군집 리스트 — 박스 대신 헤어라인 + 여백. 개수가 주인공. */
+.app__clusters {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.app__cluster {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: baseline;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-1);
+  border-bottom: 0.5px solid var(--hairline);
+}
+
+.app__cluster-count {
+  font-size: var(--fs-title);
+  font-weight: 600;
+}
+
+.app__cluster-region {
+  font-size: var(--fs-footnote);
+  color: var(--text-secondary);
+}
+
+.app__cluster-price {
   font-size: var(--fs-caption);
 }
 
-/* 실거래 신고 지연 고지 — 시세가 나오는 화면에는 항상 붙는다 */
-.app__note {
-  margin: var(--sp-3) 0 0;
+/* 고지 — 조용한 캡션(규칙 5) */
+.app__foot {
+  margin-top: var(--sp-6);
+  padding-top: var(--sp-4);
+  border-top: 0.5px solid var(--hairline);
+}
+
+.app__note,
+.app__disclaimer {
+  margin: 0 0 var(--sp-2);
   font-size: var(--fs-caption);
-  color: var(--text-estimated);
+  color: var(--text-secondary);
   line-height: 1.5;
 }
 
-.app__disclaimer {
-  margin-top: var(--sp-6);
-  padding-top: var(--sp-3);
-  border-top: 1px solid var(--border);
-  font-size: var(--fs-caption);
-  color: var(--text-estimated);
-}
-
-.app__clusters { list-style: none; margin: 0; padding: 0; }
-
-.app__cluster {
-  display: flex;
-  justify-content: space-between;
-  gap: var(--sp-2);
-  padding: var(--sp-3) 0;
-  border-bottom: 1px solid var(--border);
-  font-size: var(--fs-caption);
+.app__logout {
+  margin-top: var(--sp-2);
+  min-height: 44px;
+  padding: 0 var(--sp-2);
+  color: var(--accent);
+  font-size: var(--fs-footnote);
 }

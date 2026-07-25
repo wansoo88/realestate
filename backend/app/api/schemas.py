@@ -17,13 +17,18 @@ class LoginIn(BaseModel):
 
 
 class TokenOut(BaseModel):
+    """로그인·갱신 응답.
+
+    ⚠️ **refresh_token 필드를 다시 추가하지 마라.** refresh 는 `httpOnly` 쿠키로만
+    오간다(security.md §2.1, SR15-1). 본문에 실으면 클라이언트가 그것을 저장할 곳을
+    찾게 되고, 웹에서 그 자리는 결국 JS 가 읽는 저장소가 된다.
+    access 는 **메모리 전용**으로 쓰라는 전제다.
+    """
+
     access_token: str
-    refresh_token: str
+    token_type: str = "bearer"
+    #: access 수명(초). 프론트가 만료 전에 미리 갱신할 수 있게 준다.
     expires_in: int
-
-
-class RefreshIn(BaseModel):
-    refresh_token: str
 
 
 class ProfileIn(BaseModel):

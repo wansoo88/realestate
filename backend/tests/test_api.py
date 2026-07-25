@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -15,14 +16,24 @@ from app.repositories.memory import InMemoryRepository
 
 FIXTURES = Path(__file__).parent / "fixtures"
 PASSWORD = "correct horse battery staple"
+JWT_SECRET = "x" * 40
+
+#: CSRF 2차 방어 헤더 (security.md §2.1 / SR15-1). 쿠키 인증 엔드포인트는 이걸 요구한다.
+AJAX = {"X-Requested-With": "XMLHttpRequest"}
+
+REFRESH_COOKIE = "refresh_token"
+REFRESH_PATH = "/api/v1/auth"
 
 
-@pytest.fixture()
-def client(monkeypatch):
-    monkeypatch.setenv("JWT_SECRET", "x" * 40)
+def _set_test_env(monkeypatch) -> None:
+    monkeypatch.setenv("JWT_SECRET", JWT_SECRET)
     monkeypatch.setenv("FIELD_ENCRYPTION_KEY", "k" * 32)
     monkeypatch.setenv("POSTGRES_PASSWORD", "pw")
     monkeypatch.setenv("TAX_RULES_PATH", str(FIXTURES / "tax_rules_test.yaml"))
+
+
+def _make_client(monkeypatch, base_url: str):
+    _set_test_env(monkeypatch)
 
     from app.core.config import get_settings
     get_settings.cache_clear()
@@ -30,9 +41,31 @@ def client(monkeypatch):
     from app.main import create_app
     repo = InMemoryRepository()
     app = create_app(repo=repo)
-    with TestClient(app) as c:
-        c.repo = repo
+    client = TestClient(app, base_url=base_url)
+    client.repo = repo
+    return client
+
+
+@pytest.fixture()
+def client(monkeypatch):
+    with _make_client(monkeypatch, "http://testserver") as c:
         yield c
+    from app.core.config import get_settings
+    get_settings.cache_clear()
+
+
+@pytest.fixture()
+def https_client(monkeypatch):
+    """https 로 말하는 클라이언트 — refresh 쿠키 왕복 검증용.
+
+    httpx 쿠키 저장소는 **`Secure` 쿠키를 http 응답에서 저장하지 않는다**(브라우저와 같은 규칙).
+    그래서 평문 http 클라이언트로는 "쿠키가 실제로 오가는가"를 검증할 수 없다.
+    설정을 느슨하게(`COOKIE_SECURE=false`) 바꿔 우회하지 않고, **운영과 동일한
+    Secure=on 조건 그대로** https 로 왕복시킨다.
+    """
+    with _make_client(monkeypatch, "https://testserver") as c:
+        yield c
+    from app.core.config import get_settings
     get_settings.cache_clear()
 
 
@@ -93,24 +126,161 @@ def test_존재하지_않는_계정과_틀린_비밀번호가_같은_응답(clie
 
 
 def test_refresh_토큰으로_API_호출_불가(client):
-    client.post("/api/v1/auth/register", json={"email": "a@b.co", "password": PASSWORD})
-    tokens = client.post("/api/v1/auth/login",
-                         json={"email": "a@b.co", "password": PASSWORD}).json()
+    """수명이 긴 refresh 로 API 를 계속 호출하는 것을 막는다(`typ` 클레임 검증)."""
+    from app.core.security import create_token
 
-    r = client.get("/api/v1/me/profile", headers=_auth(tokens["refresh_token"]))
+    refresh = create_token(1, secret=JWT_SECRET, kind="refresh")
+    assert client.get("/api/v1/me/profile", headers=_auth(refresh)).status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# refresh 토큰 = httpOnly 쿠키 (security.md §2.1 · SR15-1)
+#
+# 이 절의 테스트는 "설계가 금지한 저장 위치를 코드가 다시 쓰지 못하게" 고정하는 장치다.
+# 하나라도 깨지면 XSS 한 번에 자산·소득 계정의 자격증명이 통째로 넘어가는 상태로 돌아간다.
+# ---------------------------------------------------------------------------
+
+def _login(client, email: str = "a@b.co") -> httpx.Response:
+    r = client.post("/api/v1/auth/register", json={"email": email, "password": PASSWORD})
+    assert r.status_code == 201, r.text
+    r = client.post("/api/v1/auth/login", json={"email": email, "password": PASSWORD})
+    assert r.status_code == 200, r.text
+    return r
+
+
+def test_login_응답_본문에_refresh_token이_없다(https_client):
+    body = _login(https_client).json()
+
+    assert set(body) == {"access_token", "token_type", "expires_in"}
+    assert "refresh_token" not in body
+    assert body["token_type"] == "bearer"
+    assert body["expires_in"] == 1800
+
+
+def test_login이_httpOnly_Secure_SameSite_Path_쿠키를_설정한다(https_client):
+    raw = _login(https_client).headers["set-cookie"]
+    lowered = raw.lower()
+
+    assert raw.startswith(f"{REFRESH_COOKIE}=")
+    assert "httponly" in lowered            # JS 가 읽지 못한다
+    assert "secure" in lowered              # 평문 http 로 나가지 않는다
+    assert "samesite=strict" in lowered     # CSRF 1차 방어
+    assert f"path={REFRESH_PATH}" in lowered
+    assert f"max-age={7 * 24 * 3600}" in lowered   # REFRESH_TTL 7일 (SR15-1)
+    # 실제로 저장돼 이후 요청에 실린다
+    assert https_client.cookies.get(REFRESH_COOKIE)
+
+
+def test_refresh_쿠키는_auth_경로_밖으로_나가지_않는다(https_client):
+    """`Path` 를 좁혀 지도·추천 등 모든 요청에 refresh 가 따라다니지 않게 한다."""
+    _login(https_client)
+
+    outside = httpx.Request("GET", "https://testserver/api/v1/me/profile")
+    https_client.cookies.set_cookie_header(outside)
+    assert REFRESH_COOKIE not in outside.headers.get("cookie", "")
+
+    inside = httpx.Request("POST", "https://testserver/api/v1/auth/refresh")
+    https_client.cookies.set_cookie_header(inside)
+    assert REFRESH_COOKIE in inside.headers.get("cookie", "")
+
+
+def test_refresh는_쿠키로_동작하고_쿠키를_회전한다(https_client):
+    _login(https_client)
+    before = https_client.cookies.get(REFRESH_COOKIE)
+
+    # 본문 없이 — 쿠키만으로 인증된다
+    r = https_client.post("/api/v1/auth/refresh", headers=AJAX)
+    assert r.status_code == 200, r.text
+    assert "refresh_token" not in r.json()
+
+    after = https_client.cookies.get(REFRESH_COOKIE)
+    assert after and after != before, "회전하지 않으면 같은 값을 계속 재사용하게 된다"
+
+    # 새 access 는 실제로 쓸 수 있고, 회전된 쿠키로 또 갱신된다
+    assert https_client.get("/api/v1/me/profile",
+                            headers=_auth(r.json()["access_token"])).status_code in (200, 404)
+    assert https_client.post("/api/v1/auth/refresh", headers=AJAX).status_code == 200
+
+
+def test_쿠키_없이_refresh하면_401(https_client):
+    r = https_client.post("/api/v1/auth/refresh", headers=AJAX)
+    assert r.status_code == 401
+    assert r.json()["detail"]["code"] == "UNAUTHORIZED"
+
+
+def _forged_cookie(value: str) -> dict[str, str]:
+    """공격자가 임의의 값을 refresh 쿠키로 보내는 상황.
+
+    쿠키 저장소에 넣지 않고 헤더로 직접 싣는다 — 저장소를 거치면 로그인이 심어 둔
+    정상 쿠키와 **둘 다** 전송되어 무엇이 검증됐는지 알 수 없게 된다.
+    (`Cookie` 헤더가 이미 있으면 httpx 는 저장소 값을 덧붙이지 않는다.)
+    """
+    return {**AJAX, "Cookie": f"{REFRESH_COOKIE}={value}"}
+
+
+def test_무효한_refresh_쿠키는_401이면서_즉시_삭제된다(https_client):
+    """못 쓰는 쿠키를 남겨두면 사용자가 실패를 무한 반복한다."""
+    _login(https_client)
+
+    r = https_client.post("/api/v1/auth/refresh", headers=_forged_cookie("not-a-jwt"))
+    assert r.status_code == 401
+    assert "max-age=0" in r.headers["set-cookie"].lower()
+    # 삭제 헤더가 실제로 저장소의 쿠키를 지운다(= 속성이 발급 때와 일치한다)
+    assert https_client.cookies.get(REFRESH_COOKIE) is None
+
+
+def test_access_토큰을_refresh_쿠키에_넣으면_거부(https_client):
+    """토큰 종류 위조 차단 — access 를 쿠키에 심어 갱신 루프를 돌릴 수 없다."""
+    access = _login(https_client).json()["access_token"]
+
+    r = https_client.post("/api/v1/auth/refresh", headers=_forged_cookie(access))
     assert r.status_code == 401
 
 
-def test_refresh_로_새_access_발급(client):
-    client.post("/api/v1/auth/register", json={"email": "a@b.co", "password": PASSWORD})
-    tokens = client.post("/api/v1/auth/login",
-                         json={"email": "a@b.co", "password": PASSWORD}).json()
+def test_커스텀_헤더_없는_refresh는_거부(https_client):
+    """CSRF 2차 방어 — HTML 폼은 커스텀 헤더를 붙일 수 없다."""
+    _login(https_client)
 
-    r = client.post("/api/v1/auth/refresh",
-                    json={"refresh_token": tokens["refresh_token"]})
-    assert r.status_code == 200
-    assert client.get("/api/v1/me/profile",
-                      headers=_auth(r.json()["access_token"])).status_code in (200, 404)
+    r = https_client.post("/api/v1/auth/refresh")
+    assert r.status_code == 403
+    assert r.json()["detail"]["code"] == "CSRF_HEADER_REQUIRED"
+    # 거절이 로그아웃으로 이어지면 안 된다(로그아웃 CSRF 가 된다)
+    assert "set-cookie" not in r.headers
+    assert https_client.cookies.get(REFRESH_COOKIE)
+
+
+def test_커스텀_헤더_없는_logout도_거부(https_client):
+    _login(https_client)
+
+    assert https_client.post("/api/v1/auth/logout").status_code == 403
+    assert https_client.cookies.get(REFRESH_COOKIE)
+
+
+def test_logout이_쿠키를_만료시킨다(https_client):
+    _login(https_client)
+    assert https_client.cookies.get(REFRESH_COOKIE)
+
+    r = https_client.post("/api/v1/auth/logout", headers=AJAX)
+    assert r.status_code == 204
+    lowered = r.headers["set-cookie"].lower()
+    assert "max-age=0" in lowered
+    assert f"path={REFRESH_PATH}" in lowered
+    assert "httponly" in lowered and "secure" in lowered and "samesite=strict" in lowered
+
+    # 저장소에서 사라졌고, 더는 갱신되지 않는다
+    assert https_client.cookies.get(REFRESH_COOKIE) is None
+    assert https_client.post("/api/v1/auth/refresh", headers=AJAX).status_code == 401
+
+
+def test_refresh는_본문을_받지_않는다(https_client):
+    """본문 경로를 남겨두면 쿠키로 옮긴 의미가 없다 — 공격자는 편한 쪽을 고른다."""
+    _login(https_client)
+    stolen = https_client.cookies.get(REFRESH_COOKIE)
+    https_client.cookies.clear()
+
+    r = https_client.post("/api/v1/auth/refresh", headers=AJAX,
+                          json={"refresh_token": stolen})
+    assert r.status_code == 401, "본문에 실은 refresh 가 받아들여지면 안 된다"
 
 
 # ---------------------------------------------------------------------------

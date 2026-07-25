@@ -1,3 +1,4 @@
+/* 바텀시트 — 컨셉 규칙 4: 지도 위 UI 는 떠 있는 유리(blur)만. 불투명 패널로 지도를 덮지 않는다. */
 .sheet {
   position: absolute;
   left: 0;
@@ -5,45 +6,64 @@
   bottom: 0;
   display: flex;
   flex-direction: column;
-  background: var(--bg);
-  border-top: 1px solid var(--border);
-  border-radius: var(--radius) var(--radius) 0 0;
-  box-shadow: 0 -4px 16px rgba(0, 0, 0, .12);
+  border-radius: var(--r-sheet) var(--r-sheet) 0 0;
   z-index: 10;
   /* iOS 하단 홈 인디케이터 회피 */
   padding-bottom: env(safe-area-inset-bottom);
+
+  /* 반투명 재질 + blur — 지도가 은은하게 비쳐 보인다 */
+  background: var(--material);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  backdrop-filter: blur(20px) saturate(180%);
+  border-top: 0.5px solid var(--hairline);
+  /* 아주 옅은 그림자 한 겹 */
+  box-shadow: 0 -1px 12px rgba(0, 0, 0, 0.06);
+}
+
+/* blur 미지원 브라우저 — 불투명 배경으로 폴백(가독성 우선) */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .sheet {
+    background: var(--bg);
+  }
 }
 
 .sheet__handle {
   /* 48px 터치 영역 — 손가락으로 잡을 수 있어야 한다 */
   min-height: var(--sheet-handle);
-  padding: var(--sp-2) var(--sp-4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-2) var(--sp-4) 0;
   cursor: grab;
-  touch-action: none;         /* 브라우저 스크롤과 싸우지 않게 */
+  touch-action: none; /* 브라우저 스크롤과 싸우지 않게 */
   user-select: none;
   flex: 0 0 auto;
 }
 
-.sheet__handle:active { cursor: grabbing; }
+.sheet__handle:active {
+  cursor: grabbing;
+}
 
 .sheet__grip {
-  width: 40px;
-  height: 4px;
-  margin: 0 auto var(--sp-2);
-  border-radius: 2px;
-  background: var(--border);
+  width: 36px;
+  height: 5px;
+  border-radius: var(--r-pill);
+  background: var(--hairline-strong);
 }
 
 .sheet__title {
+  flex: 0 0 auto;
   margin: 0;
+  padding: var(--sp-1) var(--sp-4) var(--sp-3);
   font-size: var(--fs-title);
   font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
 .sheet__body {
   flex: 1 1 auto;
   overflow-y: auto;
-  overscroll-behavior: contain;   /* 시트 스크롤이 지도로 넘어가지 않게 */
+  overscroll-behavior: contain; /* 시트 스크롤이 지도로 넘어가지 않게 */
   padding: 0 var(--sp-4) var(--sp-4);
   -webkit-overflow-scrolling: touch;
 }
@@ -57,9 +77,14 @@
     height: 100% !important;
     border-radius: 0;
     border-top: none;
-    border-left: 1px solid var(--border);
+    border-left: 0.5px solid var(--hairline);
     box-shadow: none;
   }
-  .sheet__grip { display: none; }
-  .sheet__handle { cursor: default; }
+  .sheet__grip {
+    display: none;
+  }
+  .sheet__handle {
+    cursor: default;
+    min-height: var(--sp-4);
+  }
 }
