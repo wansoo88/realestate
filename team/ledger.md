@@ -45,3 +45,7 @@
 | 2026-07-25-29-arch | 2026-07-25 | re-arch | payload(005) | review-required | done | 004서 분리, 저장/복원, NULL 옛행 최소복원. re-review PASS | 추천 결과 핵심(why/why_not) 응답 복원 |
 | 2026-07-25-30-review | 2026-07-25 | re-review | INGEST-1/2+payload 재검증 | none | done | **INGEST-1/2 CLOSE**(CR-014), payload PASS. 390 passed. ⛔**3단계 완성판정 FAIL**: FE-1(로그인폼 없음)·FE-2(지도마커 0건) 미완 → re-fe 필요 |
 | 2026-07-25-31-fe | 2026-07-25 | re-fe | FE-1(로그인 화면)·FE-2(지도 마커/클러스터) | review-required | working | re-fe 증원. 3단계 완성 관문 |
+| 2026-07-25-KEY검증 | 2026-07-25 | re-pm | MOLIT 실호출 검증(PM 직접) | — | done | 운영 엔드포인트 강남 192건 파싱 성공. 코드 Dev(403)→운영 수정 필요. ★동(aptDong) 77~93% 발견 |
+| 2026-07-25-32-data | 2026-07-25 | re-data | 엔드포인트 운영 수정 + aptDong 파싱 | review-required | working | 실호출 검증됨. 동 파싱 추가 |
+| 2026-07-25-33-arch | 2026-07-25 | re-arch | trade.apt_dong 스키마(006) + erd §0 정정 | review-required | working | 동 정보 있음 반영 |
+| 2026-07-25-34-domain | 2026-07-25 | re-domain | F4 재설계: 실거래 동 직접(결측시 추정 폴백) | review-required | working | 좌표추정→실측 하이브리드. re-review 재검증 |
