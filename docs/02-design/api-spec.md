@@ -212,8 +212,18 @@
     { "rank": 1, "total_score": 82.4,
       "complex": { "id": 1024, "name": "○○아파트" },
       "unit_type": { "area_m2": 84.97, "type_name": "84A" },
-      "building": { "id": 88, "name": "101동", "confidence": 0.45,
-                    "basis": "estimated_from_location" },
+      "building": { "id": 88, "name": "101동", "confidence": 0.6,
+                    "basis": "listing_reported" },
+      "dong_valuation": {                    // F4 동별 실측(erd §0 정정)
+        "available": true, "method": "실측(aptDong)", "basis": "trade_measured",
+        "confidence": 0.85, "coverage_pct": 87.0, "period_months": 6,
+        "dongs": [ { "dong": "101", "vs_complex_pct": 5.2, "sample": 12,
+                     "median_ppm_krw": 16800000 },
+                   { "dong": "105", "vs_complex_pct": -4.1, "sample": 8,
+                     "median_ppm_krw": 15300000 } ]
+      },
+      // 동 정보/표본 부족 시: { "available": false, "method": "동정보없음"|"동표본부족",
+      //                       "confidence": 0.0, "reason": "...", "note": "좌표추정 폴백" }
       "est_price_krw": 1395000000,
       "timing_signal": "buy",
       "summary": "예산 8.5억 내, 전세가율 하락 구간 진입 전 매수 유리.",
@@ -238,7 +248,7 @@
 **응답 설계 원칙**
 1. `findings`와 `risks`를 **분리**해 항상 함께 반환 — 장점만 나열하면 G2 위반
 2. 모든 finding에 `evidence` + `confidence`
-3. `building.confidence`/`basis`로 **동 추천이 추정임을 구조적으로 노출**
+3. `dong_valuation.basis`/`confidence`로 **동별이 실측(trade_measured)인지 추정(listing_reported)인지 구조적으로 구분**. `building`은 특정 매물의 동 표기(호가 기준), `dong_valuation`은 단지 내 동별 실거래 편차(F4).
 4. `criteria_snapshot`으로 재현성 확보
 
 ### `GET /recommendations/{job_id}/stream` — SSE

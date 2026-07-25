@@ -193,6 +193,61 @@ def test_시세에이전트는_신고지연을_항상_경고한다():
     assert any("30일" in r.detail for r in f.risks)
 
 
+def _trades_with_dong(base_oku=8.0):
+    """101동(비쌈)·105동(쌈) 실거래. F4 동별 실측 검증용(예산 게이트 통과하게 저가)."""
+    hi = [TradeRow(contract_date=TODAY - dt.timedelta(days=15 * i),
+                   price_krw=int((base_oku + 0.6) * OKU), area_m2=84.97,
+                   floor=10, apt_dong="101") for i in range(4)]
+    lo = [TradeRow(contract_date=TODAY - dt.timedelta(days=15 * i + 7),
+                   price_krw=int((base_oku - 0.6) * OKU), area_m2=84.97,
+                   floor=10, apt_dong="105") for i in range(4)]
+    return hi + lo
+
+
+def _afford_within():
+    """예산 약 8.8억 — ask 8.0억 후보가 분석 단계까지 내려간다(기존 파이프라인 테스트와 동일)."""
+    from pathlib import Path
+    from app.domain.rules.loader import load_rules
+    rules = load_rules(Path(__file__).parent / "fixtures" / "tax_rules_test.yaml")
+    borrower = Borrower(cash_krw=300_000_000, annual_income_krw=200_000_000)
+    return compute_affordability(borrower, rules, prop=PropertyFacts(area_m2=84.0))
+
+
+def test_시세에이전트는_동별_실측을_근거에_싣는다():
+    """F4: aptDong 이 있으면 valuation-trader 가 동별 편차를 실측해 근거·문구에 싣는다."""
+    f = valuation_finding(_candidate(trades=_trades_with_dong()), TODAY)
+    assert "동" in f.rationale                                   # 문구에 동별 언급
+    assert any(e.claim and "실측" in e.claim for e in f.evidence)  # 실측 근거
+
+
+def test_파이프라인_아이템에_동별_실측이_담긴다():
+    from app.agents.orchestrator import run_mvp_pipeline
+
+    cand = _candidate(ask_oku=8.0, trades=_trades_with_dong())
+    ctx = AnalysisContext(affordability=_afford_within(), candidates=[cand], as_of=TODAY)
+    out = run_mvp_pipeline(ctx, llm=None)
+    assert out["items"], f"후보가 전부 제외됨: {out['excluded']}"
+    dv = out["items"][0]["dong_valuation"]
+    assert dv is not None and dv["available"] is True
+    assert dv["basis"] == "trade_measured"
+    assert dv["confidence"] == 0.85                             # 실측 → 높은 신뢰
+    dongs = {d["dong"]: d for d in dv["dongs"]}
+    assert dongs["101"]["vs_complex_pct"] > 0 > dongs["105"]["vs_complex_pct"]
+
+
+def test_동정보없으면_파이프라인이_폴백을_명시한다():
+    from app.agents.orchestrator import run_mvp_pipeline
+
+    cand = _candidate(ask_oku=8.0, trades=_trades(price_oku=8.0))  # apt_dong 전부 None
+    ctx = AnalysisContext(affordability=_afford_within(), candidates=[cand], as_of=TODAY)
+    out = run_mvp_pipeline(ctx, llm=None)
+    assert out["items"], f"후보가 전부 제외됨: {out['excluded']}"
+    dv = out["items"][0]["dong_valuation"]
+    assert dv["available"] is False
+    assert dv["method"] == "동정보없음"
+    assert dv["confidence"] == 0.0                              # 폴백 — 지어내지 않음
+
+
 def test_입지데이터가_없으면_지어내지_않는다():
     from app.agents.orchestrator import location_finding
     f = location_finding(_candidate(), TODAY)   # candidate.location 이 None

@@ -648,7 +648,8 @@ class PostgisRepository:
         ]
 
     _TRADES_SQL = text("""
-        SELECT tr.contract_date, tr.price_krw, tr.area_m2, tr.floor, tr.is_cancelled
+        SELECT tr.contract_date, tr.price_krw, tr.area_m2, tr.floor,
+               tr.apt_dong, tr.is_cancelled
         FROM trade tr
         WHERE tr.complex_id = :complex_id
         ORDER BY tr.contract_date DESC
@@ -668,6 +669,7 @@ class PostgisRepository:
                 price_krw=row.price_krw,
                 area_m2=float(row.area_m2) if row.area_m2 is not None else 0.0,
                 floor=row.floor,
+                apt_dong=row.apt_dong,      # F4 동별 실측(운영 API aptDong)
                 is_cancelled=row.is_cancelled,
             )
             for row in rows

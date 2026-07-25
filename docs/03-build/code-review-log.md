@@ -863,3 +863,47 @@ is_cancelled 갱신** 세 축을 한 테스트에서 못박아, 누가 InMemory 
 ② 재적재 보존 회귀 테스트)이 모두 충족됐다. 두 로더가 apt_dong 을 동일하게 다루며(불변식4 회복),
 CR-015에서 PASS 판정했던 불변식 1·2·3·5(자연키 미포함·INSERT/UPDATE 정합·정규화·파티션 전파)는
 이번 수정으로 영향받지 않는다. **apt_dong/동 실측 기능 변경 전체가 이제 PASS.**
+
+---
+
+## CR-017 · 2026-07-25 · F4 동별 실측(dong_effect·orchestrator·postgis) (code-reviewer, herdr re-review 대행)
+
+**판정: PASS.** apt_dong 을 F4 밸류에이션에 연결한 변경 전체가 정확성·설계·테스트·G2 관점에서 견고하다.
+scope: F4 동별 실측(dong_effect·orchestrator·postgis) · reviewer: code-reviewer (herdr re-review 대행 — 독립 감사)
+회귀: `tests/test_valuation.py`+`tests/test_agents.py` 대상 통과, 전체 **352 passed · 50 skipped(needs_db)** 재현(exit 0).
+
+> PM 직접 구현이므로 문서 신뢰 대신 **함수를 직접 호출·정독해 반례를 찾았다.** 아래 7개 검증축 전부에서
+> 지어낸 값·off-by-one·창 불일치·나눗셈 결함을 찾지 못했다.
+
+### 반례 탐색 결과 — 7개 검증축 전부 PASS
+
+| # | 검증축 | 결과 | 근거(파일:라인) |
+|---|---|---|---|
+| 1 | ₩/㎡ 정규화(면적 구성편차 보정) | ✅ | `stats.py:128,134` 이 절대가 아니라 `price_krw/area_m2` 로 overall·동별 모두 계산. `test_동별은_면적당가격으로_구성편차를_보정한다` 가 면적 120 vs 60 이지만 ₩/㎡ 동일 → 두 동 ratio≈1.0(abs 0.01) 로 착시 제거를 **실제로** 검증 |
+| 1b | area==0 나눗셈 방어 | ✅ | `stats.py:120-121` elig 필터에 `if t.area_m2 > 0`. overall_ppm·by_dong 모두 elig 만 사용 → 0-나눗셈 불가. (전용 테스트는 없으나 구조적으로 차단) |
+| 2 | 기준(분모) 선택 | ✅ | `overall_ppm` = **단지 전체** elig(동 결측 포함)의 ₩/㎡ 중위(`stats.py:128`). 배율 의미 "이 동 vs 단지 평균" 과 일치. `coverage = with_dong/elig`(`stats.py:129-130`) 정확 |
+| 3 | 표본 임계값 경계 | ✅ | 전체 `len(elig) < MIN_SAMPLE(5)`(`:122`) → 5 포함. 동별 `len(ppms) < min_sample_dong(3)`(`:138`) → **정확히 3 포함**. `test_동별_편차를_실측한다`(동당 3건)·`test_동_표본이_부족한_동은_빠진다`(총 5=경계, 동 4/1)로 양 경계 실검증. off-by-one 없음 |
+| 4 | method 분기 | ✅ | 실측(aptDong)=stats_out 有 / 표본부족=elig<5 / 동정보없음=stats_out 空&coverage==0.0 / 동표본부족=stats_out 空&coverage!=0.0. coverage==0.0 은 with_dong 空일 때 `0/n=0.0` 정확값이라 부동소수 문제 없음(`:148-152`) |
+| 5 | 지어내지 않기(G2) | ✅ | `models.py:126-127` available=False → `to_evidence()==[]`. `_dong_valuation_dict` 폴백 confidence=**0.0**(`orchestrator.py`), 실측만 0.85. 폴백은 dongs 데이터 미노출·사유만. 추정을 실측처럼 내놓는 경로 없음. `test_동정보가_없으면_동정보없음_폴백`·`test_모든_동이_표본부족이면_폴백을_알린다`(to_evidence==[]) 검증 |
+| 6 | 오케스트레이터 정합 | ✅ | `_dong_valuation_dict` 가 None(실거래부족)/False(폴백)/True(실측) 3경우 모두 처리. `valuation_finding`(`:172`)·pipeline(`:477`) 둘 다 `months=band.period_months` **동일 창**. target_floor 는 period 산정에 무관(ladder 는 floor 무필터)이라 두 band 의 period_months 동일 → 창 불일치 없음 |
+| 7 | 정렬 | ✅ | `stats.py:160` `sort(key=ratio, reverse=True)` → 비싼 동→싼 동. `dongs[0]`=대표(top). `test_동별_편차를_실측한다` 가 `dv.dongs[0].dong=="101"`(비싼 동) 확인 |
+
+### 문서 정정 확인
+`03-valuation-trader.md`·`api-spec.md` 가 초안("실거래에 동 없음→좌표추정만")을 운영 API aptDong 77~93%
+실측 1순위로 정정하고, **basis(trade_measured vs listing_reported)·confidence 로 실측/추정 구분**을 명시.
+`stats.py:11-13` 규칙4 docstring 도 동일하게 정정됨. 문서-코드 일치.
+
+### 비차단 관찰(코멘트 — pass 유지)
+
+| ID | 내용 |
+|---|---|
+| CR17-1 | **중복 계산**: pipeline(`orchestrator.py:475,477`)이 `fair_price_band`+`dong_effect` 를 `valuation_finding` 내부(`:151,172`)와 별개로 다시 계산 — 후보당 각 2회. 입력 동일이라 결과 일치(정확성 무영향), 기존 I-13 중복 패턴의 확장. 성능 사안 |
+| CR17-2 | **coverage 반올림 극단 왜곡**: with_dong 이 비어있지 않으나 극단 편중(동 비율 <0.05%)이면 `round(...,1)==0.0` 이 되어 method 가 "동표본부족" 대신 "동정보없음"으로 오라벨될 수 있음. 운영 API 77~93% 에선 사실상 발생 불가이고, **어느 쪽이든 available=False·confidence 0.0·evidence [] 로 동일**해 값 조작·G2 위반 없음(사유 문구만 부정확). |
+| CR17-3 | area==0·overall==4(표본부족) 등 방어 분기에 전용 테스트는 없으나 로직이 단순·명시적이라 회귀 위험 낮음 |
+
+### 판정
+**PASS.** dong_effect 가 ₩/㎡ 로 면적 구성편차를 보정하고, 분모를 단지 전체로 두어 배율 의미가 정확하며,
+표본 경계(전체 5·동별 3)에 off-by-one 이 없고, 실측/폴백을 basis·confidence 로 구조적으로 구분해 G2 를
+지킨다. 오케스트레이터가 None/폴백/실측 3경우를 모두 처리하고 dong_effect 를 밴드와 동일 창으로 부른다.
+테스트 10건(단위 7·통합 3)이 핵심 주장을 실제로 검증하며 전체 회귀 352 passed·50 skipped 재현. 비차단 3건은
+성능·문구 사안으로 게이트를 막지 않는다.

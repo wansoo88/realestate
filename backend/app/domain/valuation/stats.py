@@ -8,8 +8,9 @@
 2. **표본이 5건 미만이면 밴드를 만들지 않는다.** 기간을 넓혀보고, 그래도 부족하면
    `available=False` 로 정직하게 돌려준다. 숫자를 지어내지 않는다.
 3. **기간을 넓혔으면 그 사실을 표시한다.** 6개월 통계와 36개월 통계는 의미가 다르다.
-4. **동(棟)별 가격 차이는 여기서 계산하지 않는다.** 실거래에 동 정보가 없다
-   (docs/02-design/erd.md §0). 층·타입까지가 실거래로 말할 수 있는 한계다.
+4. **동(棟)별 가격 차이는 실측한다(dong_effect).** 운영 MOLIT API 가 aptDong 을 77~93%
+   제공함이 확인돼(erd §0 정정, 2026-07-25) 좌표추정이 아니라 실거래로 직접 측정한다.
+   단, 동 표본이 MIN_SAMPLE_DONG 미만이거나 동 정보가 없으면 실측하지 않고 폴백을 알린다.
 """
 from __future__ import annotations
 
@@ -20,7 +21,10 @@ from collections.abc import Iterable, Sequence
 from app.domain.valuation.models import (
     FLOOR_BANDS,
     MIN_SAMPLE,
+    MIN_SAMPLE_DONG,
     PERIOD_LADDER,
+    DongStat,
+    DongValuation,
     Liquidity,
     ListingRow,
     PriceBand,
@@ -94,6 +98,71 @@ def floor_effect(trades: Sequence[TradeRow]) -> dict[str, float]:
             continue
         out[name] = round(statistics.median(prices) / overall, 4)
     return out
+
+
+def dong_effect(
+    trades: Iterable[TradeRow],
+    *,
+    area_m2: float | None = None,
+    months: int | None = None,
+    as_of: dt.date | None = None,
+    min_sample_dong: int = MIN_SAMPLE_DONG,
+) -> DongValuation:
+    """동(棟)별 가격 편차를 ₩/㎡ 중위로 실측한다(F4).
+
+    면적 구성 차이를 보정하려고 절대가가 아니라 ₩/㎡ 를 쓴다: 큰 평형이 많은 동이
+    입지와 무관하게 비싸 보이는 착시를 없앤다. 기준(분모)은 **단지 전체** 거래의
+    ₩/㎡ 중위이므로 각 동의 배율은 "이 동 vs 단지 평균" 을 뜻한다.
+
+    동 표본이 min_sample_dong 미만인 동은 결과에서 빼고, 실측 가능한 동이 하나도
+    없으면 available=False 로 폴백(좌표추정)을 알린다 — 숫자를 지어내지 않는다.
+    """
+    elig = [t for t in eligible_trades(trades, area_m2=area_m2, months=months,
+                                       as_of=as_of) if t.area_m2 > 0]
+    if len(elig) < MIN_SAMPLE:
+        return DongValuation(
+            available=False, method="표본부족", period_months=months,
+            reason=f"실거래 표본 {len(elig)}건으로 최소 {MIN_SAMPLE}건에 미달합니다.",
+        )
+
+    overall_ppm = statistics.median(t.price_krw / t.area_m2 for t in elig)
+    with_dong = [t for t in elig if t.apt_dong]
+    coverage = round(len(with_dong) / len(elig) * 100, 1)
+
+    by_dong: dict[str, list[float]] = {}
+    for t in with_dong:
+        by_dong.setdefault(t.apt_dong, []).append(t.price_krw / t.area_m2)
+
+    stats_out: list[DongStat] = []
+    for dong, ppms in by_dong.items():
+        if len(ppms) < min_sample_dong:
+            continue
+        m = statistics.median(ppms)
+        stats_out.append(DongStat(
+            dong=dong,
+            ratio=round(m / overall_ppm, 4),
+            sample_size=len(ppms),
+            median_ppm_krw=int(round(m)),
+        ))
+
+    if not stats_out:
+        method = "동정보없음" if coverage == 0.0 else "동표본부족"
+        reason = ("실거래에 동 정보가 없습니다(좌표추정으로 폴백)."
+                  if coverage == 0.0 else
+                  f"동별 표본이 모두 최소 {min_sample_dong}건 미만입니다(동 정보 {coverage}%).")
+        return DongValuation(
+            available=False, method=method,
+            overall_median_ppm_krw=int(round(overall_ppm)),
+            coverage_pct=coverage, period_months=months, reason=reason,
+        )
+
+    # 비싼 동 → 싼 동 순(대표 동을 근거로 뽑기 쉽게).
+    stats_out.sort(key=lambda s: s.ratio, reverse=True)
+    return DongValuation(
+        available=True, method="실측(aptDong)",
+        overall_median_ppm_krw=int(round(overall_ppm)),
+        dongs=tuple(stats_out), coverage_pct=coverage, period_months=months,
+    )
 
 
 def fair_price_band(

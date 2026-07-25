@@ -34,8 +34,13 @@ from app.domain.affordability.models import AffordabilityResult
 from app.domain.listings.dedup import ListingGroup, trust_score
 from app.domain.location.analysis import evaluate_location
 from app.domain.location.models import LocationAssessment, LocationFacts
-from app.domain.valuation.models import ListingRow, TradeRow
-from app.domain.valuation.stats import ask_gap_pct, fair_price_band, liquidity
+from app.domain.valuation.models import DongValuation, ListingRow, TradeRow
+from app.domain.valuation.stats import (
+    ask_gap_pct,
+    dong_effect,
+    fair_price_band,
+    liquidity,
+)
 
 logger = logging.getLogger("agents")
 
@@ -163,6 +168,10 @@ def valuation_finding(candidate: Candidate, as_of: dt.date) -> Finding:
     else:
         verdict = "적정가 범위"
 
+    # F4: 동(棟)별 편차를 실거래 aptDong 으로 실측한다(같은 기간 창을 쓴다).
+    dong = dong_effect(candidate.trades, area_m2=candidate.area_m2,
+                       months=band.period_months, as_of=as_of)
+
     risks = [DELAY_RISK]
     if band.expanded:
         risks.append(Risk("low",
@@ -173,22 +182,67 @@ def valuation_finding(candidate: Candidate, as_of: dt.date) -> Finding:
     # 점수: 갭이 작을수록 좋다(0% 기준). ±20% 를 0점 경계로 본다.
     score = max(0.0, min(100.0, 100.0 - abs(gap) * 5)) if gap is not None else None
 
+    rationale = (
+        f"동일 타입 {band.sample_size}건 중위 {band.median_krw:,}원 대비 "
+        f"호가 {ask:,}원은 {gap:+.1f}% 입니다. 환금성은 {liq.grade}."
+    )
+    evidence = band.to_evidence(as_of=as_of) and [
+        Evidence(claim=f"중위 실거래가 {band.median_krw:,}원",
+                 source="국토교통부 실거래가",
+                 as_of=as_of.isoformat(), data_rows=band.sample_size)
+    ]
+    # 동별 실측이 있으면 근거와 문구에 싣는다. 실측이 아니면(폴백) 지어내지 않는다.
+    if dong.available:
+        top = dong.dongs[0]
+        rationale += (f" 동별로는 {top.dong}동이 단지 평균 대비 {top.vs_complex_pct:+.1f}%"
+                      f"(실거래 {top.sample_size}건, 동 정보 {dong.coverage_pct}%)입니다.")
+        evidence = (evidence or []) + [
+            Evidence(claim=e["claim"], source=e["source"], as_of=e["as_of"],
+                     data_rows=e["data_rows"])
+            for e in dong.to_evidence(as_of=as_of)
+        ]
+
     return validate_finding(Finding(
         agent_id="valuation-trader",
         verdict=verdict,
-        rationale=(
-            f"동일 타입 {band.sample_size}건 중위 {band.median_krw:,}원 대비 "
-            f"호가 {ask:,}원은 {gap:+.1f}% 입니다. 환금성은 {liq.grade}."
-        ),
-        evidence=band.to_evidence(as_of=as_of) and [
-            Evidence(claim=f"중위 실거래가 {band.median_krw:,}원",
-                     source="국토교통부 실거래가",
-                     as_of=as_of.isoformat(), data_rows=band.sample_size)
-        ],
+        rationale=rationale,
+        evidence=evidence,
         risks=risks,
         score=score,
         confidence=0.85,
     ))
+
+
+def _dong_valuation_dict(d: DongValuation | None) -> dict[str, Any] | None:
+    """F4 동별 실측을 추천 아이템 형태로 직렬화.
+
+    실측(available)이면 basis=trade_measured·높은 신뢰로, 폴백이면 사유를 명시한다.
+    실거래 자체가 부족해 valuation 이 나오지 않은 경우(d is None)는 필드를 비운다.
+    """
+    if d is None:
+        return None
+    if not d.available:
+        return {
+            "available": False,
+            "method": d.method,          # 표본부족 | 동표본부족 | 동정보없음
+            "confidence": 0.0,
+            "coverage_pct": d.coverage_pct,
+            "reason": d.reason,
+            "note": "동별 판단은 좌표추정 폴백 대상입니다.",
+        }
+    return {
+        "available": True,
+        "method": d.method,              # 실측(aptDong)
+        "basis": "trade_measured",
+        "confidence": 0.85,              # 실거래 실측 → 높은 신뢰
+        "coverage_pct": d.coverage_pct,
+        "period_months": d.period_months,
+        "dongs": [
+            {"dong": s.dong, "vs_complex_pct": s.vs_complex_pct,
+             "sample": s.sample_size, "median_ppm_krw": s.median_ppm_krw}
+            for s in d.dongs
+        ],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -396,9 +450,12 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
 
         valuation = valuation_finding(cand, ctx.as_of)
         median = None
+        dong_val = None
         if valuation.evidence and valuation.evidence[0].data_rows:
             band = fair_price_band(cand.trades, area_m2=cand.area_m2, as_of=ctx.as_of)
             median = band.median_krw
+            dong_val = dong_effect(cand.trades, area_m2=cand.area_m2,
+                                   months=band.period_months, as_of=ctx.as_of)
 
         location = (_assessment_to_finding(loc_assess) if loc_assess is not None
                     else insufficient("location-analyst",
@@ -417,9 +474,12 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
         items.append({
             "complex": {"id": cand.complex_id, "name": cand.complex_name},
             "unit_type": {"area_m2": cand.area_m2},
-            # 동 추천은 호가에 표기된 경우만. 추정이면 confidence 를 낮게 실어 보낸다.
+            # 특정 매물의 동은 호가 표기 기준(추정) — confidence 를 낮게 실어 보낸다.
             "building": ({"id": rep.building_id, "confidence": 0.6,
                           "basis": "listing_reported"} if rep.building_id else None),
+            # F4 동별 가치 차이: aptDong 실거래 실측(basis=trade_measured, 높은 신뢰)
+            # 이거나, 표본/동정보 부족 시 폴백을 명시한다. 없는 걸 지어내지 않는다.
+            "dong_valuation": _dong_valuation_dict(dong_val),
             "ask_price_krw": rep.ask_price_krw,
             "total_score": round(total, 1),
             # MVP 에는 타이밍 분석가가 없다. 없는 기능을 있는 척하지 않는다.

@@ -922,3 +922,90 @@ conf 를 파싱해 `add_header` 를 쓰는 **모든** 블록이 4종을 갖췄�
 하드코딩·로그 유출·미암호화 전송 없음. 엔드포인트 전환은 HTTPS→HTTPS 로 보안 회귀 없음.
 fail 조건(인증·인가 결함 / 인젝션 / 비밀정보 하드코딩 / 민감정보 로그노출 / 미암호화 전송)
 어느 것도 해당하지 않는다.
+
+---
+
+## SR-014 · 2026-07-25 · F4 동별 실측 — valuation 소비 계층 (herdr re-review 대행)
+
+**판정: PASS**
+검증자: `security-reviewer` (herdr re-review 대행 · 독립 감사)
+범위: SR-013(수집·스키마 계층)이 넣은 `trade.apt_dong` 을 **F4 밸류에이션에 연결**하는 변경.
+대상: `backend/app/domain/valuation/{models,stats}.py`, `backend/app/agents/orchestrator.py`,
+`backend/app/repositories/postgis.py`(`_TRADES_SQL`), `backend/tests/{test_valuation,test_agents}.py`,
+`docs/02-design/{agents/03-valuation-trader.md,api-spec.md}`.
+회귀: 전체 **352 passed · 50 skipped**(로컬 DB 부재 skip) 직접 재현 — 지시서 기대치와 일치.
+
+> SR-013 은 apt_dong 의 **저장 경로**(loader upsert·마이그레이션·정규화)를 감사해 PASS 했다.
+> 이번 SR-014 는 그 값을 **읽어 F4 동별 ₩/㎡ 실측으로 소비**하는 계층(`dong_effect`,
+> `DongValuation`, orchestrator 배선, `_TRADES_SQL` SELECT 확장)이 대상이다. 341→352 passed(+11).
+
+### 지시된 5개 점검 항목 결과
+
+| # | 항목 | 결과 | 근거 |
+|---|---|:--:|---|
+| 1 | SQL 인젝션 (`_TRADES_SQL` apt_dong 추가) | PASS | §1 |
+| 2 | 민감정보 분리 (SR4-2 계열) | PASS | §2 |
+| 3 | G2 근거감사 (실측/추정 basis 구분) | PASS | §3 |
+| 4 | 비밀정보 하드코딩 | PASS | §4 |
+| 5 | 출력 안전 (동 값 XSS 전방관찰) | 관찰 | §5 |
+
+### §1 SQL 인젝션 — PASS
+- `_TRADES_SQL`(postgis.py:650-657)은 **정적 `text()` SELECT**. 이번 변경은 SELECT 컬럼 목록에
+  식별자 `tr.apt_dong` 을 추가한 것뿐 — **사용자 입력이 아니다**. WHERE·LIMIT 은 그대로
+  `:complex_id` · `CAST(:limit AS int)` **named bind** 유지.
+- 실행부(postgis.py:662-665)는 `conn.execute(self._TRADES_SQL, {"complex_id": complex_id,
+  "limit": _TRADE_HISTORY_LIMIT})` — dict 파라미터 바인드. `complex_id` 는 호출자 int,
+  `_TRADE_HISTORY_LIMIT` 은 상수. f-string/`%`/`.format`/`+` 로 SQL 에 값을 끼워넣는 코드 0건.
+- 새 SELECT 결과 `row.apt_dong` 은 `TradeRow(apt_dong=row.apt_dong)` 로 담기며, 이후
+  `dong_effect` 에서 **딕셔너리 키·통계 입력**으로만 쓰인다(stats.py:129-134). SQL 재구성 없음.
+- (SR-013 에서 이미 확인한) 저장 경로 UPDATE `apt_dong = COALESCE(:apt_dong, apt_dong)` ·
+  INSERT `:apt_dong` · 마이그레이션 006 정적 DDL 은 이번 diff 에서 불변. **SQLi 표면 없음.**
+
+### §2 민감정보 분리 (SR4-2 계열) — PASS
+- **apt_dong · ₩/㎡ · 동별 배율은 공개 실거래(시장) 데이터** — 사용자 자산/소득/대출이 아니다.
+  맞다. `dong_effect` 입력은 `TradeRow`(MOLIT 실거래)뿐이고 산출값(`ratio`·`median_ppm_krw`·
+  `vs_complex_pct`·`coverage_pct`)은 전부 거래가에서 파생된다. 사용자 원본이 섞일 소스가 없다.
+- LLM 으로 가는 것은 `valuation_finding` 의 rationale/evidence(orchestrator.py:171-203).
+  추가된 문구·근거는 `band.median_krw`(중위 실거래가)·`ask`(=`rep.ask_price_krw` 호가, 공개)·
+  `top.dong`·`top.vs_complex_pct`·`top.sample_size`·`dong.coverage_pct` 뿐 — **전부 시장 데이터**.
+  자산금액이 rationale/evidence 에 들어갈 경로가 구조적으로 없다.
+- `_dong_valuation_dict`(orchestrator.py:206-243)의 출력은 응답 `items[i]["dong_valuation"]` 으로,
+  LLM 프롬프트가 아니라 사용자 응답 JSON 이다. 담기는 값도 동명·배율·표본·₩/㎡·coverage 로 시장 데이터.
+- 자산유출 방어 회귀 유지: `portfolio_summary` 의 `_derive_forbidden`(fail-loud) +
+  `assert_no_secrets`(tripwire) 미변경(orchestrator.py:342-354). **`test_파이프라인_프롬프트에_
+  자산금액이_없다` 포함 352 passed** 재현 — F4 추가가 finding 에 파생값만 싣는 구조를 깨지 않았다.
+
+### §3 G2 근거감사 (실측/추정 구분) — PASS
+- **폴백을 실측으로 둔갑시키지 않는다**(구조적 구분):
+  - `dong_effect`(stats.py)는 전체 표본 < `MIN_SAMPLE`(5) → `available=False, method="표본부족"`;
+    모든 동 표본 < `MIN_SAMPLE_DONG`(3) → `available=False, method="동표본부족"`;
+    coverage 0% → `method="동정보없음"`. 미달 동은 `dongs` 에서 **아예 빠진다**(숫자 미창작).
+  - `DongValuation.to_evidence`(models.py:238-250)는 `not available` 이면 **`[]`**.
+  - `_dong_valuation_dict`: `not available` 이면 `confidence=0.0` + `basis` 키 없음 + `reason`/
+    `note`("좌표추정 폴백")만; `available` 이면 `basis="trade_measured"` + `confidence=0.85`.
+  - `valuation_finding` 은 `if dong.available` 일 때만 rationale·evidence 에 동을 싣는다
+    (orchestrator.py:186-197). 폴백 시 문구·근거에 동 언급 자체가 없다.
+- 실측 evidence 는 `basis="trade_measured"`(models.py:249)로 좌표추정(`estimated_from_location`/
+  `listing_reported`)과 명시 구분. `test_동정보없으면_파이프라인이_폴백을_명시한다`
+  (available=False·method="동정보없음"·confidence=0.0)와 `test_파이프라인_아이템에_동별_실측이_
+  담긴다`(basis=trade_measured·confidence=0.85)가 양방향을 고정. **실측/추정이 basis 로 구조 구분됨.**
+
+### §4 비밀정보 하드코딩 — PASS
+- diff 전수 확인: API 키·serviceKey·비밀번호·토큰 **하드코딩 0건**. 코드 변경은 통계 로직·직렬화·
+  SELECT 컬럼·테스트뿐. `frontend/package-lock.json` 증분은 dev 테스트 의존성(@testing-library·
+  jsdom) 메타데이터로 자격증명 없음.
+
+### §5 출력 안전 (XSS 전방관찰) — 관찰(비차단)
+- `apt_dong` 원본('청담(103)' 등 MOLIT 자유문자열)이 응답 JSON(`dong_valuation.dongs[].dong`,
+  evidence `claim`, rationale 문자열)에 그대로 실린다. 값의 출처가 외부 API 라 임의 문자를 담을 수 있다.
+- **이번 diff 는 프론트 렌더 코드를 포함하지 않는다.** React 는 기본 이스케이프하므로 정상 렌더 경로는
+  안전하나, 향후 `dangerouslySetInnerHTML`·비-React 렌더(리포트 PDF/이메일 등)에서 이 값을 쓰면
+  XSS 표면이 된다. SR-013 §비차단관찰과 동일한 **전방관찰**로만 기록(이번 판정 결격 아님).
+
+### 판정
+**PASS.** `_TRADES_SQL` 은 정적 SELECT + named bind 유지(SQLi 없음), F4 동별 값은 공개 시장
+데이터라 자산유출과 무관하며 finding 파생값 구조·자산유출 tripwire 회귀 유지(SR4-2 무손상),
+실측/폴백이 `available`/`basis`/`confidence` 로 구조적으로 구분되어 추정을 실측처럼 내놓지 않고
+(G2), 비밀정보 하드코딩·민감정보 로그노출·미암호화 전송 없음. fail 조건(인증·인가 결함 / 인젝션 /
+비밀정보 하드코딩 / 민감정보 로그노출 / 미암호화 전송) 어느 것도 해당하지 않는다.
+전방관찰 1건(동 값 프론트 렌더 XSS)은 프론트 구현 시 이스케이프 확인 권고로 승계한다.

@@ -1,22 +1,22 @@
 {
   "code_review": {
     "status": "passed",
-    "id": "CR-016",
+    "id": "CR-017",
     "date": "2026-07-25",
-    "at": "2026-07-25T11:18:57Z",
-    "scope": "apt_dong/동 실측 기능 — APTDONG-1 수정 재검증 (loader InMemory COALESCE 동등화 + 회귀 테스트)",
-    "reviewer": "code-reviewer (herdr re-review 대행 — 독립 감사)",
-    "notes": "CR-015 FAIL 사유 APTDONG-1 해소. InMemoryTradeLoader.load update 경로가 새 apt_dong 이 None 이면 기존값 보존(loader.py:130-139)하여 PostGIS COALESCE(:apt_dong, apt_dong)(loader.py:244, 미변경)와 동일 규칙. 독립 재현으로 CR-015 원 반례('103'→결측·해제 재유입 시 '103' 보존) 포함 6종 경계(결측→보존/신규값→최신/뒤늦게 채움/양쪽 결측/멱등/해제후 복원) 전부 정상. is_cancelled 최신 갱신되어 INGEST-2 무손상. 회귀 테스트 test_동은_결측_재유입에도_보존된다 추가. 불변식1·2·3·5는 이번 수정에 무영향. 회귀 342 passed·50 skipped(needs_db, +1).",
+    "at": "2026-07-25T13:40:00Z",
+    "scope": "F4 동별 실측(dong_effect·orchestrator·postgis)",
+    "reviewer": "code-reviewer (herdr re-review 대행)",
+    "notes": "apt_dong 을 F4 밸류에이션에 연결(동별 ₩/㎡ 실측 dong_effect + confidence 실측/폴백 구분). 반례 탐색 7축 전부 PASS: (1)절대가 아닌 price_krw/area_m2 정규화로 면적구성편차 보정, area_m2>0 필터로 0-나눗셈 차단(stats.py:120-121,128,134). (2)분모=단지전체 elig(동결측 포함) ₩/㎡ 중위, coverage=with_dong/elig 정확. (3)경계 off-by-one 없음: 전체 <5, 동별 <3 → 정확히 3 포함, 테스트가 3·5 경계 실검증. (4)method 4분기 정확, coverage==0.0 은 0/n=0.0 정확값이라 부동소수 문제 없음. (5)G2: available=False→to_evidence()==[], 폴백 confidence=0.0, 추정을 실측으로 내놓는 경로 없음. (6)오케스트레이터 _dong_valuation_dict 가 None/폴백/실측 3경우 처리, valuation_finding·pipeline 둘 다 months=band.period_months 동일창(target_floor 는 period 무관). (7)ratio desc 정렬로 top 대표. 문서(03-valuation-trader.md·api-spec.md·stats.py 규칙4 docstring) 정정 일치. 회귀 352 passed·50 skipped(needs_db) exit 0 재현. 비차단 3건(CR17-1 중복계산 성능·CR17-2 coverage 반올림 극단오라벨 무해·CR17-3 방어분기 전용테스트 부재) — 게이트 무차단.",
     "log": "docs/03-build/code-review-log.md"
   },
   "security_review": {
     "status": "passed",
-    "id": "SR-013",
+    "id": "SR-014",
     "at": "2026-07-25T00:00:00+09:00",
     "date": "2026-07-25",
-    "scope": "apt_dong/동 실측 + MOLIT 운영 엔드포인트 전환",
+    "scope": "F4 동별 실측 — valuation 소비 계층 (trade.apt_dong → dong_effect/valuation)",
     "reviewer": "security-reviewer (herdr re-review 대행)",
-    "notes": "trade.apt_dong 추가 + Dev→운영 엔드포인트 전환 독립 감사. SQLi(named bind·정적 DDL 006)·G2(실측/좌표추정 confidence 구분, 추정 확정치화 없음)·INGEST-2(apt_dong 자연키 미포함·is_cancelled 제외 유지)·비밀정보(serviceKey env 주입, 하드코딩 0)·로그(apt_dong 미기록, 운영경로 failures 미저장)·엔드포인트(HTTPS→HTTPS) 전부 통과. 341 passed·50 skipped 재현. 비차단 권고 2건(runner httpx 예외 URL serviceKey 마스킹·apt_dong 프론트 렌더 XSS 전방관찰).",
+    "notes": "SR-013(저장 계층) 후속 — apt_dong 을 F4 밸류에이션에 연결하는 diff 독립 감사. ①SQLi: _TRADES_SQL 은 정적 SELECT, apt_dong 은 컬럼 식별자(사용자입력 아님), :complex_id·CAST(:limit AS int) named bind 유지, dict 파라미터 실행 — 인젝션 표면 없음. ②민감정보(SR4-2): apt_dong·₩/㎡·동별 배율은 공개 시장데이터로 자산 아님. valuation_finding rationale/evidence 는 median_krw·ask(호가)·동통계 등 시장데이터만, _dong_valuation_dict 은 응답 items(프롬프트 아님). _derive_forbidden+assert_no_secrets 회귀 유지, test_파이프라인_프롬프트에_자산금액이_없다 통과. ③G2: available=False 시 confidence=0.0·evidence []·basis 키 없음·좌표추정 폴백 명시, available 시 basis=trade_measured·0.85 — 실측/추정 구조 구분, 폴백 미둔갑. ④비밀정보 하드코딩 0. ⑤전방관찰: 동 원본문자열 응답 JSON 실림, React 기본 이스케이프(diff 밖). 회귀 352 passed·50 skipped 직접 재현. 비차단 전방관찰 1건 승계.",
     "log": "docs/03-build/security-review-log.md"
   },
   "open_findings": [

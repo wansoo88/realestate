@@ -5,7 +5,7 @@ import datetime as dt
 from dataclasses import dataclass, field
 from typing import Any
 
-#: 층대 구분. 실거래에 동 정보가 없으므로 층은 우리가 쓸 수 있는 몇 안 되는 축이다.
+#: 층대 구분. 실거래로 말할 수 있는 축 중 하나.
 FLOOR_BANDS: tuple[tuple[str, int, int], ...] = (
     ("1-5", 1, 5),
     ("6-15", 6, 15),
@@ -14,6 +14,10 @@ FLOOR_BANDS: tuple[tuple[str, int, int], ...] = (
 
 #: 표본이 이보다 적으면 밴드를 산출하지 않는다. 적은 표본의 통계는 근거가 아니라 착시다.
 MIN_SAMPLE = 5
+
+#: 동(棟)별 실측에 필요한 최소 표본. 층대(3)와 같은 관대함이되, 동은 **상대 비율**이라
+#: 이보다 적으면 한두 건의 우연이 편차로 둔갑한다. 미달 동은 실측하지 않고 폴백으로 넘긴다.
+MIN_SAMPLE_DONG = 3
 
 #: 표본 부족 시 이 순서로 기간을 넓힌다(개월).
 PERIOD_LADDER: tuple[int, ...] = (6, 12, 24, 36)
@@ -37,6 +41,9 @@ class TradeRow:
     area_m2: float
     floor: int | None = None
     is_cancelled: bool = False
+    #: 동(棟). 운영 MOLIT API 가 77~93% 제공(erd §0 정정). F4 동별 실측에 쓴다.
+    #: 없으면(None) 그 거래는 동 통계 표본에서 빠지고 좌표추정 폴백 대상이 된다.
+    apt_dong: str | None = None
 
 
 @dataclass(frozen=True)
@@ -79,6 +86,53 @@ class PriceBand:
             "data_rows": self.sample_size,
             "period_months": self.period_months,
             "expanded": self.expanded,
+        }]
+
+
+@dataclass(frozen=True)
+class DongStat:
+    """한 동(棟)의 단지 내 상대가격. ₩/㎡ 중위로 면적 구성 차이를 보정한다."""
+
+    dong: str
+    ratio: float                # 단지 평균(₩/㎡) 대비 배율. 1.08 = 단지 평균보다 8% 비쌈
+    sample_size: int
+    median_ppm_krw: int         # 이 동의 ₩/㎡ 중위
+
+    @property
+    def vs_complex_pct(self) -> float:
+        """단지 평균 대비 %(+/-). UI·근거 문구용."""
+        return round((self.ratio - 1) * 100, 1)
+
+
+@dataclass(frozen=True)
+class DongValuation:
+    """동별 가치 차이(F4) 실측 결과.
+
+    `available=True` 면 실거래 aptDong 기반 **실측**이다(높은 신뢰). False 면 표본이
+    부족하거나 동 정보가 없어 실측 불가 — 호출부는 좌표추정 폴백으로 가야 한다.
+    숫자를 지어내지 않는다: 미달 동은 dongs 에서 아예 빠진다.
+    """
+
+    available: bool
+    method: str                 # 실측(aptDong) | 동표본부족 | 동정보없음 | 표본부족
+    overall_median_ppm_krw: int | None = None
+    dongs: tuple[DongStat, ...] = ()
+    coverage_pct: float | None = None   # 동 정보가 있는 거래 비율(%) — 신뢰의 근거
+    period_months: int | None = None
+    reason: str | None = None
+
+    def to_evidence(self, as_of: dt.date | None = None,
+                    source: str = "국토교통부 실거래가") -> list[dict[str, Any]]:
+        if not self.available:
+            return []
+        top = self.dongs[0]
+        return [{
+            "claim": (f"{top.dong}동 {top.vs_complex_pct:+.1f}%(단지 평균 대비, ₩/㎡ 실측)"),
+            "source": source,
+            "as_of": (as_of or dt.date.today()).isoformat(),
+            "data_rows": top.sample_size,
+            "coverage_pct": self.coverage_pct,
+            "basis": "trade_measured",   # 좌표추정(listing_reported)과 구분
         }]
 
 
