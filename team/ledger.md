@@ -34,4 +34,5 @@
 | 2026-07-25-19-arch | 2026-07-25 | re-arch | 배포 준비: 최소구성 준비물 | human-approval(G5) | working | worker.py 미구현→1차 동기기능만. 준비물만, 서버 무변경. SR8-2/CR10-1 완료 후 하달 |
 | 2026-07-25-20-review | 2026-07-25 | re-review | SR8-2·CR10-1 재검증 + 타이밍 트리아지 | none | done | **SR8-2·CR10-1 CLOSE**(SR-010/CR-011). 타이밍 열거 low·**수용**(SR10-1): register 409가 더 쉬운 오라클이라 로그인만 고치면 연극, SR8-1 상충 과대평가 정량반박, 개인규모 수용+재평가 트리거3. SR-004 '계정열거 차단'→'부분' 정정. 327 passed. **배포 차단 0건** | 통과시 open 2건 닫기 |
 | 2026-07-25-SR10-1 | 2026-07-25 | (수용) | 로그인 타이밍 계정열거 | 수용(ACCEPTED) | open·비차단 | 개인규모 수용. 확장시 register 202+login 고정지연 함께 수정. 재평가 트리거3 |
-| 2026-07-25-22-arch | 2026-07-25 | re-arch | 배포 결함 수정 DEP-1/2/3 + .dockerignore | human-approval(G5) | working | certbot 순서·보안헤더 상속·서버빌드 OOM. 수정 후 재검증 |
+| 2026-07-25-22-arch | 2026-07-25 | re-arch | 배포 결함 DEP-1/2/3 수정 | human-approval(G5) | done | certbot 부트스트랩4단계(--nginx→certonly)·보안헤더 두 location 재명시·검증 실효화·빌드 db앞·dockerignore. 293 passed. re-review 재검증 대기 | certbot 순서·보안헤더 상속·서버빌드 OOM. 수정 후 재검증 |
+| 2026-07-25-23-review | 2026-07-25 | re-review | DEP-1/2/3 수정 재검증 | none | working | 통과시 배포준비물 PASS→G5 |
