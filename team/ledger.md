@@ -35,4 +35,7 @@
 | 2026-07-25-20-review | 2026-07-25 | re-review | SR8-2·CR10-1 재검증 + 타이밍 트리아지 | none | done | **SR8-2·CR10-1 CLOSE**(SR-010/CR-011). 타이밍 열거 low·**수용**(SR10-1): register 409가 더 쉬운 오라클이라 로그인만 고치면 연극, SR8-1 상충 과대평가 정량반박, 개인규모 수용+재평가 트리거3. SR-004 '계정열거 차단'→'부분' 정정. 327 passed. **배포 차단 0건** | 통과시 open 2건 닫기 |
 | 2026-07-25-SR10-1 | 2026-07-25 | (수용) | 로그인 타이밍 계정열거 | 수용(ACCEPTED) | open·비차단 | 개인규모 수용. 확장시 register 202+login 고정지연 함께 수정. 재평가 트리거3 |
 | 2026-07-25-22-arch | 2026-07-25 | re-arch | 배포 결함 DEP-1/2/3 수정 | human-approval(G5) | done | certbot 부트스트랩4단계(--nginx→certonly)·보안헤더 두 location 재명시·검증 실효화·빌드 db앞·dockerignore. 293 passed. re-review 재검증 대기 | certbot 순서·보안헤더 상속·서버빌드 OOM. 수정 후 재검증 |
-| 2026-07-25-23-review | 2026-07-25 | re-review | DEP-1/2/3 수정 재검증 | none | working | 통과시 배포준비물 PASS→G5 |
+| 2026-07-25-23-review | 2026-07-25 | re-review | DEP-1/2/3 재검증 | none | done | **DEP-1/2/3 CLOSE**(SR-012). conf 파싱 전수검사·check_headers 직접실행·교체정합성·renew지속성 확인. 잔여2(상속함정·nginx-t 로컬) 정직 수용. **배포준비물 PASS**, deployment_readiness=PASS. 남은건 G5 사람결정 | 통과시 배포준비물 PASS→G5 |
+| 2026-07-25-DEPLOY결정 | 2026-07-25 | (사람) | 배포 시점 결정 | — | 확정 | **수집·추천 완성 후 배포**. 준비물(fcff115·883bc2b)은 완성·보존. 지금 배포 안 함(자금계산만 반쪽+백업/하드닝 없음) |
+| 2026-07-25-24-domain | 2026-07-25 | re-domain | 추천 실행 경로: orchestrator 실데이터 구동(worker→api 백그라운드, redis 없이) | review-required | working | 배포 최소구성 정합. 추천 202→실작동 |
+| 2026-07-25-25-data | 2026-07-25 | re-data | MOLIT 실수집 실행 + 단지/실거래 PostGIS 적재 | review-required | working(키 대기) | 키 발급 후 실행. 코드/픽스처 먼저 |
