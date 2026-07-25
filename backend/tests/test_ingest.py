@@ -14,6 +14,7 @@ from app.ingest.molit import (
     MolitParseError,
     build_params,
     months_between,
+    normalize_apt_dong,
     parse_amount_krw,
     parse_response,
 )
@@ -33,6 +34,7 @@ SAMPLE = """<?xml version="1.0" encoding="UTF-8"?>
         <지역코드>11680</지역코드>
         <법정동>대치동</법정동>
         <층>14</층>
+        <동>410</동>
         <해제여부> </해제여부>
         <등기일자>26.07.02</등기일자>
         <거래유형>중개거래</거래유형>
@@ -63,6 +65,7 @@ ENGLISH_SAMPLE = """<?xml version="1.0" encoding="UTF-8"?>
       <excluUseAr>74.52</excluUseAr>
       <sggCd>41135</sggCd>
       <floor>7</floor>
+      <aptDong>청담(103)</aptDong>
     </item>
   </items></body>
 </response>
@@ -109,10 +112,12 @@ def test_한글_필드_파싱():
     assert first.contract_date == dt.date(2026, 6, 12)
     assert first.area_m2 == pytest.approx(84.97)
     assert first.floor == 14
+    assert first.apt_dong == "410"          # 운영 API 가 주는 동(棟) — 원본 보존
     assert first.built_year == 2008
     assert first.is_cancelled is False
     assert first.registered_at == dt.date(2026, 7, 2)
     assert first.trade_type == "중개거래"
+    assert rows[1].apt_dong is None         # 동 필드가 없는 거래 → None (결측 10~23%)
 
 
 def test_영문_필드도_파싱된다():
@@ -121,6 +126,7 @@ def test_영문_필드도_파싱된다():
     assert rows[0].complex_name == "□□아파트"
     assert rows[0].price_krw == 1_100_000_000
     assert rows[0].region_code == "41135"
+    assert rows[0].apt_dong == "청담(103)"   # 이름(번호) 형태도 원본 그대로 보존
 
 
 def test_해제거래가_표시된다():
@@ -167,11 +173,23 @@ def test_결과가_없으면_빈_목록():
     assert parse_response(empty) == []
 
 
-def test_동_정보는_애초에_없다():
-    """API 가 동을 주지 않는다는 사실을 테스트로 못박아 둔다 (erd.md §0)."""
+def test_동은_운영API에_존재한다():
+    """설계 초안(erd §0 '동 없음')을 정정 — 운영 API 는 aptDong 을 준다(2026-07-25 실측).
+    있으면 원본 보존, 없으면 None. 이 사실을 테스트로 못박아 회귀를 막는다."""
     rows = parse_response(SAMPLE)
-    assert not hasattr(rows[0], "building_name")
-    assert not hasattr(rows[0], "dong_no")
+    assert rows[0].apt_dong == "410"     # 동번호
+    assert rows[1].apt_dong is None      # 결측
+
+
+def test_동_정규화():
+    """빈값·공백·무의미 토큰은 None, 실제 표기는 strip 해 보존. 없는 걸 지어내지 않는다."""
+    assert normalize_apt_dong("410") == "410"
+    assert normalize_apt_dong("  청담(103) ") == "청담(103)"
+    assert normalize_apt_dong(None) is None
+    assert normalize_apt_dong("") is None
+    assert normalize_apt_dong("   ") is None
+    assert normalize_apt_dong("-") is None
+    assert normalize_apt_dong("0") is None
 
 
 # ---------------------------------------------------------------------------

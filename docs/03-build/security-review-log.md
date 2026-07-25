@@ -836,3 +836,89 @@ conf 를 파싱해 `add_header` 를 쓰는 **모든** 블록이 4종을 갖췄�
 **PASS.** `DEP-1`·`DEP-2`·`DEP-3` 전부 통과 조건을 충족했고, 반박 없이 수용해 정확히 고쳤다.
 21-review 에서 FAIL 사유였던 "절차가 §5-4 에서 막힌다"와 "본 화면 클릭재킹 방어 상실"이 모두 해소됐다.
 **배포 준비물은 안전 검증을 통과했다 — 남은 것은 `19-arch` G5 결정 4건(사람)뿐이다.**
+
+---
+
+## SR-013 · 2026-07-25 · apt_dong/동 실측 + MOLIT 운영 엔드포인트 전환 (herdr re-review 대행)
+
+**판정: PASS**
+검증자: `security-reviewer` (herdr re-review 대행 · 독립 감사)
+범위: `trade.apt_dong` 컬럼 추가 + 수집 엔드포인트 개발용(Dev)→운영 전환
+대상: `backend/app/ingest/{molit,loader,normalize,run_molit}.py`, `config/sources.yaml`,
+`backend/migrations/006_trade_apt_dong.sql`(신규), `backend/tests/test_ingest.py`, `docs/02-design/erd.md`(§0)
+회귀: 전체 **341 passed · 50 skipped**(로컬 DB 부재 skip) 재현 확인 — 지시서 기대치와 일치.
+
+### 지시된 6개 점검 항목 결과
+
+| # | 항목 | 결과 | 근거(파일:라인) |
+|---|---|:--:|---|
+| 1 | SQL 인젝션 (loader UPDATE/INSERT 파라미터 바인딩) | PASS | 아래 §1 |
+| 2 | G2 근거감사 (실측 vs 좌표추정 confidence 구분) | PASS | 아래 §2 |
+| 3 | INGEST-2 (해제거래 시세조작 방어 유지) | PASS | 아래 §3 |
+| 4 | 비밀정보 노출 (API 키 하드코딩 여부) | PASS | 아래 §4 |
+| 5 | 로그 (apt_dong·민감정보 유출) | PASS | 아래 §5 |
+| 6 | 엔드포인트 전환 보안성 | PASS | 아래 §6 |
+
+### §1 SQL 인젝션 — PASS
+- `loader.py:238` UPDATE `apt_dong = COALESCE(:apt_dong, apt_dong)` — named bind. INSERT
+  (`loader.py:255-261`)도 컬럼 목록에 `apt_dong` 추가 후 `:apt_dong` 값 바인드. 나머지 값
+  (`:cid,:contract_date,:price,:area,:floor,:cancelled,...`) 전부 named bind. **문자열 포매팅으로
+  외부값을 SQL 에 넣는 코드 0건**(f-string/`%`/`.format`/`+` 없음). `_complex_id`·`_unit_type_id`
+  도 동일하게 named bind만 사용.
+- 마이그레이션 006 은 **정적 DDL**: `ALTER TABLE trade ADD COLUMN IF NOT EXISTS apt_dong text`
+  · `COMMENT ON COLUMN` · `CREATE INDEX IF NOT EXISTS ... WHERE apt_dong IS NOT NULL`.
+  BEGIN/COMMIT 트랜잭션. 사용자 입력·동적 식별자 없음. 파티션 부모에 ADD COLUMN → 무중단 전파.
+- `apt_dong` 원본은 외부(MOLIT) 자유문자열('청담(103)' 등)이나 바인드로만 저장되어 저장 시점
+  SQLi 불가. (F4 매칭 계층에서 building.name 대조 시에도 값 비교이며 이번 diff 범위 밖.)
+
+### §2 G2 근거감사 — PASS
+- `apt_dong` 은 실거래 원본 값이라 **추정이 아니다**. `normalize_apt_dong`(molit.py:95)은 원본을
+  strip 보존하고 빈값/`-`/`0` 만 None 으로 정리 — "없는 걸 지어내지 않는다"는 G2 원칙 준수.
+- erd §0 이 정정되어 confidence 로 근거의 질을 **구분**한다: `trade.apt_dong` 실측 → **high**,
+  결측 10~23% 좌표추정 폴백 → 낮춰 표기, `agent_finding.evidence` 에 어느 쪽인지 기록.
+  이번 변경은 **추정을 확정치로 둔갑시키지 않는다** — 오히려 기존 좌표추정(간접)을 실측(직접)으로
+  격상하되 폴백 경로의 낮은 신뢰도 표기를 유지한다. UI/리포트 실측·추정 구분 명시 의무도 문서에 보존.
+
+### §3 INGEST-2 (해제거래 시세조작 방어) — PASS
+- `normalize.TradeNaturalKey`(normalize.py:95-102)는 이번 diff 에서 **불변**: 키=(complex,
+  contract_date, price_krw, area_m2, floor). `apt_dong` **미포함**, `is_cancelled` 여전히 **제외**.
+- `_upsert_trade` 의 UPDATE WHERE(loader.py:246-251)는 자연키 컬럼만 매치 — `apt_dong` 은 WHERE 에
+  없다. 따라서 정상→해제 재유입이 apt_dong 유무와 무관하게 **원본 행을 UPDATE**(is_cancelled=True)해
+  NOT is_cancelled 통계에서 사라지는 방어가 그대로 유지된다.
+- `apt_dong = COALESCE(:apt_dong, apt_dong)` 는 재유입분 apt_dong 이 NULL 이어도 기존 동값을
+  지우지 않아, 결측이 자연키를 흔들거나 방어를 우회할 여지가 없다. (INGEST-2 CLOSE 회귀 테스트
+  전부 통과 유지.)
+
+### §4 비밀정보 노출 — PASS
+- diff·신규파일 전수 스캔: MOLIT `serviceKey`/자격증명 **하드코딩 0건**. 코드에는 **엔드포인트 URL만**
+  존재하고 키 없음. serviceKey 는 `build_params(service_key=...)`(molit.py:236)로 런타임 주입되며,
+  그 값은 `config/sources.yaml auth.env: MOLIT_API_KEY`(env)에서 온다.
+- `.env` 는 `.gitignore` 적용(검증), tracked/untracked 비밀파일 0건.
+- 신규 PNG 2건(`deploy/service-screen-datagokr.png`·`thumbnail-datagokr.png`)은 **앱 UI 목업**으로,
+  data.go.kr 포털 캡처가 아니며 serviceKey 노출 없음(직접 이미지 확인).
+
+### §5 로그 — PASS
+- `apt_dong` 값을 로그로 남기는 코드 0건. `run_daily` 메시지는 건수(단지/타입/거래 신규·갱신)만 기록.
+- 운영 경로(`run_daily`)는 `postgis_log_sink` 사용 → `ingest_log` 에 `run.message`(요약 카운트)와
+  요약 1줄만 남기고 `run.failures`(예외 문자열 포함)는 기록하지 않는다. serviceKey 유출 경로 없음.
+
+### §6 엔드포인트 전환(Dev→운영) — PASS
+- `RTMSDataSvcAptTradeDev`→`RTMSDataSvcAptTrade`, 둘 다 `https://apis.data.go.kr/1613000/...`
+  공공데이터포털 **HTTPS** 엔드포인트. 다운그레이드·평문 전송 없음. 발급 일반 인증키가 운영에서만
+  동작(Dev 는 403)한다는 사실을 주석에 정직히 기재. 보안 회귀 없음.
+
+### 비차단 관찰(권고 · 이번 판정 결격 아님)
+- **(기존 코드·범위 밖)** `runner.py:140-142` 는 일반 예외 문자열을 `run.failures` 에 담는데, httpx
+  `raise_for_status` 예외 메시지는 URL(=serviceKey 포함 쿼리스트링)을 담을 수 있다. 운영
+  `run_daily` 경로는 failures 를 로깅/저장하지 않아 **현재 유출 없음**이나, `_default_log_sink`
+  사용 시에는 serviceKey 가 WARNING 로그로 새어나갈 수 있다. 이번 diff 가 건드린 코드는 아니지만,
+  방어심층 차원에서 fetch 오류 처리 시 serviceKey 마스킹을 2차 권고로 남긴다.
+- **(전방 관찰)** `apt_dong` 은 외부 API 자유문자열이라 F4 에서 프론트 렌더 시 XSS 표면이 될 수
+  있으나, React 기본 이스케이프 대상이며 이번 diff 는 프론트 렌더 코드를 포함하지 않는다.
+
+### 판정
+**PASS.** 지시된 6개 항목 전부 통과. apt_dong 은 실측 원본을 파라미터 바인드로만 저장하고
+자연키·is_cancelled 방어(INGEST-2)를 건드리지 않으며, 마이그레이션은 정적 DDL, 비밀정보
+하드코딩·로그 유출·미암호화 전송 없음. 엔드포인트 전환은 HTTPS→HTTPS 로 보안 회귀 없음.
+fail 조건(인증·인가 결함 / 인젝션 / 비밀정보 하드코딩 / 민감정보 로그노출 / 미암호화 전송)
+어느 것도 해당하지 않는다.

@@ -120,6 +120,7 @@ class InMemoryTradeLoader:
                 "complex_id": cx.id, "unit_type_id": ut,
                 "contract_date": t.contract_date, "price_krw": t.price_krw,
                 "floor": t.floor, "area_m2": normalize._norm_area(t.area_m2),
+                "apt_dong": t.apt_dong,   # 저장만 — 자연키 아님(결측 있어 키 흔들림 방지)
                 "is_cancelled": t.is_cancelled, "cancelled_on": t.cancelled_on,
                 "source": t.source,
             }
@@ -127,6 +128,10 @@ class InMemoryTradeLoader:
             # 정상 거래가 해제되어 재유입되면 기존 행의 is_cancelled 가 True 로 갱신되고,
             # NOT is_cancelled 로 거르는 시세 통계에서 사라진다(INGEST-2).
             if nk in self.trades:
+                # apt_dong 은 PostGIS 로더의 COALESCE(:apt_dong, apt_dong) 와 동일하게 다룬다:
+                # 결측(None) 으로 재유입돼도 기존 동을 지우지 않는다(APTDONG-1, 두 로더 동일 규칙).
+                if row["apt_dong"] is None:
+                    row["apt_dong"] = self.trades[nk].get("apt_dong")
                 self.trades[nk] = row
                 res.trades_updated += 1
             else:
@@ -224,6 +229,7 @@ class PostgisTradeLoader:
             "cid": complex_id, "uid": unit_type_id,
             "contract_date": t.contract_date, "price": t.price_krw,
             "floor": t.floor, "area": normalize._norm_area(t.area_m2),
+            "apt_dong": t.apt_dong,   # 저장만 — 자연키 아님(결측 있어 키 흔들림 방지, INGEST-2 논리)
             "cancelled": t.is_cancelled, "cancelled_on": t.cancelled_on,
             "registered": t.registered_at, "trade_type": t.trade_type,
             "source": t.source, "ingested_at": t.ingested_at,
@@ -235,6 +241,7 @@ class PostgisTradeLoader:
         updated = conn.execute(text("""
             UPDATE trade SET
                 unit_type_id = :uid,
+                apt_dong = COALESCE(:apt_dong, apt_dong),
                 is_cancelled = :cancelled,
                 registered_at = :registered,
                 trade_type = :trade_type,
@@ -251,9 +258,9 @@ class PostgisTradeLoader:
             return
         conn.execute(text("""
             INSERT INTO trade (complex_id, unit_type_id, contract_date, price_krw,
-                               floor, area_m2, is_cancelled, registered_at,
+                               floor, area_m2, apt_dong, is_cancelled, registered_at,
                                trade_type, source, ingested_at)
-            VALUES (:cid, :uid, :contract_date, :price, :floor, :area, :cancelled,
-                    :registered, :trade_type, :source, :ingested_at)
+            VALUES (:cid, :uid, :contract_date, :price, :floor, :area, :apt_dong,
+                    :cancelled, :registered, :trade_type, :source, :ingested_at)
         """), params)
         res.trades_inserted += 1

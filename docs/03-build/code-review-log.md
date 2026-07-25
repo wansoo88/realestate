@@ -747,3 +747,119 @@ DB 연결 끊김·FK 위반(예: `region_code` 마스터 미적재)은 현실적
 **검증 범위 PASS — `INGEST-1`·`INGEST-2` CLOSE, 27-review 종결.**
 해제거래 시세조작 방어는 자연키·마이그레이션·로더·테스트 네 층에서 일관되게 구현됐고 실측으로 확인했다.
 **단 3단계 구현 완성은 `FE-1`·`FE-2` 해소 후 재판정한다.**
+
+---
+
+## CR-015 · 2026-07-25 · apt_dong/동 실측 기능 (molit·loader·migration 006·erd §0 정정)
+
+**판정: FAIL — 로더 규칙 불일치 1건(`APTDONG-1`). 파싱·마이그레이션·자연키 방어는 전부 PASS.**
+검증자: `code-reviewer` (herdr re-review 대행 — 독립 감사) · 대상: working tree(미커밋)
+회귀: 대상 `tests/test_ingest.py`+`tests/test_ingest_loader.py` **46 passed** · 전체 **341 passed · 50 skipped(needs_db)**
+
+> 배경: 운영 MOLIT API(RTMSDataSvcAptTrade)가 `aptDong` 을 77~93% 제공(강남87·종로77·분당93·인천91%,
+> 실호출 e2e 검증)한다는 사실을 반영해 `trade.apt_dong` 컬럼을 추가하는 변경. 설계 초안 erd §0 "동 없음"을 정정.
+
+### 통과한 불변식 (반례 탐색 후)
+
+| # | 불변식 | 결과 | 근거 |
+|---|---|---|---|
+| 1 | ⛔ apt_dong 이 **자연키에 절대 없어야** 함(INGEST-2 방어) | ✅ PASS | 세 곳 모두 5컬럼 유지: `normalize.trade_natural_key`(normalize.py:95-102)=(complex, contract_date, price_krw, area_m2, floor) · `004` UNIQUE 미변경 · loader UPDATE WHERE(loader.py:246-250). **006 은 ADD COLUMN + 부분 인덱스만**이고 자연키 제약을 건드리지 않음 |
+| 2 | UPDATE 가 기존값을 NULL 로 덮지 않음 + INSERT 컬럼/값 정합 | ✅ PASS(PostGIS) | UPDATE `apt_dong = COALESCE(:apt_dong, apt_dong)`(loader.py:240). INSERT 컬럼 **12개**=VALUES **12개**, 순서 1:1 정확(…floor, area_m2, **apt_dong**, is_cancelled…) |
+| 3 | normalize_apt_dong: 빈값/공백/'-'/'0'→None, 실표기 strip 보존 | ✅ PASS | molit.py:96-107. `not raw`→None, strip 후 `""`·`"-"`·`"0"`→None, 그 외 원본 보존. "없는 걸 지어내지 않는다" 준수 |
+| 5 | 파티션(RANGE by contract_date) 부모 ADD COLUMN/CREATE INDEX 전파 | ✅ PASS | `001` trade = `PARTITION BY RANGE (contract_date)` 확인. 부모에 ADD COLUMN·partitioned INDEX(부분·`WHERE apt_dong IS NOT NULL`) 는 PG16 에서 각 파티션에 전파. 006 주석의 전제와 일치 |
+
+파싱 회귀 테스트도 견고하다: `test_동은_운영API에_존재한다`(있음 '410' / 결측 None), `test_동_정규화`(6케이스),
+한글`<동>`·영문`aptDong` 양쪽 별칭 파싱, `청담(103)` 이름형 원본 보존까지 못박음.
+
+### ⛔ `APTDONG-1` (blocking · 불변식 4 위반) — 두 로더가 재적재 시 apt_dong 을 다르게 다룬다
+
+**PostGIS 는 COALESCE 로 보존하는데, InMemory 는 row 전체를 교체하며 apt_dong 을 NULL 로 덮는다.**
+
+- PostGIS `_upsert_trade` UPDATE(loader.py:240): `apt_dong = COALESCE(:apt_dong, apt_dong)` → 새 값이 NULL 이면 **기존 동 유지**.
+- InMemory `load` update 경로(loader.py:130-132): `self.trades[nk] = row` 로 **딕셔너리 전체 교체** → `row["apt_dong"] = t.apt_dong` 가 그대로 들어가 **결측(None) 재유입 시 기존 동이 소실**된다.
+
+**실측 반례**(인메모리 직접 호출, `backend/`):
+```
+1) load(동='103')            → trades[nk]['apt_dong'] = '103'
+2) load(같은 자연키, 동 결측·해제) → trades[nk]['apt_dong'] = None   ⛔  (PostGIS 였다면 COALESCE 로 '103' 유지)
+   InMemory: before='103'  after=None   /   PostGIS COALESCE: '103' 보존
+```
+즉 **동일 입력에 두 로더가 다른 상태**를 만든다. 이 코드베이스의 중심 원칙(loader.py:12 "둘은 같은 규칙을 써야
+한다 — 규칙이 갈리면 '테스트는 되는데 운영엔 [문제]'가 된다")을 정면으로 어긴다. 개발자가 PostGIS 에 **일부러
+COALESCE 를 넣었다는 것 자체가 '결측 재유입으로 동이 지워지는 경로가 실재한다'는 전제를 인정한 것**인데
+(006 주석: "적재 시 COALESCE 로 기존 값을 덮어쓰지 않게 채운다"), 그 방어가 InMemory(=테스트 오라클)에는 없다.
+
+발생 경로: 정상거래(동 有)가 나중에 **'해제'로 재유입될 때 해제피드에 동이 빠지면**(결측 10~23% 범위) 트리거된다 —
+INGEST-2 가 다루는 바로 그 재유입 경로다. (같은 달 단순 재수집은 동 값이 안정적이라 divergence 미발생.)
+
+부수 문제 — **핵심 write-path 테스트 부재**: 이번 변경의 쓰기측 핵심 동작인 "COALESCE 로 apt_dong 보존"을
+검증하는 테스트가 **0건**이다. `test_ingest_loader.py` 에 apt_dong 적재/재적재 케이스가 아예 없다. 게다가 InMemory 는
+보존과 반대로 동작하므로, 지금 InMemory 기반으로 재적재 테스트를 짜면 **PostGIS 의 의도와 상반된 값을 정답으로
+못박게** 된다. 누군가 PostGIS 에서 COALESCE 를 떼어도 어떤 테스트도 못 잡고 운영에서 동이 조용히 지워진다 —
+이 코드베이스가 가장 경계하는 실패 형태다.
+
+**통과 조건(전부 충족해야 재판정 PASS)**:
+1. `InMemoryTradeLoader.load` 의 update 경로가 COALESCE 와 **동일 규칙**을 따르게 수정 — 재적재 시 `t.apt_dong` 이
+   None 이면 기존 `self.trades[nk]["apt_dong"]` 을 보존(예: `row["apt_dong"] = t.apt_dong if t.apt_dong is not None
+   else self.trades[nk].get("apt_dong")`). insert 경로는 현행 유지.
+2. 재적재 회귀 테스트 1건 추가: "동(有) 거래 → 동 결측(해제 포함)으로 재유입 후에도 apt_dong 이 보존된다" 를
+   InMemory 로 검증. PostGIS COALESCE 동일 동작은 `needs_db` 로도 1건 걸어 다음 DB 라운드에 실측 권고.
+
+### 비차단 코멘트 (pass 무관 — 이번 변경 밖)
+
+- `trade` 테이블에 `cancelled_on` 컬럼이 **없다**(001:76-90). loader params 는 `cancelled_on` 을 담지만 INSERT/UPDATE
+  에서 미사용이고, InMemory 는 row 에 저장한다 → **기존부터 존재하던** 로더 divergence(이번 diff 무관, 범위 밖). 별도 정리 권고.
+- `normalize_apt_dong` 의 `"0"`·`"-"`→None 은 합리적. `"00"` 같은 다중 0 은 미처리이나 실데이터에서 비현실적 — 비차단.
+- loader.py:21-22 의 "유니크 제약 없어 UPDATE→INSERT" 주석은 004 이후 낡음(CR-014 §5 비차단 관찰과 동일 사안).
+
+### 판정
+**FAIL.** 파싱·정규화·마이그레이션 구조·자연키 방어(불변식 1·2·3·5)는 모두 견고하고 파싱 회귀도 잘 못박혀 있다.
+그러나 **불변식 4(두 로더 동일 규칙)가 깨졌다** — InMemory 가 재적재 시 apt_dong 을 NULL 로 덮어 PostGIS 의 COALESCE
+보존과 어긋나고(반례 실증), 그 보존 로직에 테스트가 없다. 위 통과 조건 2건을 채우면 재판정 PASS.
+
+---
+
+## CR-016 · 2026-07-25 · APTDONG-1 수정 재검증 (code-reviewer, herdr re-review 대행)
+
+**판정: `APTDONG-1` CLOSE (PASS) — CR-015 FAIL 해소.**
+대상: working tree(미커밋) `loader.py`(InMemory update 경로)·`test_ingest_loader.py`(회귀 1건)
+회귀: 대상 `tests/test_ingest.py`+`tests/test_ingest_loader.py` **47 passed**(신규 +1) · 전체 **342 passed · 50 skipped(needs_db)**
+
+### 수정 확인 — 두 로더가 이제 동일 규칙
+
+`InMemoryTradeLoader.load` update 경로(loader.py:130-139)에 COALESCE 동등 로직이 들어갔다:
+```python
+if nk in self.trades:
+    if row["apt_dong"] is None:                     # 새 값이 결측이면
+        row["apt_dong"] = self.trades[nk].get("apt_dong")   # 기존 동 보존
+    self.trades[nk] = row
+```
+- 새 값 有 → 최신값 채택 / 새 값 None → 기존값 보존. PostGIS `apt_dong = COALESCE(:apt_dong, apt_dong)`(loader.py:244, **미변경**)와 **의미 동일**.
+- `git diff` 로 확인: loader.py 변경은 InMemory 블록뿐이고 PostGIS COALESCE·INSERT 정합은 그대로다.
+
+### 독립 재현 — 원 반례 + 경계 6종 전부 정상
+
+| # | 시나리오 | apt_dong | 판정 |
+|---|---|---|---|
+| ① | **CR-015 원 반례**: '103' → 결측·해제 재유입 | **'103' 보존**(is_cancelled=True) | ✅ 해소 |
+| ② | '103' → '105' 재유입 | '105'(최신 우선) | ✅ |
+| ③ | 결측 → '103' 재유입(뒤늦게 채움) | '103' | ✅ |
+| ④ | 결측 → 결측 | None | ✅ |
+| ⑤ | '103' → '103' 동일 재수집(멱등) | '103' | ✅ |
+| ⑥ | '103' → 결측해제 → 정상결측 복원 | '103'·is_cancelled=False | ✅ |
+
+①은 CR-015에서 `after=None`(동 소실)로 실패했던 바로 그 입력인데, 이제 '103'이 보존된다.
+is_cancelled 는 여전히 최신값으로 갱신돼 INGEST-2(해제→시세 제외) 방어도 무손상이다.
+
+### 회귀 테스트 — 핵심 write-path 커버
+
+`test_동은_결측_재유입에도_보존된다` 추가(test_ingest_loader.py). `_deal_xml(..., dong=None)` 로 `<동>`
+필드를 제어하며 parse_response→normalize→load 전 구간을 탄다. **보존(None 재유입)·최신우선(신규값)·
+is_cancelled 갱신** 세 축을 한 테스트에서 못박아, 누가 InMemory 든 PostGIS 든 규칙을 되돌리면 즉시 깨진다.
+(PostGIS COALESCE 실 SQL 동일동작은 needs_db 로 추후 실측 권고 — 비차단, needs_db_carryover 에 준함.)
+
+### 판정
+**PASS. `APTDONG-1` CLOSE.** CR-015의 통과 조건 2건(① InMemory update 를 COALESCE 규칙과 일치,
+② 재적재 보존 회귀 테스트)이 모두 충족됐다. 두 로더가 apt_dong 을 동일하게 다루며(불변식4 회복),
+CR-015에서 PASS 판정했던 불변식 1·2·3·5(자연키 미포함·INSERT/UPDATE 정합·정규화·파티션 전파)는
+이번 수정으로 영향받지 않는다. **apt_dong/동 실측 기능 변경 전체가 이제 PASS.**

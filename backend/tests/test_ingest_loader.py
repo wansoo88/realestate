@@ -41,14 +41,18 @@ def _silent_clock_limiter() -> RateLimiter:
     return RateLimiter(0.0, clock=lambda: t[0], sleeper=lambda s: None)
 
 
-def _deal_xml(*, cancelled: bool) -> str:
-    """같은 거래(◇◇ 도곡동 84.97㎡ 10층 15억 2026-06-10)를 정상/해제 두 버전으로."""
+def _deal_xml(*, cancelled: bool, dong: str | None = None) -> str:
+    """같은 거래(◇◇ 도곡동 84.97㎡ 10층 15억 2026-06-10)를 정상/해제 두 버전으로.
+
+    dong 을 주면 <동> 필드를 붙인다(운영 API 의 aptDong). None 이면 필드 없음(결측).
+    """
     flag = "O" if cancelled else " "
     extra = "<해제사유발생일>26.06.25</해제사유발생일>" if cancelled else ""
+    dong_xml = f"<동>{dong}</동>" if dong is not None else ""
     return f"""<response><header><resultCode>00</resultCode></header><body><items>
       <item><거래금액>150,000</거래금액><년>2026</년><월>6</월><일>10</일>
       <아파트>◇◇아파트</아파트><전용면적>84.97</전용면적><지역코드>11680</지역코드>
-      <법정동>도곡동</법정동><층>10</층><해제여부>{flag}</해제여부>{extra}</item>
+      <법정동>도곡동</법정동><층>10</층>{dong_xml}<해제여부>{flag}</해제여부>{extra}</item>
     </items></body></response>"""
 
 
@@ -149,6 +153,32 @@ def test_정상거래가_해제되면_시세에서_사라진다():
     # 해제됐으므로 시세에서 사라진다 — 원본 15억이 통계에 남으면 안 된다
     assert loader.active_trades() == []
     assert all(r["is_cancelled"] for r in loader.trades.values())
+
+
+def test_동은_결측_재유입에도_보존된다():
+    """★APTDONG-1 회귀(CR-015): 동(棟)이 있는 거래가 동 결측으로 재유입돼도 기존 동을 지우면 안 된다.
+
+    운영 API 는 aptDong 을 77~93%만 준다. 같은 거래가 어떤 배치엔 동과 함께, 다른 배치엔
+    동 없이 올 수 있다(해제 재유입 포함). 재적재가 동을 None 으로 덮으면 F4 실측 표본이
+    조용히 사라진다. PostGIS 로더의 COALESCE(:apt_dong, apt_dong) 와 InMemory 가 **같은
+    규칙**이어야 한다.
+    """
+    loader = InMemoryTradeLoader()
+    # 1) 동 '103' 과 함께 유입
+    loader.load(parse_response(_deal_xml(cancelled=False, dong="103"), now=NOW))
+    (row,) = loader.trades.values()
+    assert row["apt_dong"] == "103"
+
+    # 2) 같은 자연키가 동 결측으로 재유입(해제 포함) → 동은 보존돼야 한다
+    loader.load(parse_response(_deal_xml(cancelled=True, dong=None), now=NOW))
+    (row,) = loader.trades.values()
+    assert row["apt_dong"] == "103"         # None 으로 덮이지 않는다
+    assert row["is_cancelled"] is True      # 해제 플래그는 최신값으로 갱신(INGEST-2 유지)
+
+    # 3) 나중에 다른 동 값이 오면 그때는 최신값으로 갱신(COALESCE: 새 값이 있으면 이긴다)
+    loader.load(parse_response(_deal_xml(cancelled=False, dong="105"), now=NOW))
+    (row,) = loader.trades.values()
+    assert row["apt_dong"] == "105"
 
 
 def test_region_resolver로_법정동코드를_채운다(trades):

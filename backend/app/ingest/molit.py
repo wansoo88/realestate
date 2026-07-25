@@ -6,10 +6,12 @@
 ----------------------
 무료·합법·안정적이다. 포털 수집이 막혀도 이것만으로 서비스가 성립해야 한다(G4).
 
-⚠️ 이 API 가 주지 않는 것
---------------------------
-**동(棟) 정보가 없다.** 단지명·전용면적·층·계약일·금액까지만 온다.
-그래서 F4(동별 가치 차이)는 좌표 기반 추정으로 갈 수밖에 없다(erd.md §0).
+동(棟) 정보 — 설계 가정 정정(2026-07-25 실측)
+---------------------------------------------
+설계 초안(erd §0)은 "동 정보 없음"으로 봤으나, **운영 API 는 aptDong 을 77~93%
+제공한다**(강남87·분당93·인천91·종로77%). 그래서 F4(동별 가치 차이)는 좌표 추정이
+아니라 **실거래 기반 실측**으로 갈 수 있다. 다만 결측 10~23% 가 있어 apt_dong 은
+자연키에 넣지 않고(키 흔들림 방지) 부가 컬럼으로만 저장하며, 결측분은 좌표추정으로 폴백한다.
 
 금액 단위 함정
 --------------
@@ -37,6 +39,7 @@ _FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "region_code": ("지역코드", "sggCd"),
     "dong": ("법정동", "umdNm"),
     "floor": ("층", "floor"),
+    "apt_dong": ("aptDong", "동"),   # 운영 API 에 77~93% 존재 — F4(동별 가치)를 실측 가능케 함
     "built_year": ("건축년도", "buildYear"),
     "cancelled": ("해제여부", "cdealType"),
     "cancel_date": ("해제사유발생일", "cdealDay"),
@@ -60,6 +63,10 @@ class MolitTrade:
     price_krw: int
     area_m2: float
     floor: int | None
+    #: 실거래 동(棟). 운영 API 가 77~93% 제공(강남87·분당93·인천91·종로77%, 2026-07-25 실측).
+    #: '410'·'114' 숫자 또는 '청담(103)' 이름 혼재 → 원본 보존, 빈값은 None.
+    #: 설계 가정(erd §0 '동 정보 없음')을 뒤집는다 — F4 를 좌표추정 대신 실거래로 할 수 있다.
+    apt_dong: str | None
     built_year: int | None
     is_cancelled: bool
     cancelled_on: dt.date | None
@@ -76,12 +83,28 @@ class MolitTrade:
             "price_krw": self.price_krw,
             "area_m2": self.area_m2,
             "floor": self.floor,
+            "apt_dong": self.apt_dong,
             "is_cancelled": self.is_cancelled,
             "registered_at": self.registered_at,
             "trade_type": self.trade_type,
             "source": self.source,
             "ingested_at": self.ingested_at,
         }
+
+
+def normalize_apt_dong(raw: str | None) -> str | None:
+    """실거래 동(棟) 표기 정규화. 빈값·공백은 None, 그 외는 원본을 strip 해 보존한다.
+
+    운영 API 는 '410'·'114'(동번호)와 '청담(103)'(이름+번호)을 혼재해 준다.
+    여기서는 원본 표기를 살리고(F4 에서 building.name 과 매칭할 때 필요),
+    무의미한 공백/하이픈만 None 으로 정리한다 — 없는 걸 있다고 지어내지 않는다.
+    """
+    if not raw:
+        return None
+    v = raw.strip()
+    if not v or v in ("-", "0"):
+        return None
+    return v
 
 
 def _text(item: ET.Element, key: str) -> str | None:
@@ -190,6 +213,7 @@ def parse_response(xml_text: str, *, now: dt.datetime | None = None) -> list[Mol
             price_krw=parse_amount_krw(amount_raw),
             area_m2=area,
             floor=floor,
+            apt_dong=normalize_apt_dong(_text(item, "apt_dong")),
             built_year=built,
             is_cancelled=cancelled_flag == "O",
             cancelled_on=_parse_compact_date(_text(item, "cancel_date")),

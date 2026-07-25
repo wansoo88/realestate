@@ -21,9 +21,11 @@ from app.ingest.runner import Fetcher, IngestRun, incremental_months, run_molit_
 
 logger = logging.getLogger("ingest.run_molit")
 
-#: config/sources.yaml 의 molit_apt_trade.endpoint 와 일치. 서비스키 발급 시 상세페이지에서 최종 확인.
+#: 운영 엔드포인트. PM 이 발급 키로 실호출 검증(2026-07-25): 강남 202412 → 192건 파싱 성공.
+#: ⚠️ Dev 엔드포인트(RTMSDataSvcAptTradeDev)는 이 키로 403 Forbidden — 개발계정 전용이다.
+#:   발급받은 일반 인증키는 운영(RTMSDataSvcAptTrade)에서만 동작한다.
 MOLIT_ENDPOINT = (
-    "https://apis.data.go.kr/1613000/RTMSDataSvcAptTradeDev/getRTMSDataSvcAptTradeDev"
+    "https://apis.data.go.kr/1613000/RTMSDataSvcAptTrade/getRTMSDataSvcAptTrade"
 )
 
 

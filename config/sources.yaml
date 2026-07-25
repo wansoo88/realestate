@@ -29,7 +29,7 @@ sources:
     enabled: true
     legal: public_open_api
     provider: "공공데이터포털 — 국토교통부_아파트 매매 실거래가"
-    endpoint: "https://apis.data.go.kr/1613000/RTMSDataSvcAptTradeDev/getRTMSDataSvcAptTradeDev"
+    endpoint: "https://apis.data.go.kr/1613000/RTMSDataSvcAptTrade/getRTMSDataSvcAptTrade"  # 운영(실측 검증 2026-07-25). Dev 는 발급키로 403
     method: GET
     auth: { type: service_key, env: MOLIT_API_KEY }   # 사람이 발급(아래 B. 발급절차)
     params_builder: "app.ingest.molit:build_params"

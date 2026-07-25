@@ -1,20 +1,22 @@
 {
   "code_review": {
     "status": "passed",
-    "id": "CR-007",
+    "id": "CR-016",
     "date": "2026-07-25",
-    "scope": "backend/** (도메인·API·수집기·에이전트) 재감사",
-    "reviewer": "re-review (독립 재감사 — 지시 2026-07-25-05-review)",
-    "note": "CR-004~006(PM 자체 검토)을 함수 직접 호출·반례 탐색으로 재감사해 정식 판정으로 CONFIRM. 레이어 경계·이분탐색·표본부족·미구현 은폐없음·자금계산 경계(0/음수/0%금리) 모두 확인. 테스트 170 passed 재현.",
+    "at": "2026-07-25T11:18:57Z",
+    "scope": "apt_dong/동 실측 기능 — APTDONG-1 수정 재검증 (loader InMemory COALESCE 동등화 + 회귀 테스트)",
+    "reviewer": "code-reviewer (herdr re-review 대행 — 독립 감사)",
+    "notes": "CR-015 FAIL 사유 APTDONG-1 해소. InMemoryTradeLoader.load update 경로가 새 apt_dong 이 None 이면 기존값 보존(loader.py:130-139)하여 PostGIS COALESCE(:apt_dong, apt_dong)(loader.py:244, 미변경)와 동일 규칙. 독립 재현으로 CR-015 원 반례('103'→결측·해제 재유입 시 '103' 보존) 포함 6종 경계(결측→보존/신규값→최신/뒤늦게 채움/양쪽 결측/멱등/해제후 복원) 전부 정상. is_cancelled 최신 갱신되어 INGEST-2 무손상. 회귀 테스트 test_동은_결측_재유입에도_보존된다 추가. 불변식1·2·3·5는 이번 수정에 무영향. 회귀 342 passed·50 skipped(needs_db, +1).",
     "log": "docs/03-build/code-review-log.md"
   },
   "security_review": {
     "status": "passed",
-    "id": "SR-007",
+    "id": "SR-013",
+    "at": "2026-07-25T00:00:00+09:00",
     "date": "2026-07-25",
-    "scope": "backend/** 보안 재감사 (G2·G3·G4·IDOR) + SR4-2 수정 재검증(09-review)",
-    "reviewer": "re-review (독립 재감사·재검증 — 지시 2026-07-25-05-review, 2026-07-25-09-review)",
-    "note": "SR-006에서 반려한 SR4-2를 re-domain이 08-domain에서 수정(값비교 extract_amounts + fail-loud + 구조 문서정정). 반려 당사자 re-review가 SR-007에서 5가지 우회 재실측·구조방어 실측으로 재검증해 SR4-2 CLOSE. G2·G3·G4·IDOR는 SR-006에서 CONFIRM 유지. 전체 239 passed 재현, 회귀 0.",
+    "scope": "apt_dong/동 실측 + MOLIT 운영 엔드포인트 전환",
+    "reviewer": "security-reviewer (herdr re-review 대행)",
+    "notes": "trade.apt_dong 추가 + Dev→운영 엔드포인트 전환 독립 감사. SQLi(named bind·정적 DDL 006)·G2(실측/좌표추정 confidence 구분, 추정 확정치화 없음)·INGEST-2(apt_dong 자연키 미포함·is_cancelled 제외 유지)·비밀정보(serviceKey env 주입, 하드코딩 0)·로그(apt_dong 미기록, 운영경로 failures 미저장)·엔드포인트(HTTPS→HTTPS) 전부 통과. 341 passed·50 skipped 재현. 비차단 권고 2건(runner httpx 예외 URL serviceKey 마스킹·apt_dong 프론트 렌더 XSS 전방관찰).",
     "log": "docs/03-build/security-review-log.md"
   },
   "open_findings": [
@@ -97,6 +99,37 @@
     }
   ],
   "resolved_findings": [
+    {
+      "id": "APTDONG-1",
+      "verdict": "CLOSE (PASS)",
+      "severity": "medium",
+      "blocks": "없음 (해소)",
+      "found_by": "CR-015 (code-reviewer, herdr re-review 대행)",
+      "date_found": "2026-07-25",
+      "owner": "PM (re-data/re-arch 구현)",
+      "title": "InMemory·PostGIS 로더가 재적재 시 apt_dong 을 다르게 다룬다(불변식4 위반) + COALESCE 보존 테스트 부재",
+      "evidence": [
+        "PostGIS _upsert_trade UPDATE(loader.py:240) 는 apt_dong = COALESCE(:apt_dong, apt_dong) 로 결측 재유입 시 기존 동 보존",
+        "InMemory load update 경로(loader.py:130-132) 는 self.trades[nk]=row 전체 교체 → row['apt_dong']=t.apt_dong 가 그대로 들어가 결측(None) 재유입 시 기존 동 소실",
+        "실측 반례: load(동='103') 후 같은 자연키·동 결측 재유입 → InMemory before='103' after=None / PostGIS COALESCE '103' 유지",
+        "동일 입력에 두 로더가 다른 상태 → loader.py:12 '둘은 같은 규칙을 써야 한다' 원칙 위반. 발생경로는 해제 재유입에 동이 빠질 때(INGEST-2 경로, 결측 10~23%)",
+        "핵심 write-path(COALESCE 보존) 테스트 0건 — test_ingest_loader.py 에 apt_dong 적재/재적재 케이스 없음. InMemory 가 반대로 동작해 InMemory 기반 테스트는 PostGIS 의도와 상반된 값을 정답으로 못박게 됨"
+      ],
+      "pass_conditions": [
+        "① InMemoryTradeLoader.load 의 update 경로를 COALESCE 와 동일 규칙으로 수정 — 재적재 시 t.apt_dong 이 None 이면 기존 self.trades[nk]['apt_dong'] 보존(insert 경로는 현행 유지)",
+        "② '동(有) 거래 → 동 결측(해제 포함) 재유입 후에도 apt_dong 보존' 회귀 테스트 1건(InMemory). PostGIS COALESCE 동일동작은 needs_db 1건 권고"
+      ],
+      "note": "파싱·정규화·마이그레이션 구조·자연키 방어(불변식1·2·3·5)는 전부 PASS. 자연키에 apt_dong 미포함(normalize.py:95-102·004·loader.py:246-250 세 곳)과 006 의 ADD COLUMN+부분인덱스만 변경도 확인됨. 비차단: trade 에 cancelled_on 컬럼 부재로 인한 기존 divergence(범위 밖).",
+      "fixed_by": "PM (loader.py InMemory update COALESCE 동등화 + test_ingest_loader.py 회귀 1건)",
+      "verified_by": "CR-016 (code-reviewer, herdr re-review 대행)",
+      "date_closed": "2026-07-25",
+      "pass_conditions_met": [
+        "① InMemoryTradeLoader.load update 경로가 COALESCE 규칙과 일치: 새 apt_dong 이 None 이면 self.trades[nk]['apt_dong'] 보존, 값이 있으면 최신 채택(loader.py:130-139). PostGIS COALESCE(:apt_dong, apt_dong)(loader.py:244) 미변경 확인",
+        "② 회귀 테스트 test_동은_결측_재유입에도_보존된다 추가 — 보존(None 재유입)·최신우선(신규값)·is_cancelled 갱신 3축 커버(parse→normalize→load 전구간)",
+        "독립 재현: CR-015 원 반례 '103'→결측·해제 재유입 시 '103' 보존(이전 after=None) + 5개 경계 전부 정상",
+        "회귀 342 passed·50 skipped(신규 +1)"
+      ]
+    },
     {
       "id": "INGEST-1",
       "verdict": "CLOSE (PASS)",
