@@ -19,5 +19,10 @@
 | 2026-07-25-07-ux | 2026-07-25 | re-ux | 미완 화면 와이어프레임+명세 + 기존 프론트 UX 감사 | review-required | working | re-ux 제안 반영. 로그인·조건입력·리포트 상세 |
 | 2026-07-25-08-domain | 2026-07-25 | re-domain | SR4-2 가드 강화 + G2 basis 라벨 상수화 | review-required | done | 5통과조건 충족: tripwire격하+구조방어 문서화·fail-loud(_derive_forbidden)·단위정규화 매칭·회귀11건·라벨상수화. 239 passed 회귀0. **자기 PASS 선언 안함** → re-review 재검증 대기 |
 | 2026-07-25-09-review | 2026-07-25 | re-review | 08-domain SR4-2 수정 재검증 (반려 당사자 확인) | none | working | 5가지 우회 재실측 + open finding 닫기 판정 |
-| 2026-07-25-10-arch | 2026-07-25 | re-arch | (다음) 로더 스키마 확장: 6~9억 누진밴드(L1)·수도권6억캡·스트레스DSR(L2) + 003(학구도 기준연도·도로선형) | review-required | 대기 | re-data 에스컬레이션. 자금계산 정확도 |
+| 2026-07-25-10-arch | 2026-07-25 | re-arch | 로더 스키마 확장: 6~9억 누진밴드(L1)·수도권6억캡·스트레스DSR(L2) + 003(학구도 기준연도·도로선형) | review-required | working | re-data 에스컬레이션. 6억캡이 핵심. engine은 re-domain, 값은 re-data 후속 |
 | 2026-07-25-11-data | 2026-07-25 | re-data | (다음) MOLIT 키 발급 후 실수집 + poi.category/attrs 데이터계약 | review-required | 대기(키 발급 후) | re-arch 요청. 실호출 검증 |
+| 2026-07-25-12-review | 2026-07-25 | re-review | (재하달) CR-008 독립확인 + 10-arch 후속 최종 재감사 대기 | none | working | pane 재기동 후 재하달. 6억캡 검증이 핵심 |
+| 2026-07-25-13-arch | 2026-07-25 | re-arch | SR8-1 해소: Argon2 19MiB+compose 메모리제한+동시성 | review-required | working | re-review 발견 배포차단. OWASP 하한 |
+| 2026-07-25-14-domain | 2026-07-25 | re-domain | engine 6억캡·스트레스DSR·누진 계산 + PropertyFacts region_group | review-required | working | contract §3+§1. 과대산정 해소 핵심 |
+| 2026-07-25-15-data | 2026-07-25 | re-data | tax_rules 값: 6억캡·스트레스DSR·누진밴드(출처) | review-required | working | contract §5 |
+| 2026-07-25-SR8-1 | 2026-07-25 | (open) | Argon2 OOM 배포차단 | human-approval(G5) | open→13-arch 처리중 | 배포 전 필수 해소 |

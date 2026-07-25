@@ -1,0 +1,57 @@
+{
+  "S1 저소득·저현금": {
+    "inputs": {
+      "cash_krw": 100000000,
+      "annual_income_krw": 50000000
+    },
+    "max_purchase": 249200000,
+    "loan": 174438000,
+    "binding": "LTV",
+    "ltv": 174440000,
+    "dsr": 349102067
+  },
+  "S2 중간": {
+    "inputs": {
+      "cash_krw": 300000000,
+      "annual_income_krw": 100000000
+    },
+    "max_purchase": 840120000,
+    "loan": 588083780,
+    "binding": "LTV",
+    "ltv": 588084000,
+    "dsr": 698204134
+  },
+  "S3 대출6억 근처": {
+    "inputs": {
+      "cash_krw": 500000000,
+      "annual_income_krw": 200000000
+    },
+    "max_purchase": 1411500000,
+    "loan": 988048500,
+    "binding": "LTV",
+    "ltv": 988050000,
+    "dsr": 1396408269
+  },
+  "S4 대출6억 초과": {
+    "inputs": {
+      "cash_krw": 800000000,
+      "annual_income_krw": 300000000
+    },
+    "max_purchase": 2289700000,
+    "loan": 1602788000,
+    "binding": "LTV",
+    "ltv": 1602790000,
+    "dsr": 2094612404
+  },
+  "S5 극단 고소득": {
+    "inputs": {
+      "cash_krw": 1000000000,
+      "annual_income_krw": 500000000
+    },
+    "max_purchase": 2877940000,
+    "loan": 2014557599,
+    "binding": "LTV",
+    "ltv": 2014558000,
+    "dsr": 3491020674
+  }
+}

@@ -98,6 +98,10 @@ _HAZARD_CATEGORIES = ["hazard", "road"]
 #: 종류 미상 행을 넘기면 근거 없는 감점이 생긴다.
 _CATEGORY_TO_HAZARD = {"road": "main_road_noise"}
 
+#: 통학로 횡단 판정에 쓰는 도로 등급(003 `road_segment`).
+#: 이면도로까지 넣으면 모든 단지가 '대로 횡단'이 돼 판정이 무의미해진다.
+_MAIN_ROAD_CLASSES = ["고속도로", "자동차전용", "간선"]
+
 #: attrs 에서 참으로 읽을 값들(더러운 데이터에 캐스팅 예외로 죽지 않게).
 _TRUTHY_SQL = "('true','t','1','y','yes')"
 
@@ -457,10 +461,25 @@ class PostgisRepository:
     # geom 이 4326(도) 이라 ST_Distance 를 그냥 쓰면 결과가 '도' 로 나온다 — 반드시
     # ::geography 캐스팅. 이걸 빠뜨리면 거리가 조용히 10만배쯤 틀린다.
 
+    #: 003 이후 `sd.as_of` 가 기준연도의 정본이다. 없으면 poi.attrs 로 폴백한다
+    #: (003 적용 전 적재분 호환). 둘 다 없으면 기준일자 미상 → 근거로 쓰지 않는다.
     _SCHOOL_SQL = text("""
         SELECT p.name,
                ST_Distance(p.geom::geography, c.geom::geography) AS distance_m,
-               p.attrs
+               p.attrs,
+               sd.as_of AS district_as_of,
+               -- 통학로가 간선급 도로를 건너는가. 단지→학교 직선과 도로 선형의 교차.
+               -- road_segment 에 데이터가 없으면 false 가 아니라 **NULL(모름)** 이어야
+               -- 하므로 EXISTS 를 쓰지 않고 데이터 유무를 따로 센다.
+               (SELECT count(*) FROM road_segment r
+                 WHERE r.road_class = ANY(CAST(:main_road_classes AS text[]))
+                   AND r.geom && ST_Expand(c.geom, CAST(:road_deg AS double precision))
+               ) AS road_rows_nearby,
+               (SELECT count(*) FROM road_segment r
+                 WHERE r.road_class = ANY(CAST(:main_road_classes AS text[]))
+                   AND r.geom && ST_MakeLine(c.geom, p.geom)
+                   AND ST_Intersects(r.geom, ST_MakeLine(c.geom, p.geom))
+               ) AS road_crossings
         FROM complex c
         JOIN school_district sd
           ON sd.geom && c.geom                 -- GiST 먼저
@@ -604,7 +623,11 @@ class PostgisRepository:
     # --- 입지 조각들 ------------------------------------------------------
 
     def _fetch_school(self, conn, complex_id: int) -> SchoolFact | None:
-        row = conn.execute(self._SCHOOL_SQL, {"complex_id": complex_id}).one_or_none()
+        row = conn.execute(self._SCHOOL_SQL, {
+            "complex_id": complex_id,
+            "main_road_classes": _MAIN_ROAD_CLASSES,
+            "road_deg": _deg(_BUILDING_ROAD_RADIUS_M),
+        }).one_or_none()
         available = conn.execute(self._DISTRICT_AVAILABLE_SQL, {
             "complex_id": complex_id, "deg": _deg(_DISTRICT_DATA_RADIUS_M),
         }).one().available
@@ -616,15 +639,23 @@ class PostgisRepository:
             return SchoolFact(district_data_available=bool(available))
 
         attrs = row.attrs or {}
+        # 주변에 도로 선형 데이터가 아예 없으면 "안 건넌다"가 아니라 **모른다**.
+        # False 로 두면 없는 안전을 지어내는 셈이고, 도메인은 False 를 감점하지 않는다.
+        # 교차가 잡혔으면 탐색 반경과 무관하게 True 다(학교가 반경보다 멀 수 있다).
+        if row.road_crossings:
+            crosses: bool | None = True
+        elif row.road_rows_nearby:
+            crosses = False
+        else:
+            crosses = None
         return SchoolFact(
             name=row.name,
             in_district=True,
             distance_m=_as_float(row.distance_m),
-            # 통학로 대로 횡단 여부는 **판정할 수 없다** — 스키마에 도로 선형(line)
-            # 테이블이 없다. False(횡단 안 함)로 두면 없는 안전을 지어내는 셈이라
-            # None(모름)으로 넘긴다. → PM 보고: 도로망 데이터 필요.
-            crosses_main_road=None,
-            district_as_of=attrs.get("district_as_of"),
+            crosses_main_road=crosses,
+            # 003 의 sd.as_of 가 정본. 없으면 attrs 폴백(003 적용 전 적재분 호환).
+            district_as_of=(row.district_as_of.isoformat() if row.district_as_of
+                            else attrs.get("district_as_of")),
             district_data_available=True,
             achievement_pct=_opt_float(attrs.get("achievement_pct")),
             achievement_source=attrs.get("achievement_source"),
@@ -745,7 +776,10 @@ class PostgisRepository:
                     WHEN district.available THEN false
                     ELSE NULL END AS school_in_district,
                pk.distance_m AS park_distance_m,
-               rd.distance_m AS main_road_distance_m
+               -- 도로 선형(003)이 있으면 그게 정확하다. 점(poi) 근사치와 함께
+               -- **가까운 쪽**을 쓴다 — 도로가 가까울수록 감점이므로 보수적이다.
+               -- LEAST 는 NULL 을 무시하므로 한쪽만 있어도 그대로 동작한다.
+               LEAST(rd.distance_m, rs.distance_m) AS main_road_distance_m
         FROM bldg b
         CROSS JOIN center
         CROSS JOIN district
@@ -786,6 +820,15 @@ class PostgisRepository:
                              CAST(:road_radius AS double precision))
             ORDER BY distance_m LIMIT 1
         ) rd ON true
+        LEFT JOIN LATERAL (
+            SELECT ST_Distance(r.geom::geography, b.geom::geography) AS distance_m
+            FROM road_segment r
+            WHERE r.road_class = ANY(CAST(:main_road_classes AS text[]))
+              AND r.geom && ST_Expand(b.geom, CAST(:road_deg AS double precision))
+              AND ST_DWithin(r.geom::geography, b.geom::geography,
+                             CAST(:road_radius AS double precision))
+            ORDER BY distance_m LIMIT 1
+        ) rs ON true
         ORDER BY b.id
     """)
 
@@ -799,6 +842,7 @@ class PostgisRepository:
                 "park_category": _CAT_PARK,
                 "park_deg": _deg(_PARK_RADIUS_M), "park_radius": _PARK_RADIUS_M,
                 "hazard_categories": _HAZARD_CATEGORIES,
+                "main_road_classes": _MAIN_ROAD_CLASSES,
                 "road_deg": _deg(_BUILDING_ROAD_RADIUS_M),
                 "road_radius": _BUILDING_ROAD_RADIUS_M,
                 "district_deg": _deg(_DISTRICT_DATA_RADIUS_M),

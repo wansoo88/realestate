@@ -292,7 +292,7 @@ PostGIS 컨테이너 1개만 256MB 제한으로 임시 기동 → 검증 → **�
 | 항목 | 결과 |
 |---|---|
 | `CREATE EXTENSION postgis` | ✅ PostGIS 3.4 (re-arch 가 superuser 권한 우려했던 지점 — postgis 이미지 initdb 로 통과) |
-| 테이블 | 34개 (base 21 + trade 파티션 13) |
+| 테이블 | 34개 (앱 base **20** + PostGIS `spatial_ref_sys` 1 + trade 파티션 13) ※CR-009 정정 |
 | trade 파티션 | ✅ 13개 (2016~2027 + default) |
 | GiST 공간 인덱스 | ✅ 6개 |
 | user_preference UNIQUE(user_id) | ✅ 002 적용 |
@@ -305,8 +305,9 @@ PostGIS 실 DB 위에서 register·login·프로필 암복호화·bbox 조회·I
 
 **실패 1건은 프로덕션 무관 — 테스트 코드 버그:**
 `test_근거없는_agent_finding은_저장되지_않는다` 의 2번째 케이스에서 SQLAlchemy `text()` 가
-JSON 리터럴 `'{"a":1}'` 의 **`:1` 을 바인드 파라미터로 오해석**. agent_finding CHECK 자체는
-정상(1번째 케이스 `'[]'` 거부 = IntegrityError 확인). → re-arch 전달(다음 라운드):
+JSON 리터럴 `'{"a":1}'` 의 **`:1` 을 바인드 파라미터로 오해석**.
+※CR-009 정정: **빈 배열 `'[]'` 거부만 검증됨**(IntegrityError). 비배열 케이스는 SQL이 DB에
+도달조차 못 해 CHECK 동작은 **미검증**이다(211-212 주석의 22023 단정은 과잉 — G2). → re-arch 전달:
 `text()` → `exec_driver_sql` 또는 콜론 이스케이프.
 
 ### 부수 발견 (다음 라운드 반영)
@@ -316,3 +317,80 @@ JSON 리터럴 `'{"a":1}'` 의 **`:1` 을 바인드 파라미터로 오해석**.
 ### 결론
 **마이그레이션은 실제로 돈다.** CR-004 최우선 이월 항목과 SR4-1 이 실측으로 해소됨.
 서버는 원상복구(실서비스 무영향) 확인.
+
+---
+
+## CR-009 · 2026-07-25 · CR-008 독립 재검증 (re-review)
+
+**판정: CR-008 결론 CONFIRM (PASS)** · 단 원장 문구 **2건 정정 요구**
+
+CR-008 은 PM 이 배포서버에서 직접 수행한 것으로 re-review 의 독립검증이 아니다(CHARTER §2 —
+만든 자와 검증하는 자의 분리). 지시 `2026-07-25-12-review` 로 원장 기록이 실측과 일치하는지,
+needs_db 실패 1건이 정말 프로덕션 무관인지를 **DB 없이 정적·재현 가능한 방법으로** 재검증했다.
+
+### 1) 원장 수치 vs 마이그레이션 SQL 정적 대조 — 전부 일치
+
+| CR-008 기록 | 재검증 근거 | 결과 |
+|---|---|---|
+| GiST 인덱스 6 | `001_init.sql` `USING GIST` 6건 (L22·40·55·190·199·209) | ✅ 일치 |
+| trade 파티션 13 | `PARTITION OF` 13건 (2016~2027 12 + default) | ✅ 일치 |
+| 테이블 34 | `CREATE TABLE` 33건 + PostGIS 확장이 만드는 `spatial_ref_sys` 1 = 34 | ✅ 총계 일치 |
+| UNIQUE(user_id) | `002_add_user_preference_unique.sql` | ✅ |
+| agent_finding CHECK | `jsonb_array_length(evidence) > 0`, `confidence BETWEEN 0 AND 1` | ✅ |
+| needs_db 29건(28+1) | `pytest -m needs_db --collect-only` → **29** (모듈 `pytestmark`, 함수 29) | ✅ 일치 |
+
+> **정정 ①** — "테이블 34개(**base 21** + 파티션 13)" 의 내역 라벨이 부정확하다.
+> 마이그레이션이 만드는 앱 base 테이블은 **20개**(trade 부모 포함)이고, 21번째는 PostGIS 확장이
+> 만드는 **시스템 테이블 `spatial_ref_sys`** 다. 총계 34 는 맞으나 "base 21" 은 앱 테이블 수로
+> 오독될 수 있다. → `base 20 + spatial_ref_sys 1 + 파티션 13 = 34` 로 표기 권장.
+
+### 2) needs_db 실패 1건 = 테스트 버그 · 프로덕션 무관 — **CONFIRM (독립 재현 완료)**
+
+이 실패는 SQL 이 DB 에 도달하기 *전* SQLAlchemy 컴파일 단계에서 터지므로 **DB 없이 재현된다.**
+`backend/` 에서 직접 실행해 확인했다:
+
+- `text()` 가 `'{"a":1}'` 의 `:1` 을 바인드 파라미터로 파싱 → `_bindparams == ['1', 'iid']`
+- `literal_binds` 렌더 결과 **`'{"a"NULL}'::jsonb`** — 깨진 JSON. 즉 의도한 SQL 이 아예 아니다.
+- 실행 시 파라미터 `1` 값이 없어 **`StatementError`** 발생. `DBAPIError` 는 `StatementError` 의
+  **하위**클래스이므로(`issubclass(DBAPIError, StatementError) == True`, 역은 False)
+  `pytest.raises(DBAPIError)` 가 못 잡는다 → 실패. **CR-008 의 진단은 정확하다.**
+- `::jsonb` 캐스트(콜론 2개)와 1번째 케이스 `'[]'` 는 정규식 lookbehind 로 영향 없음 — 확인.
+
+**프로덕션 전파 여부 전수조사**: `app/` + `tests/` 의 `text()` 블록 **55개**를 SQLAlchemy 의
+바인드 정규식으로 전수 스캔한 결과, 식별자가 아닌 바인드가 파싱되는 곳은
+**`tests/test_postgis_repo.py:215` 단 1곳**. 프로덕션 `text()` 는 전부 안전.
+→ **"프로덕션 무관" 확인.** 수정은 `exec_driver_sql` 또는 `\:` 이스케이프 (re-arch 몫).
+
+> **정정 ②** — CR-008 의 "**CHECK 자체는 정상**" 은 **과잉 주장**이다.
+> 실측된 것은 1번째 케이스(`'[]'` → IntegrityError)뿐이고, 2번째 케이스(비배열 `'{"a":1}'`)는
+> **SQL 이 DB 에 도달조차 못 했으므로 검증되지 않았다.** 그런데
+> `test_postgis_repo.py:211-212` 주석은 "배열이 아닌 값은 CHECK 위반이 아니라 함수 오류(22023)로
+> 터진다 — API 에서 잡는 예외도 달라진다"고 **단정**한다. 이 단정에는 현재 **측정 근거가 없다**
+> (G2 원칙 1 출처·6 재현성).
+> 이론상으론 옳다(`jsonb_array_length(비배열)` → 22023 → SQLAlchemy `DataError` ⊂ `DBAPIError`).
+> 즉 테스트의 *의도*는 맞고 리터럴만 깨졌다. → 원장을 "정상 확인"이 아니라 **"미검증"** 으로
+> 정정하고, 테스트 수정 후 재실행으로 자동 해소할 것.
+> 참고: 현재 `agent_finding` 에 INSERT 하는 **프로덕션 코드가 존재하지 않는다**
+> (`loader.py:60`·`base.py:65` 는 docstring 언급뿐). "API 가 잡는 예외" 우려는 아직 가설이며,
+> 추천 결과 영속화를 배선할 때 실측하면 된다.
+
+### 3) 재현 증적 미보존 (G2 원칙 6 — 비차단 권고)
+
+CR-008 커밋(86614d4)은 `code-review-log.md`·`ledger.md` **문서 2개만** 담았다. 파티션 라우팅·
+GiST `Index Scan` 같은 **서버 실측 원문(psql 출력·EXPLAIN)이 저장소에 없고** 검증 컨테이너는
+삭제됐다. 결론 자체는 위 정적 근거(DDL)와 교차검증되어 신뢰하나, 재현하려면 서버 작업을 통째로
+다시 해야 한다. → 다음 실검증부터 EXPLAIN·psql 원문을 `docs/03-build/evidence/` 에 첨부 권장.
+
+### 4) 부수 발견 확인 + 신규
+
+- `requirements.txt` 에 `pytest` 누락 — **확인**(`requirements-dev.txt` 없음). CR-008 기록 정확.
+- **회귀 기준선 갱신**: 전체 `pytest` **286건 · 29 skip(needs_db) · 257 실행**.
+  ledger 의 "239 passed" 는 그 이후 re-domain/re-data 작업으로 증가한 값이다.
+- ⚠️ **신규 발견 — 8회 중 1회 flaky 실패**: `tests/test_security.py::test_비밀번호_해시_검증`
+  → `argon2.exceptions.HashingError: Memory allocation error`.
+  단순 flake 가 아니라 **배포 대상 VPS 에서 재현될 수 있는 자원 고갈 문제**다. → **SR-008** 참조.
+
+### 판정
+**CR-008 CONFIRM (PASS).** 핵심 결론 — *마이그레이션은 실제로 돌고, needs_db 실패 1건은
+프로덕션 무관 테스트 버그* — 는 독립 재현으로 확인했다. CR-004 / SR4-1 해소 유지.
+위 **정정 ①②는 사실 기술의 정확성 문제**이므로 원장 문구를 고칠 것(게이트 차단 아님).

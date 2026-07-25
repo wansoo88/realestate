@@ -42,7 +42,7 @@ _TRUNCATE = """
 TRUNCATE complex, trade, listing, unit_type, building, region,
          app_user, recommendation_job, recommendation_item, agent_finding,
          user_profile, user_preference,
-         poi, school_district, transit_plan
+         poi, school_district, transit_plan, road_segment
 RESTART IDENTITY CASCADE
 """
 
@@ -210,12 +210,19 @@ def test_근거없는_agent_finding은_저장되지_않는다(engine):
 
     # ⚠️ 배열이 아닌 값을 넣으면 CHECK 위반이 아니라 함수 오류(22023)로 터진다.
     #    막히긴 하지만 오류 종류가 달라 API 에서 잡는 예외도 달라진다 — 알고 있어야 한다.
+    #
+    # exec_driver_sql 을 쓰는 이유: SQLAlchemy `text()` 는 JSON 리터럴 '{"a":1}' 의
+    # `:1` 을 바인드 파라미터로 오해석한다(CR-008 에서 이 테스트가 실패한 원인).
+    # 드라이버로 직접 보내면 콜론을 해석하지 않는다. 파라미터는 psycopg 의 %s 를 쓴다.
     with pytest.raises(DBAPIError):
         with engine.begin() as conn:
-            conn.execute(text("""
+            conn.exec_driver_sql(
+                """
                 INSERT INTO agent_finding (item_id, agent_id, evidence)
-                VALUES (:iid, 'valuation-trader', '{"a":1}'::jsonb)
-            """), {"iid": item_id})
+                VALUES (%s, 'valuation-trader', '{"a":1}'::jsonb)
+                """,
+                (item_id,),
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -493,6 +500,114 @@ def test_학구도_미포함과_미확보를_구분한다(repo, engine):
 
     f_none = repo.location_facts(none_area)
     assert f_none.school.district_data_available is False
+
+
+def test_003_학구도_기준연도가_컬럼에서_온다(repo, engine):
+    """003 이전엔 기준일자를 적을 자리가 없었다(CHARTER §5)."""
+    cid = _seed_complex(engine, name="기준연도단지", lon=127.05, lat=37.50)
+    school = _seed_poi(engine, category="school", name="기준초", lon=127.052, lat=37.502)
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO school_district (school_poi_id, geom, source, as_of)
+            VALUES (:sid, ST_SetSRID(ST_MakeEnvelope(127.04,37.49,127.06,37.51),4326),
+                    '학교알리미', DATE '2026-03-01')
+        """), {"sid": school})
+
+    assert repo.location_facts(cid).school.district_as_of == "2026-03-01"
+
+
+def test_003_통학로_대로횡단을_판정한다(repo, engine):
+    """도로 선형이 있어야만 판정한다. 없으면 False 가 아니라 None(모름)."""
+    cid = _seed_complex(engine, name="횡단단지", lon=127.05, lat=37.50)
+    school = _seed_poi(engine, category="school", name="건너초", lon=127.054, lat=37.50)
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO school_district (school_poi_id, geom, source)
+            VALUES (:sid, ST_SetSRID(ST_MakeEnvelope(127.04,37.49,127.06,37.51),4326), 'x')
+        """), {"sid": school})
+
+    # 도로 데이터가 없는 동안은 '모름'
+    assert repo.location_facts(cid).school.crosses_main_road is None
+
+    with engine.begin() as conn:
+        # 단지(127.050)와 학교(127.054) 사이를 남북으로 가로지르는 간선도로
+        conn.execute(text("""
+            INSERT INTO road_segment (name, road_class, geom, source)
+            VALUES ('테헤란로', '간선',
+                    ST_SetSRID(ST_MakeLine(ST_MakePoint(127.052,37.49),
+                                           ST_MakePoint(127.052,37.51)), 4326), 'test')
+        """))
+    assert repo.location_facts(cid).school.crosses_main_road is True
+
+    # 통학 직선 밖(단지 반대편)의 도로는 횡단이 아니다
+    with engine.begin() as conn:
+        conn.execute(text("TRUNCATE road_segment RESTART IDENTITY"))
+        conn.execute(text("""
+            INSERT INTO road_segment (name, road_class, geom, source)
+            VALUES ('반대편로', '간선',
+                    ST_SetSRID(ST_MakeLine(ST_MakePoint(127.040,37.49),
+                                           ST_MakePoint(127.040,37.51)), 4326), 'test')
+        """))
+    assert repo.location_facts(cid).school.crosses_main_road is False
+
+
+def test_003_이면도로는_대로횡단으로_치지_않는다(repo, engine):
+    """모든 단지가 '대로 횡단'이 되면 판정이 무의미해진다."""
+    cid = _seed_complex(engine, name="이면단지", lon=127.05, lat=37.50)
+    school = _seed_poi(engine, category="school", name="이면초", lon=127.054, lat=37.50)
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO school_district (school_poi_id, geom, source)
+            VALUES (:sid, ST_SetSRID(ST_MakeEnvelope(127.04,37.49,127.06,37.51),4326), 'x')
+        """), {"sid": school})
+        conn.execute(text("""
+            INSERT INTO road_segment (name, road_class, geom, source)
+            VALUES ('골목길', '일반',
+                    ST_SetSRID(ST_MakeLine(ST_MakePoint(127.052,37.49),
+                                           ST_MakePoint(127.052,37.51)), 4326), 'test')
+        """))
+    # 간선급 도로가 주변에 하나도 없으므로 '모름'
+    assert repo.location_facts(cid).school.crosses_main_road is None
+
+
+def test_003_road_segment_제약(engine):
+    """선형이 아닌 도형은 거부한다(점을 도로로 넣으면 거리 계산이 조용히 틀어진다)."""
+    with pytest.raises(IntegrityError):
+        with engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO road_segment (name, road_class, geom, source)
+                VALUES ('점', '간선', ST_SetSRID(ST_MakePoint(127.05,37.5),4326), 't')
+            """))
+    with pytest.raises(IntegrityError):        # road_class 화이트리스트
+        with engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO road_segment (name, road_class, geom, source)
+                VALUES ('x', '오솔길',
+                        ST_SetSRID(ST_MakeLine(ST_MakePoint(127.05,37.5),
+                                               ST_MakePoint(127.06,37.5)),4326), 't')
+            """))
+
+
+def test_003_동별_간선도로_거리는_선형을_쓴다(repo, engine):
+    cid = _seed_complex(engine, name="도로단지", lon=127.05, lat=37.50)
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO building (complex_id, name, geom) VALUES
+              (:cid, '101동', ST_SetSRID(ST_MakePoint(127.0495,37.500),4326)),
+              (:cid, '105동', ST_SetSRID(ST_MakePoint(127.0520,37.500),4326))
+        """), {"cid": cid})
+        # 127.053 경도를 따라 남북으로 뻗은 간선도로
+        conn.execute(text("""
+            INSERT INTO road_segment (name, road_class, geom, source)
+            VALUES ('간선대로', '간선',
+                    ST_SetSRID(ST_MakeLine(ST_MakePoint(127.053,37.49),
+                                           ST_MakePoint(127.053,37.51)), 4326), 'test')
+        """))
+
+    facts = {b.label: b for b in repo.building_location_facts(cid)}
+    # 도로에 붙은 105동이 101동보다 가깝다 — 선형과의 최단거리가 잡혔다는 뜻
+    assert facts["105동"].main_road_distance_m < facts["101동"].main_road_distance_m
+    assert facts["105동"].main_road_distance_m == pytest.approx(88, abs=40)
 
 
 def test_역_최단거리와_노선을_돌려준다(repo, engine):

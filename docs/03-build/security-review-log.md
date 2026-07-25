@@ -388,3 +388,60 @@ SR4-2 CLOSE 의 근거는 tripwire 완전성이 아니라 **구조+테스트+fai
 **SR4-2 CLOSE (PASS).** SR-006 의 4개 통과조건 + G2 접두매칭까지 모두 충족. 반려 당사자로서
 직접 실행해 확인했고, 재현 가능하다. `3.0억` tripwire 미기재 1건은 **비차단 권고**로만 남긴다.
 `.review-state.json::open_findings[SR4-2]` 를 `resolved` 로 전환한다.
+
+---
+
+## SR-008 · 2026-07-25 · 신규 발견 — Argon2 메모리 고갈 (re-review, CR-009 파생)
+
+**판정: 신규 OPEN 발견 `SR8-1` · 커밋 게이트는 통과 유지 · 배포(G5) 차단 조건**
+
+CR-009(CR-008 재검증) 중 전체 테스트를 8회 반복하다 1회 관측된 실패에서 출발했다.
+flaky 로 넘길 사안이 아니라 **CR-008 이 스스로 기록한 배포서버 실측치와 정면으로 충돌**한다.
+
+### 발견 경위
+`tests/test_security.py::test_비밀번호_해시_검증` → `argon2.exceptions.HashingError:
+Memory allocation error`. 8회 중 1회. 개발 PC(RAM 여유 충분)에서 발생했다.
+
+### 실측 근거 (직접 실행)
+
+| 항목 | 실측값 | 확인 방법 |
+|---|---|---|
+| `PasswordHasher()` `memory_cost` | **65536 KiB = 64 MiB / 해시 1회** | `app/core/security.py:44` 는 인자 없는 기본 생성 |
+| `time_cost` / `parallelism` | 3 / 4 | 동일 |
+| 해시 1회 소요 | **약 70 ms** (이 동안 64 MiB 점유) | 직접 측정 |
+| 인증 라우트 형태 | `def register` / `def login` — **sync** (`app/api/routes.py:60,72`) | Starlette 가 스레드풀에서 실행 |
+| anyio 기본 스레드풀 한도 | **40** (앱이 조정하지 않음 — `total_tokens` 오버라이드 없음) | 직접 측정 |
+| nginx 인증 rate limit | `rate=1r/s`, **`burst=5 nodelay`** (`deploy/nginx.conf:8,40`) | 소스 확인 |
+| docker-compose 메모리 제한 | **없음** (`mem_limit`·`deploy.resources` 미설정) | 소스 확인 |
+| 배포 VPS 여유 메모리 | **332 MB** | **CR-008 이 직접 기록한 실측치** |
+
+### 왜 문제인가
+- **단일 IP 가 rate limit 을 지켜도** `burst=5 nodelay` 로 5건 동시 인증 요청이 통과한다
+  → `5 × 64 MiB = 320 MiB`. 이는 **CR-008 이 측정한 VPS 여유 메모리 332 MB 를 거의 정확히 소진**한다.
+- 그 332 MB 는 **pjt13 스택이 뜨기 전** 값이다. postgres·redis·backend·nginx·frontend 가
+  올라가면 여유는 **더 줄어든다.** 즉 실제 여유는 320 MiB 보다 작다.
+- 스레드풀 한도 40 이므로 이론적 최대는 `40 × 64 MiB = 2.56 GB`. compose 에 메모리 제한이
+  없으므로 컨테이너가 이를 막지 못한다.
+- 해당 VPS 는 **autobtc·itsmine 이 운영 중인 실서비스 서버**다. OOM 발생 시 pjt13 뿐 아니라
+  **동거 중인 타 서비스가 OOM-killer 대상이 될 수 있다.**
+- `HashingError` 는 **어디서도 처리되지 않는다**(`grep HashingError` → 0건).
+  → `main.py:72` 전역 핸들러가 500 으로 잡는다.
+
+### 정보 유출은 없음 (G3 유지)
+전역 핸들러가 스택트레이스·로컬변수를 응답에 싣지 않고 `{"code":"INTERNAL"}` 만 반환한다
+(`app/main.py:72-80`). **유출 없음 확인.** 문제는 기밀성이 아니라 **가용성**이다.
+
+### 통과 조건 (배포 전 필수)
+1. `PasswordHasher(memory_cost=..., time_cost=..., parallelism=...)` 를 **명시 설정**한다.
+   OWASP Password Storage Cheat Sheet 의 Argon2id 권장 하한은 **19 MiB / t=2 / p=1** 이므로
+   기본값(64 MiB)을 낮춰도 **권장 기준을 만족**한다. 19 MiB 기준 5동시 = 95 MiB 로 3.4배 여유.
+2. `docker-compose.yml` 의 backend 에 **메모리 제한을 명시**해 동거 서비스로 피해가 번지지 않게 한다.
+3. 인증 경로 동시성을 스레드풀 40 이 아니라 **의도한 값으로 제한**한다(전용 세마포어 등).
+4. `HashingError` 를 잡아 **503**(자원 부족, 재시도 가능)으로 응답한다. 500 은 원인을 숨긴다.
+5. 회귀 테스트: 설정된 파라미터가 실제로 적용되는지 검증하는 테스트 1건.
+
+### 게이트 판정
+- **커밋 게이트(G1)는 통과 유지.** 신규 코드 변경이 아니라 기존 통과 코드에 대한 **신규 발견**이고,
+  배포 전에는 악용 경로가 성립하지 않는다. 여기서 커밋을 막으면 진행 중인 작업만 멈춘다.
+- **단 `SR8-1` 은 `open_findings` 로 등록하고, G5(사람 승인 배포)의 차단 조건으로 둔다.**
+  이 상태로 배포하면 **인증 5건만으로 실서비스 서버가 위험**하다.

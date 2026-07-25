@@ -1,0 +1,24 @@
+# 개발·테스트 전용 의존성.
+#
+# 왜 나누나 (CR-008 후속)
+# -----------------------
+# `requirements.txt` 는 **운영 이미지에 들어가는 것만** 담는다(Dockerfile 이 이 파일만 설치).
+# 테스트 도구를 거기 섞으면 운영 컨테이너에 필요 없는 코드가 늘고,
+# 공격 표면과 이미지 크기가 같이 커진다.
+#
+# 사용
+#   pip install -r requirements-dev.txt      # 런타임 + 테스트 도구가 함께 깔린다
+#   python -m pytest                          # 인메모리 테스트
+#   set TEST_DATABASE_URL=postgresql+psycopg://...  &&  python -m pytest -m needs_db
+#
+# ⚠️ Dockerfile 은 이 파일을 설치하지 않는다. 그대로 두는 게 맞다.
+
+-r requirements.txt
+
+# 테스트 러너. `needs_db` 마커 분리에 쓰인다(pytest.ini).
+pytest==9.0.2
+
+# 실 DB 테스트(`-m needs_db`)에 필요.
+#   - psycopg: PostgreSQL 드라이버. requirements.txt 에도 있으나 런타임과 무관하게
+#     테스트만 돌릴 때도 필요하므로 -r 로 이미 포함된다(중복 명시하지 않는다).
+#   - httpx: fastapi TestClient 가 쓴다. 수집기에서도 쓰므로 런타임 쪽에 이미 있다.
