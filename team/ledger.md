@@ -37,5 +37,7 @@
 | 2026-07-25-22-arch | 2026-07-25 | re-arch | 배포 결함 DEP-1/2/3 수정 | human-approval(G5) | done | certbot 부트스트랩4단계(--nginx→certonly)·보안헤더 두 location 재명시·검증 실효화·빌드 db앞·dockerignore. 293 passed. re-review 재검증 대기 | certbot 순서·보안헤더 상속·서버빌드 OOM. 수정 후 재검증 |
 | 2026-07-25-23-review | 2026-07-25 | re-review | DEP-1/2/3 재검증 | none | done | **DEP-1/2/3 CLOSE**(SR-012). conf 파싱 전수검사·check_headers 직접실행·교체정합성·renew지속성 확인. 잔여2(상속함정·nginx-t 로컬) 정직 수용. **배포준비물 PASS**, deployment_readiness=PASS. 남은건 G5 사람결정 | 통과시 배포준비물 PASS→G5 |
 | 2026-07-25-DEPLOY결정 | 2026-07-25 | (사람) | 배포 시점 결정 | — | 확정 | **수집·추천 완성 후 배포**. 준비물(fcff115·883bc2b)은 완성·보존. 지금 배포 안 함(자금계산만 반쪽+백업/하드닝 없음) |
-| 2026-07-25-24-domain | 2026-07-25 | re-domain | 추천 실행 경로: orchestrator 실데이터 구동(worker→api 백그라운드, redis 없이) | review-required | working | 배포 최소구성 정합. 추천 202→실작동 |
-| 2026-07-25-25-data | 2026-07-25 | re-data | MOLIT 실수집 실행 + 단지/실거래 PostGIS 적재 | review-required | working(키 대기) | 키 발급 후 실행. 코드/픽스처 먼저 |
+| 2026-07-25-24-domain | 2026-07-25 | re-domain | 추천 실행 경로 | review-required | done | API BackgroundTask 로 orchestrator(redis 없이). 예외격리·SR4-2구조·IDOR테스트. 317 passed. re-arch 4종메서드 핸드오프. re-review 검증대기 | 배포 최소구성 정합. 추천 202→실작동 |
+| 2026-07-25-25-data | 2026-07-25 | re-data | MOLIT 수집→적재 파이프라인 | review-required | done | 정규화·멱등적재·지오코딩·러너 완성(픽스처 검증). 키 대기(실호출). 317 passed. region마스터·004 후속 | 키 발급 후 실행. 코드/픽스처 먼저 |
+| 2026-07-25-26-arch | 2026-07-25 | re-arch | PostGIS 4종메서드 + region마스터 + 004인덱스 + 시군구목록 | review-required | working | 실DB 추천·수집 동작 핸드오프 |
+| 2026-07-25-27-review | 2026-07-25 | re-review | 추천실행+수집 검증 | none | working | IDOR·SR4-2구조·멱등·robots |
