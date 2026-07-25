@@ -19,29 +19,47 @@
   },
   "open_findings": [
     {
-      "id": "SR8-2",
-      "verdict": "OPEN",
+      "id": "SR10-1",
+      "verdict": "ACCEPTED (수용 · 비차단)",
       "severity": "low",
-      "blocks": "없음 (비차단 — 정보유출 없음, 발생 확률 크게 낮아짐. 상태코드 의미 오류)",
-      "found_by": "SR-009 (re-review, SR8-1 통과조건 ④ 미충족분 승계)",
+      "blocks": "없음 — G5 배포를 막지 않음",
+      "found_by": "re-arch 발견 → SR-010 (re-review) 실측·트리아지 (지시 2026-07-25-20-review)",
       "date_found": "2026-07-25",
-      "owner": "re-arch",
-      "title": "argon2 HashingError(실제 할당 실패)가 여전히 500 — 503 이어야 한다",
+      "owner": "re-arch (재평가 조건 발생 시)",
+      "title": "타이밍 계정열거 — 로그인이 없는 계정에 해시를 건너뛰어 존재 여부가 드러남",
       "evidence": [
-        "grep HashingError → 앱 코드 0건(미처리). SR-008 에서 실제로 관측한 그 예외다",
-        "주입 실측: argon2.HashingError → 500 {\"code\":\"INTERNAL\"} / HashCapacityError → 503 {\"code\":\"BUSY\"} + Retry-After: 1",
-        "정보 유출 없음(일반 메시지·스택트레이스 미노출) — G3 유지",
-        "세마포어로 발생 확률은 크게 낮아졌으나 0 아님. backend mem_limit 192m 에서 Argon2 76MiB + 파이썬 런타임이 겹치면 여유가 넉넉하지 않다"
+        "실측(각 15회, 틀린 비밀번호 고정): 존재계정 p50 34.3ms(min 30.8) vs 없는계정 p50 2.1ms(max 3.3) — 겹침 구간 없음. 단일 요청 + 임계값 하나로 100% 판별",
+        "원인: routes.py:76 'user is not None and verify_password(...)' 단축평가로 해시 스킵",
+        "★ 더 쉬운 오라클이 이미 열려 있다: POST /auth/register 가 기존 이메일에 409 EMAIL_TAKEN, 신규엔 201 (실측) — 결정적·무잡음·단일요청이라 타이밍보다 훨씬 쉽다",
+        "따라서 로그인 타이밍만 고치는 것은 보안 연극 — 약한 채널을 닫고 강한 채널을 열어둔다",
+        "심각도 근거: 사용자 규모가 개인·소수(CLAUDE.md)라 수확할 명부가 없고, 열거는 금융정보 자체를 노출하지 않음(G3 유지). nginx 1r/s 로 수확 처리량 제한"
       ],
-      "pass_conditions": [
-        "① HashingError 를 HashCapacityError 와 같은 503 경로로 매핑(자원 부족 = 재시도 가능)",
-        "② 회귀 테스트 1건"
+      "sr8_1_tradeoff_analysis": [
+        "re-arch 의 '더미해시가 SR8-1 과 상충' 우려는 절반만 맞다 — 과대평가",
+        "① 메모리 상한 불변: 세마포어가 동시 해시를 4(76MiB)로 묶는 건 누가 유발하든 동일. SR8-1 핵심 보호(OOM 전파)는 전혀 약해지지 않는다",
+        "② 슬롯 소진 경로는 이미 존재: 공격자는 지금도 존재하는 이메일로 같은 4슬롯을 점유할 수 있다. 더미해시는 새 능력을 주지 않고 '공짜 경로'만 없앤다",
+        "③ 처리량: 4슬롯 ÷ 34ms ≈ 117 해시/s. nginx IP당 1r/s(burst 5)라 포화에 약 117개 IP 필요 — 그 분산공격은 오늘도 기존 이메일로 가능",
+        "→ 실제 비용은 '분산 폭주 시 로그인 가용성이 조금 더 일찍 저하' 정도. 그 비용을 치르고 두 채널 중 약한 쪽만 닫는 건 가장 나쁜 거래다"
       ],
-      "note": "500 은 '서버 버그, 재시도 말라'는 뜻이라 자원 부족 상황에 의미가 틀리다. SR8-1 CLOSE 시 이 미충족분을 삭제하지 않고 별건으로 승계한 것."
-    },
+      "acceptance_rationale": "개인·소수 사용자 규모에서 열거 가치가 낮고, 더 쉬운 오라클(register 409)이 함께 열려 있어 로그인만 고치면 효과가 없다. 지금 더미해시를 넣으면 가용성만 깎이고 열거는 그대로다.",
+      "reevaluation_triggers": [
+        "① 본인 외 사용자(가족·지인)가 생기거나 공개 가입이 열릴 때",
+        "② 계정 명부가 가치를 갖는 규모가 될 때",
+        "③ 인증 실패 로그인 시도가 비정상적으로 관측될 때"
+      ],
+      "fix_plan_when_triggered": [
+        "두 채널을 함께 고친다(반쪽은 연극)",
+        "register: 기존/신규 동일 응답(202 수락) + 이메일 인증으로 가입 완결",
+        "login: 없는계정 분기에 고정 지연(~35ms). Argon2 를 돌리지 않아 슬롯·19MiB 를 쓰지 않으므로 SR8-1 과의 긴장이 사라진다 — 더미해시보다 낫다",
+        "한계 정직 기재: 고정 지연은 평균은 맞추나 분산이 다르다(Argon2 는 부하에 흔들리고 고정 지연은 안 흔들림). 정밀 측정에는 구분 여지가 남아 완전 해소는 아니다"
+      ],
+      "ledger_correction": "security-review-log.md:135 의 '계정 열거 ✅ 차단' 판정을 '⚠️ 부분'으로 정정했다. 근거 테스트가 응답 본문·상태코드만 비교했고 타이밍과 register 409 를 보지 않은 과잉 주장이었다(내가 쓴 판정)."
+    }
+  ],
+  "resolved_findings": [
     {
       "id": "CR10-1",
-      "verdict": "OPEN",
+      "verdict": "CLOSE (PASS)",
       "severity": "low",
       "blocks": "없음 (비차단 — 현재 무시되므로 활성 취약점 아님. 단 배선 한 줄이면 G2 구멍)",
       "found_by": "CR-010 (re-review, 지시 2026-07-25-12-review(B))",
@@ -61,10 +79,50 @@
         "ⓑ 필드 유지하되 서버 판정값으로 덮어쓰고 docstring 을 실제 동작에 맞게 정정",
         "어느 쪽이든 '클라이언트가 못 바꾼다'는 서술과 코드가 일치해야 한다"
       ],
-      "note": "잠재 위험: 필드명이 배선을 유도하고 docstring 이 그 배선을 정답처럼 서술한다. body.target_region_code 를 한 줄 연결하는 순간 사용자가 비수도권 코드로 6억캡을 끄고 실구매 가능액을 13.6억 부풀릴 수 있다 — 이 작업 전체가 고치려던 버그로 회귀."
-    }
-  ],
-  "resolved_findings": [
+      "note": "Pydantic 이 미정의 필드를 무시하므로 주입 자체가 성립하지 않는다. 문서-현실 불일치 해소.",
+      "fixed_by": "re-arch/re-domain / 커밋 5aeac7d (내 통과조건 중 ⓐ 필드 제거 채택)",
+      "verified_by": "CR-011 (re-review — 지시 2026-07-25-20-review)",
+      "date_closed": "2026-07-25",
+      "pass_conditions_met": [
+        "ⓐ AffordabilityIn.target_region_code 제거 확인. 자리에 이유·근거문서 주석 남김",
+        "PropertyFacts.target_region_code 는 유지 — 옳다. 서버가 단지 법정동코드를 채워야 하므로 필드 자체는 필요했고, 문제는 클라이언트가 보낼 수 있다는 점이었다",
+        "models.py docstring 정정 확인: 'API 요청 스키마에 필드가 없다(CR10-1)' — 이제 사실과 일치",
+        "앱 전수 grep: 잔존 참조는 도메인 모델 2곳뿐, 스키마·라우터·프론트 0건",
+        "e2e 우회 불가 실증: 5가지 주입(비수도권 코드/region_group 직접/둘 다/대소문자·공백 변형) 전부 1,326,750,000 · binding=CAP · cap=6억 으로 동일. CR-010 정답표 캡 적용값과 정확히 일치(우회 성공시 2,289,700,000 이 나왔어야 함)"
+      ]
+    },
+    {
+      "id": "SR8-2",
+      "verdict": "CLOSE (PASS)",
+      "severity": "low",
+      "blocks": "없음 (비차단 — 정보유출 없음, 발생 확률 크게 낮아짐. 상태코드 의미 오류)",
+      "found_by": "SR-009 (re-review, SR8-1 통과조건 ④ 미충족분 승계)",
+      "date_found": "2026-07-25",
+      "owner": "re-arch",
+      "title": "argon2 HashingError(실제 할당 실패)가 여전히 500 — 503 이어야 한다",
+      "evidence": [
+        "grep HashingError → 앱 코드 0건(미처리). SR-008 에서 실제로 관측한 그 예외다",
+        "주입 실측: argon2.HashingError → 500 {\"code\":\"INTERNAL\"} / HashCapacityError → 503 {\"code\":\"BUSY\"} + Retry-After: 1",
+        "정보 유출 없음(일반 메시지·스택트레이스 미노출) — G3 유지",
+        "세마포어로 발생 확률은 크게 낮아졌으나 0 아님. backend mem_limit 192m 에서 Argon2 76MiB + 파이썬 런타임이 겹치면 여유가 넉넉하지 않다"
+      ],
+      "pass_conditions": [
+        "① HashingError 를 HashCapacityError 와 같은 503 경로로 매핑(자원 부족 = 재시도 가능)",
+        "② 회귀 테스트 1건"
+      ],
+      "note": "Argon2Error 로 넓게 잡은 판단이 타당함을 확인 — 잘못된 파라미터는 _build_hasher 가 기동 시점에 걸러내므로 여기까지 온 argon2 오류는 사실상 자원 문제다. 로그에 비밀번호 미기록 확인.",
+      "fixed_by": "re-arch / ORDER 2026-07-25-17-arch (커밋 5aeac7d)",
+      "verified_by": "SR-010 (re-review — 지시 2026-07-25-20-review)",
+      "date_closed": "2026-07-25",
+      "pass_conditions_met": [
+        "① HashingError → 503 매핑: Argon2Error 로 넓게 잡아 HashCapacityError 로 변환. 주입 실측 로그인·등록 모두 503 BUSY + Retry-After:1",
+        "② 회귀 테스트 신설. 전체 327 passed 3회 연속 동일",
+        "(추가검증) except 순서: VerifyMismatchError ⊂ VerificationError ⊂ Argon2Error 이므로 VerifyMismatch 를 먼저 잡아야 하며 실제 코드가 정순 — 역전 시 '틀린 비번=503 / 없는 계정=401' 로 상태코드가 계정존재 오라클이 되는 함정을 피함",
+        "(추가검증) InvalidHashError 는 Argon2Error 하위가 아니라 ValueError 하위(실측) → 마지막 except 절이 죽은 코드 아님. 깨진 저장해시는 의도대로 False",
+        "(추가검증) verify 경로가 자원오류를 False 로 삼키지 않고 HashCapacityError 로 전파 — '비밀번호가 틀렸다'는 거짓말을 안 함",
+        "(추가검증) 정상경로 회귀: 올바른 비번 200 / 틀린 비번 401 / 없는 계정 401, 본문·상태 동일"
+      ]
+    },
     {
       "id": "CR9-1",
       "verdict": "CLOSE (PASS)",

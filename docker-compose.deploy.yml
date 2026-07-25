@@ -1,0 +1,107 @@
+# docker-compose.deploy.yml — 1차 배포(최소 구성): **api + db 만**
+#
+# 왜 별도 파일인가 (override 가 아니라)
+# ------------------------------------
+# override 는 서비스를 **더할 수는 있어도 지울 수는 없다.** 이번 배포는
+# nginx·worker-agent·worker-ingest·redis 를 **빼는 것**이 핵심이라 독립 파일로 둔다.
+#   · nginx  : 호스트에 이미 돌고 있는 것을 재사용한다(deploy/nginx-realestate.conf).
+#   · worker : `app/worker.py` 가 미구현이라 종료코드 2 로 죽는다. `restart: unless-stopped`
+#              와 만나면 무한 재시작 루프가 된다 — 추천 기능 구현 후 2차 배포에서 올린다.
+#   · redis  : 큐 소비자(worker)가 없으면 쓸 데가 없다. 2차.
+#
+# 그래서 1차 배포 범위는 **동기 기능**뿐이다: 인증 · 프로필 · 자금계산 · 지도.
+# 추천(POST /api/v1/recommendations)은 202 만 돌려주고 완료되지 않는다(의도된 상태).
+#
+# ⚠️ 이 서버에는 다른 실서비스(autobtc·itsmine)가 돈다.
+#    컨테이너 이름·네트워크·볼륨을 전부 `realestate` 접두어로 격리한다.
+#
+# 사용:  docker compose -f docker-compose.deploy.yml up -d
+# 절차:  deploy/DEPLOY.md 를 따를 것 (이 파일만 보고 실행하지 말 것)
+
+name: realestate
+
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    container_name: realestate-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # 초기화 시 로케일 — 한글 정렬을 위해 UTF-8 고정
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+    # 여유 400MB 짜리 서버다. 기본값(shared_buffers 128MB 등)으로 두면 상한을 넘긴다.
+    # 아래 값의 근거는 DEPLOY.md §2 메모리 계산 참조.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=64MB
+      - -c
+      - max_connections=20          # api 풀은 최대 10 — 여유 있게
+      - -c
+      - work_mem=2MB
+      - -c
+      - maintenance_work_mem=32MB
+      - -c
+      - effective_cache_size=128MB
+      - -c
+      - wal_buffers=2MB
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # 빈 볼륨 첫 기동에만 001→002→003 순서로 자동 적용된다(CR-008 에서 검증된 경로).
+      # 이미 데이터가 있는 볼륨에는 실행되지 않는다 — 재적용은 DEPLOY.md §6 참조.
+      - ./backend/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [internal]
+    # ⛔ ports 없음 (의도적). Docker 는 ufw 를 우회해 호스트 포트를 열어버리므로
+    #    방화벽만 믿으면 안 된다 (security.md §4.2 · T1).
+    mem_limit: 192m
+    memswap_limit: 192m
+
+  api:
+    build: ./backend
+    image: realestate-api:local
+    container_name: realestate-api
+    restart: unless-stopped
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    env_file: .env
+    environment:
+      APP_ROLE: api
+      DEBUG: "false"
+      POSTGRES_HOST: db
+      # ⚠️ 이미지 빌드 컨텍스트가 ./backend 라 config/ 가 이미지 안에 없다.
+      #    아래 볼륨으로 넣어 준다. 이걸 빠뜨리면 /affordability 가 런타임에
+      #    503 TAX_RULES_UNAVAILABLE 을 낸다(기동은 성공해서 더 늦게 발견된다).
+      TAX_RULES_PATH: /srv/config/tax_rules.yaml
+      # 메모리가 빠듯한 서버다. **파라미터가 아니라 동시성을 줄인다** —
+      # 파라미터를 깎으면 크래킹 난이도가 내려가지만 동시성은 느려질 뿐이다.
+      # 2 × 19MiB = 38MB (기본 4 였으면 76MB).
+      ARGON2_CONCURRENCY: "2"
+    volumes:
+      # 세율 설정. 읽기 전용 — 컨테이너가 고칠 일이 없다.
+      # 세율이 바뀌면 파일만 갈아끼우고 재시작하면 된다(이미지 재빌드 불필요).
+      - ./config:/srv/config:ro
+    depends_on:
+      db: { condition: service_healthy }
+    networks: [internal]
+    ports:
+      # 127.0.0.1 바인드 — 호스트 nginx 만 접근한다. 0.0.0.0 으로 열면
+      # 공인 IP 에 인증 API 가 그대로 노출된다.
+      - "127.0.0.1:${API_BIND_PORT:-8013}:8000"
+    mem_limit: 192m
+    memswap_limit: 192m
+
+networks:
+  internal:
+    name: realestate-internal
+    # 외부 인터넷 차단은 하지 않는다 — api 가 카카오 지오코딩 API 를 호출한다.
+    # (수집기는 worker 소관이라 1차 배포에 없다.)
+
+volumes:
+  pgdata:
+    name: realestate-pgdata
