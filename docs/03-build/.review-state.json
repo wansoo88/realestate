@@ -19,74 +19,6 @@
   },
   "open_findings": [
     {
-      "id": "DEP-2",
-      "verdict": "OPEN",
-      "severity": "blocker",
-      "blocks": "G5 배포 — 절차가 DEPLOY.md §5-4 에서 진행 불가",
-      "found_by": "SR-011 (re-review, 지시 2026-07-25-21-review)",
-      "date_found": "2026-07-25",
-      "owner": "re-arch",
-      "title": "인증서 없이 nginx -t 가 실패해 배포 절차가 막힌다",
-      "evidence": [
-        "nginx-realestate.conf:39-46 이 listen 443 ssl + ssl_certificate /etc/letsencrypt/live/<도메인>/fullchain.pem 을 요구",
-        "그 인증서는 DEPLOY.md §5-5 certbot 이후에 생긴다. preflight §6 도 '인증서 없음'을 경고한다",
-        "§5-4 sudo nginx -t → [emerg] cannot load certificate ... No such file or directory 로 실패",
-        "§5-5 certbot --nginx 도 깨진 설정 파싱에서 실패 → 앞으로 진행 불가",
-        "안전장치는 유효: '통과했을 때만 reload' 규칙이 깨진 reload 를 막는다. 진짜 위험은 막힌 상태에서 운영자가 손으로 고치는 것"
-      ],
-      "pass_conditions": [
-        "ⓐ 임시 HTTP 전용 블록으로 certbot certonly --webroot -w /var/www/certbot -d <도메인> 먼저 발급 → 본 conf 배치 → nginx -t → reload, 또는",
-        "ⓑ 본 conf 의 443 서버블록을 주석 처리해 배치 → certbot 발급 → 주석 해제 → nginx -t → reload"
-      ],
-      "note": "파괴적이지 않다. 절차 순서 결함이다."
-    },
-    {
-      "id": "DEP-1",
-      "verdict": "OPEN",
-      "severity": "medium",
-      "blocks": "G5 배포 (권고: 함께 수정)",
-      "found_by": "SR-011 (re-review, 지시 2026-07-25-21-review)",
-      "date_found": "2026-07-25",
-      "owner": "re-arch",
-      "title": "nginx add_header 상속 소실 — index.html 에 보안헤더가 붙지 않는다",
-      "evidence": [
-        "nginx 규칙: 하위 레벨에 add_header 가 하나라도 있으면 상위 레벨 add_header 를 전혀 상속하지 않는다. always 플래그는 오류응답 포함 여부일 뿐 상속과 무관",
-        "location = /index.html 이 add_header Cache-Control 'no-store' 를 가져 서버블록의 HSTS·X-Content-Type-Options·X-Frame-Options·Referrer-Policy 4종이 전부 탈락",
-        "중첩 location ~* \\.(js|css|woff2?|png|jpg|svg)$ 도 동일하게 4종 탈락",
-        "try_files $uri $uri/ /index.html 은 내부 리다이렉트라 location 매칭을 다시 타므로 GET / 도 결국 location = /index.html 로 들어간다 → 사용자가 실제로 여는 문서에 헤더가 없다",
-        "영향: X-Frame-Options DENY 상실 → 클릭재킹 방어가 본 화면에서 사라짐(개인 금융정보 서비스). 정적 JS/CSS 의 nosniff 상실도 함께",
-        "HSTS 는 같은 호스트 API 응답으로 대체 확립되어 영향이 덜하다",
-        "방증: DEPLOY.md §5-6 자체 검증 curl -sI https://.../ | grep -i strict-transport 가 빈 결과를 낸다 — 문서가 통과로 적은 확인이 실제로는 실패"
-      ],
-      "pass_conditions": [
-        "두 location(= /index.html, 정적자산 정규식)에 보안헤더 4종을 다시 명시 — 또는 add_header 를 쓰지 않도록 재구성"
-      ],
-      "note": "API 응답은 add_header 가 없어 정상 상속된다. 문제는 정적 문서·자산 경로뿐."
-    },
-    {
-      "id": "DEP-3",
-      "verdict": "OPEN",
-      "severity": "medium",
-      "blocks": "없음 (강력 권고)",
-      "found_by": "SR-011 (re-review, 지시 2026-07-25-21-review)",
-      "date_found": "2026-07-25",
-      "owner": "re-arch",
-      "title": "백엔드 이미지를 서버에서 빌드 — 이 절차에서 유일하게 메모리 상한이 없는 구간",
-      "evidence": [
-        "DEPLOY.md §5-3 docker compose build api 가 db 기동(§5-2) 이후에 서버에서 실행된다",
-        "빌드 프로세스는 mem_limit 의 보호를 받지 않는다 — mem_limit 은 런타임 서비스에만 적용",
-        "그 시점 여유 ≈ 400 − db 실사용 146 ≈ 254MB",
-        "프론트는 같은 OOM 사유로 로컬빌드+rsync 로 옮겨 놓고 백엔드 빌드는 서버에 남겨 일관성이 없다",
-        "requirements 는 전부 manylinux wheel 이라 컴파일이 없어 실패 가능성은 낮으나, 여기서 OOM 이 나면 cgroup 이 아니라 호스트 전역 OOM killer 가 돌고 희생자는 RSS 최대인 autobtc(195MB)가 되기 쉽다",
-        "메모리 보호(memswap_limit=mem_limit, cgroup OOM)가 미치지 않는 유일한 구멍"
-      ],
-      "pass_conditions": [
-        "비용 최소: build api 를 up -d db 앞으로 이동 — 빌드가 400MB 를 온전히 사용(한 줄 변경)",
-        "더 나은 방법: 로컬 빌드 후 docker save | ssh … docker load (프론트와 같은 원칙)"
-      ],
-      "note": "비차단이지만 autobtc 가 위험해지는 경로는 사실상 이것뿐이라 함께 고치길 권고."
-    },
-    {
       "id": "SR10-1",
       "verdict": "ACCEPTED (수용 · 비차단)",
       "severity": "low",
@@ -125,6 +57,105 @@
     }
   ],
   "resolved_findings": [
+    {
+      "id": "DEP-3",
+      "verdict": "CLOSE (PASS)",
+      "severity": "medium",
+      "blocks": "없음 (강력 권고)",
+      "found_by": "SR-011 (re-review, 지시 2026-07-25-21-review)",
+      "date_found": "2026-07-25",
+      "owner": "re-arch",
+      "title": "백엔드 이미지를 서버에서 빌드 — 이 절차에서 유일하게 메모리 상한이 없는 구간",
+      "evidence": [
+        "DEPLOY.md §5-3 docker compose build api 가 db 기동(§5-2) 이후에 서버에서 실행된다",
+        "빌드 프로세스는 mem_limit 의 보호를 받지 않는다 — mem_limit 은 런타임 서비스에만 적용",
+        "그 시점 여유 ≈ 400 − db 실사용 146 ≈ 254MB",
+        "프론트는 같은 OOM 사유로 로컬빌드+rsync 로 옮겨 놓고 백엔드 빌드는 서버에 남겨 일관성이 없다",
+        "requirements 는 전부 manylinux wheel 이라 컴파일이 없어 실패 가능성은 낮으나, 여기서 OOM 이 나면 cgroup 이 아니라 호스트 전역 OOM killer 가 돌고 희생자는 RSS 최대인 autobtc(195MB)가 되기 쉽다",
+        "메모리 보호(memswap_limit=mem_limit, cgroup OOM)가 미치지 않는 유일한 구멍"
+      ],
+      "pass_conditions": [
+        "비용 최소: build api 를 up -d db 앞으로 이동 — 빌드가 400MB 를 온전히 사용(한 줄 변경)",
+        "더 나은 방법: 로컬 빌드 후 docker save | ssh … docker load (프론트와 같은 원칙)"
+      ],
+      "note": "비차단이지만 autobtc 가 위험해지는 경로는 사실상 이것뿐이라 함께 고치길 권고.",
+      "fixed_by": "re-arch / ORDER 2026-07-25-22-arch (커밋 883bc2b)",
+      "verified_by": "SR-012 (re-review — 지시 2026-07-25-23-review)",
+      "date_closed": "2026-07-25",
+      "pass_conditions_met": [
+        "§5-2 build api 가 §5-3 up -d db 앞으로 이동 확인",
+        "근거 기술 정확(빌드는 mem_limit 보호 밖 · db 선기동 시 146MB 줄어든 자리 · OOM 시 호스트 전역 killer 가 autobtc 선택)",
+        "로컬 빌드 + docker save | ssh docker load 대안과 up -d --no-build 주의 병기",
+        "§5-4 도 '5-2 에서 이미 빌드됨' 으로 정합 수정"
+      ]
+    },
+    {
+      "id": "DEP-1",
+      "verdict": "CLOSE (PASS)",
+      "severity": "medium",
+      "blocks": "G5 배포 (권고: 함께 수정)",
+      "found_by": "SR-011 (re-review, 지시 2026-07-25-21-review)",
+      "date_found": "2026-07-25",
+      "owner": "re-arch",
+      "title": "nginx add_header 상속 소실 — index.html 에 보안헤더가 붙지 않는다",
+      "evidence": [
+        "nginx 규칙: 하위 레벨에 add_header 가 하나라도 있으면 상위 레벨 add_header 를 전혀 상속하지 않는다. always 플래그는 오류응답 포함 여부일 뿐 상속과 무관",
+        "location = /index.html 이 add_header Cache-Control 'no-store' 를 가져 서버블록의 HSTS·X-Content-Type-Options·X-Frame-Options·Referrer-Policy 4종이 전부 탈락",
+        "중첩 location ~* \\.(js|css|woff2?|png|jpg|svg)$ 도 동일하게 4종 탈락",
+        "try_files $uri $uri/ /index.html 은 내부 리다이렉트라 location 매칭을 다시 타므로 GET / 도 결국 location = /index.html 로 들어간다 → 사용자가 실제로 여는 문서에 헤더가 없다",
+        "영향: X-Frame-Options DENY 상실 → 클릭재킹 방어가 본 화면에서 사라짐(개인 금융정보 서비스). 정적 JS/CSS 의 nosniff 상실도 함께",
+        "HSTS 는 같은 호스트 API 응답으로 대체 확립되어 영향이 덜하다",
+        "방증: DEPLOY.md §5-6 자체 검증 curl -sI https://.../ | grep -i strict-transport 가 빈 결과를 낸다 — 문서가 통과로 적은 확인이 실제로는 실패"
+      ],
+      "pass_conditions": [
+        "두 location(= /index.html, 정적자산 정규식)에 보안헤더 4종을 다시 명시 — 또는 add_header 를 쓰지 않도록 재구성"
+      ],
+      "note": "API 응답은 add_header 가 없어 정상 상속된다. 문제는 정적 문서·자산 경로뿐.",
+      "fixed_by": "re-arch / ORDER 2026-07-25-22-arch (커밋 883bc2b)",
+      "verified_by": "SR-012 (re-review — 지시 2026-07-25-23-review)",
+      "date_closed": "2026-07-25",
+      "pass_conditions_met": [
+        "conf 파싱 전수검사: add_header 를 쓰는 모든 블록(server / 정적자산 정규식 / = /index.html)이 보안헤더 4종 보유. 누락 0건",
+        "add_header 없는 블록(location /, /api/, auth 정규식, ACME)은 서버레벨 정상 상속 확인",
+        "각 자리에 '상속이 끊기므로 다시 적는다'는 주석 — 재발 방지에 유효",
+        "§5-6 check_headers() 실행 검증: 21-review 에서 방증한 결함 응답(Cache-Control 만 남고 4종 탈락) 투입 시 [실패] × 4 를 정확히 출력. 기존 grep 은 빈 결과라 사람이 넘어갈 수 있었던 함정 해소",
+        "검사 경로 4개(/ · /index.html · /api/v1/health · 동적 탐색 정적자산)로 위험 지점 전부 포함"
+      ]
+    },
+    {
+      "id": "DEP-2",
+      "verdict": "CLOSE (PASS)",
+      "severity": "blocker",
+      "blocks": "G5 배포 — 절차가 DEPLOY.md §5-4 에서 진행 불가",
+      "found_by": "SR-011 (re-review, 지시 2026-07-25-21-review)",
+      "date_found": "2026-07-25",
+      "owner": "re-arch",
+      "title": "인증서 없이 nginx -t 가 실패해 배포 절차가 막힌다",
+      "evidence": [
+        "nginx-realestate.conf:39-46 이 listen 443 ssl + ssl_certificate /etc/letsencrypt/live/<도메인>/fullchain.pem 을 요구",
+        "그 인증서는 DEPLOY.md §5-5 certbot 이후에 생긴다. preflight §6 도 '인증서 없음'을 경고한다",
+        "§5-4 sudo nginx -t → [emerg] cannot load certificate ... No such file or directory 로 실패",
+        "§5-5 certbot --nginx 도 깨진 설정 파싱에서 실패 → 앞으로 진행 불가",
+        "안전장치는 유효: '통과했을 때만 reload' 규칙이 깨진 reload 를 막는다. 진짜 위험은 막힌 상태에서 운영자가 손으로 고치는 것"
+      ],
+      "pass_conditions": [
+        "ⓐ 임시 HTTP 전용 블록으로 certbot certonly --webroot -w /var/www/certbot -d <도메인> 먼저 발급 → 본 conf 배치 → nginx -t → reload, 또는",
+        "ⓑ 본 conf 의 443 서버블록을 주석 처리해 배치 → certbot 발급 → 주석 해제 → nginx -t → reload"
+      ],
+      "note": "파괴적이지 않다. 절차 순서 결함이다.",
+      "fixed_by": "re-arch / ORDER 2026-07-25-22-arch (커밋 883bc2b)",
+      "verified_by": "SR-012 (re-review — 지시 2026-07-25-23-review)",
+      "date_closed": "2026-07-25",
+      "pass_conditions_met": [
+        "부트스트랩 conf 신설(HTTP 전용, ssl_certificate 참조 0건) → 인증서 없어도 nginx -t 통과",
+        "발급 전 앱 경로를 return 404 로 막아 평문 HTTP 인증 API 노출 차단(부수 이득)",
+        "절차 §5-5: 부트스트랩 배치→nginx -t→reload → certonly 발급 → 본 conf 교체→nginx -t→reload. nginx -t 게이트 2회",
+        "certonly --webroot 로 교체 — --nginx 자동 설정수정 위험 제거 확인. 근거 기술도 정확",
+        "교체 정합성: 부트스트랩·본 conf 배치 대상이 동일 파일이라 cp 가 덮어써 부트스트랩이 확실히 사라짐 → server_name 충돌·zone 중복 여지 없음",
+        "갱신 지속성: webroot 경로가 certbot 명령·부트스트랩·본 conf 세 곳 모두 /var/www/certbot 일치, 본 conf :80 에 ACME location 유지 → certbot renew 계속 동작",
+        "추가: <APP_ROOT> 치환 누락 검사, '막혔을 때 손으로 고치지 말고 되돌린 뒤 보고' 지침(내가 지목한 진짜 위험을 정면 차단)"
+      ]
+    },
     {
       "id": "CR10-1",
       "verdict": "CLOSE (PASS)",
@@ -285,5 +316,16 @@
       "residual_nonblocking": "tripwire(보조 그물)가 '십억'·공백자릿수·'3.0억' 같은 exotic 표기는 못 잡음(구조가 실제 방어라 CLOSE 불가 사유 아님). '3.0억' 1건은 doc 한계목록 미기재 → 추가 권고.",
       "note": "SR4-2 CLOSE 는 tripwire 완전성이 아니라 '구조(원본을 finding에 미포함)+파이프라인 테스트+fail-loud+정직한 문서'에 근거. 실제 파이프라인 프롬프트에 원본자산 0 확인."
     }
-  ]
+  ],
+  "deployment_readiness": {
+    "status": "PASS",
+    "verified_by": "SR-012 (re-review — 지시 2026-07-25-23-review)",
+    "date": "2026-07-25",
+    "scope": "deploy/{DEPLOY.md,nginx-realestate.conf,nginx-realestate-bootstrap.conf,pause-itsmine.sh,resume-itsmine.sh,preflight.sh} + docker-compose.deploy.yml",
+    "note": "SR-011 에서 FAIL 사유였던 DEP-2(절차 §5-4 에서 막힘)·DEP-1(본 화면 클릭재킹 방어 상실)이 SR-012 에서 해소. 파괴성·격리·롤백·유출방어는 SR-011 에서 이미 통과. 남은 것은 19-arch G5 결정 4건(사람).",
+    "accepted_residuals": [
+      "add_header 상속 함정은 nginx 자체 성질이라 구조적 제거 불가. 통제 3겹(위험지점 주석 · check_headers 배포시 4경로 실검증 · 실패시 조치 지목)으로 수용. 한계: check_headers 는 배포 시점에만 돌고 4개 대표경로만 본다 — 2차에 정적 감사 스크립트를 회귀검사로 넣기 권고",
+      "nginx -t 로컬 미검증(로컬에 nginx 없음). 수용 근거: nginx -t 가 reload 전에 돌고 통과했을 때만 reload 하므로 문법오류의 결과는 '서비스 다운'이 아니라 '배포 중단'이다. 게이트 2회 + 되돌림 경로 + '손대지 말라' 지침 보유. re-review 가 한 블록 구조 파싱 성공은 well-formed 의 약한 근거일 뿐 nginx -t 의 대체가 아니다 — 배포 당일 사람이 결과를 반드시 확인할 것"
+    ]
+  }
 }
