@@ -1,40 +1,149 @@
 {
   "code_review": {
     "status": "passed",
-    "id": "CR-027",
-    "date": "2026-07-26",
-    "at": "2026-07-27T11:40:00+09:00",
+    "id": "CR-028",
+    "date": "2026-07-27",
+    "at": "2026-07-27T15:30:00+09:00",
     "deploy_ready": true,
-    "scope": "CR-026 이후 4개 라운드 — POI-1 입지데이터(app/ingest/poi*.py · migrations/011 · scripts) · LLM-1 Anthropic 배선(llm.py·orchestrator·routes·test_llm_wiring 33) · REC-5 '이 주변에서 검색'(bbox·SR21-4 구조차단) · FIN 희망 매매가 자금계획(affordability·budget_krw). 미커밋 61건",
+    "scope": "SCHOOL-1 학구도 적재 — app/ingest/school_zone.py · scripts/{fetch_school_zone,load_school_zone,verify_school_district}.py · migrations/012_school_district_natural_key.sql · tests/test_school_zone.py(28) · config/sources.yaml · deploy/DEPLOY.md(012 절차). 미커밋 9건",
     "reviewer": "code-reviewer (herdr re-review 대행)",
     "blocking": [],
-    "er_verdict": "데이터 한계(결함 아님) · 단 고지 필요(POI-2 low)",
-    "bbox_verdict": "parseBbox 에 면적 상한을 넣지 않은 판단은 옳다",
-    "pref_debt": "later (medium 유지 · 다음 라운드 조건 · 역세권은 데이터 핑계 소멸)",
-    "notes": "PASS · 배포 가능 · 차단 0건. 재현: backend 890 passed/63 skipped · frontend 501 passed(33 files) · typecheck 통과 — 지시 수치 일치(착수 시 693/358). 변이 11종 후 6개 파일 바이트 원복. 서버 조회만, 운영 DB 쓰기 0회. [B LLM-1 PASS — 가장 위험해서 먼저 봤다] 비용 수정을 CountingLLM 으로 직접 계측: 후보 5→호출 5 / 20→5 / **61→5** (top_n=5). 후보가 61건이어도 호출 5건으로 2패스가 실제 동작한다('강남 61후보→실호출 5건' 일치). '상한이 아니라 호출 시점이 문제였다'는 진단이 정확. tripwire 를 비용상한보다 먼저 둔 판단 **옳다** — 예산이 없다는 이유로 검사를 건너뛰면 상한에 걸린 날에만 방어가 사라지고, tripwire 는 문자열 스캔이라 비용이 사실상 0 이다. 말뿐이 아니라 순서가 잠겨 있다: assert_no_secrets 제거 KILLED(3) · **비용상한 뒤로 이동 KILLED(3)**. HTTP 전송본문 검사는 FakeLLM 이 아니라 httpx.post 를 가로채 egress 를 직접 본다. 특히 `assert wire.requests, '호출이 없으면 이 테스트는 아무것도 증명하지 못한다'` 로 **자기충족을 구조적으로 차단**했고(이 원장이 반복 요구한 가드), extract_amounts 교집합 + 콤마표기 원문대조를 함께 하며, 짝 테스트(파생값은 있어도 된다)로 **과방어도 아닌지** 반대 방향까지 본다. tripwire 테스트는 원본을 심으면 폴백이 아니라 **호출 자체가 막히는지**를 확인한다(폴백으로 흘리면 유출이 정상동작이 된다). 입력 20,000자 초과를 자르지 않고 폐기하는 것도 옳다(자르면 문맥 잘린 요약이 나간다). [D FIN PASS — 버그와 수정을 모두 재현] 한도 885,710,000 · 후보 3건 전부 12억: budget_krw 미지정 → items 0 / 예산초과 제외 3, budget_krw=15억(희망가) → items 3 / 제외 0. '희망가가 조회에는 닿고 제외 판정에는 안 닿아 결과가 통째로 빔' 이 실재했고 AnalysisContext.budget_krw 로 닫혔다(필드 존재 확인). 변이로도 잠김 — budget_krw 를 떼면 **70건 실패**. 월 원리금 3중 검산(할인계수 합/360회 시뮬/역함수 왕복)은 좋은 방식이고, 한도 초과여도 200+숫자 전부 제공은 '왜 안 되는지 말하라' 원칙과 일치. 희망가 하나가 세 요청에 동시 전달돼 한 화면이 두 예산을 말하지 않게 한 것도 옳다. [A POI-1 PASS] 운영 DB 직접 집계: park 8,171·subway 762·mart 3,770·hospital 2,244·transit_plan 34 전부 일치, poi.geom NULL **0**(좌표 100%), complex 16,462·좌표없음 901 일치. 16,462−901−27=15,534=**94.36%** 로 보고 94.4% 와 일치(1km 내 POI 없는 단지 96건은 항목별 PROXIMITY_BANDS 차이로 27과 모순되지 않음). 결함① KTX 분리: 도메인이 len(nearest.lines)로 환승 가치를 주므로(analysis.py:209-214) KTX 가 lines 에 섞이면 통근이 아닌데 가점이 붙는다. 실측 — 광명 통근 1 / intercity 3, 수원 2/8, 서울역 6/4~5. **광명역이 통근 1노선으로 잡혀 환승 가점을 못 받는다**(결함이 실제로 닫힘). 정보를 버리지 않고 attrs.intercity 로 남긴 것도 옳다. 변이 '간선을 통근으로 되돌림' KILLED(3). 결함② 신설노선 병합: transit_plan (이름,단계) 중복 **0건** 확인(신안산선 13중복 해소). GTX-C 가 계획·착공 두 행인 것은 구간 단계가 달라 정상. 노선연결 739/762=97% 확인. 변이 '응급실 미태그를 True 로' KILLED(3). 'service 기반 간선판정 제거' 는 SURVIVED 이나 뒤의 route=train→intercity 폴백이 대부분을 잡는 **등가 변이**다. [판정2 응급실 = 데이터 한계] 직접 세니 3값이다 — has_emergency_room true **47** / false **29** / **키 자체 없음 2,168(96.6%)**. 도메인이 이미 옳게 모델링돼 있다: models.py:82 가 `bool | None` 3값이고 analysis.py:258 `(not er or p.has_emergency_room)` 에서 None 은 falsy 라 **모르는 병원은 점수에 안 들어간다**. 모름을 '있음'으로 세면 없는 응급실을 지어내는 것이고, 대안(모든 병원 동일 계산)은 의원을 종합병원과 같게 취급해 더 나쁘다. 변이 P3 KILLED 로 규칙이 잠겨 있다. → 결함이 아니라 원천 한계. 다만 infra 가 실질 마트+공원으로 굴러가는 건 사실이므로 WEIGHT-1 의 coverage_gap 기계로 '생활 인프라는 현재 마트·공원까지만 봅니다 — 응급실 정보가 있는 병원이 2.1%' 를 노출 권고(POI-2 low). 점수를 바꾸라는 게 아니라 무엇을 봤는지 말하라는 것. [판정3 parseBbox = 옳다] '못 읽음'과 '너무 넓음'은 다른 사실이다. parseBbox 가 넓은 bbox 에 null 을 주면 호출부가 'bbox 없음'으로 읽어 파라미터를 빼고 → 서버가 전국을 뒤진다. **좁히려던 버튼이 범위를 최대로 넓히는** 정확한 fail-open. 구현이 그 구분을 지킨다 — parseBbox 는 형식·좌표범위·min<max 만(bbox.ts:54-74), 크기는 MAX_BBOX_SIDE_DEG=2.0 + bboxSideDeg() 별도 경로로 버튼 비활성+사유 문장, AreaScope.test.tsx 가 그 문구를 단언. 서버도 _MAX_BBOX_DEGREES=2.0 으로 독립 422(클라이언트 불신 이중방어). [C REC-5 PASS] SR21-4 구조차단 확인 — left(c.region_code,length(rc))=rc, LIKE 로 되돌리는 변이 KILLED(1). GiST 를 서버 EXPLAIN 으로 재현 — `Bitmap Index Scan on idx_complex_geom` + Index Cond, Seq Scan 아님. 낡은 bbox 를 '누른 순간 고정' 처리도 지도가 계속 움직이는 UI 에서 옳다. [판정4 GTX = 별칭 매핑 넣지 마라] 실측상 두 곳 사정이 다르다 — poi.attrs.lines(역)은 **이미 'GTX-A' 로 정상**(수서역 [\"3\",\"수인·분당\",\"GTX-A\"]), 음차는 transit_plan.name 에만(수도권광역급행철도에이선/비선/씨선). 즉 **점수에 쓰이는 역 노선명은 이미 정상**이다. 원천을 임의로 안 고친 판단 옳다 — 수집기가 출처 문자열을 바꾸면 '이 이름이 OSM 것인가 우리가 만든 것인가'를 아무도 답할 수 없다(GEO-1 이후 원칙). 필요한 건 표시계층 별칭이지 원천 변조가 아니다 → POI-3(low): 화면·검색에서만 GTX-A 로 보여주고 원본 유지. [판정5 PREF-1 = later 유지] 실측 확인 — 역세권·학군·세대수 그대로다(buildMapQuery 는 area_min/max·built_after 만, 백엔드 prefer 참조 0건, 미반영 고지는 가중치 절에만). 차단 안 하는 이유는 CR-026 과 동일(설정화면 3개 입력의 오해, 데이터손상·보안·장애 아님, 사용자 1인)이고 이번 라운드가 4건을 실제로 끝냈다. **다만 상황이 바뀌었다** — POI-1 로 subway 762 가 들어와 역세권은 이제 배선 가능하고 '데이터가 없어서'가 더는 성립하지 않는다(학군은 school_district 0행이라 유효, 학구도 API 착수 임박). 게다가 이번에 **동작하는 선호값(희망가)을 새로 추가**해 같은 화면의 비대칭이 커졌다. medium 유지·다음 라운드 조건으로 재설정하고, 다음에도 손대지 않으면 백로그가 아니라 패턴으로 보고 판정을 달리하겠다. [배포 주의] CR-025 DEPLOY-2(서버 소스 갱신 절 · 가입 열기 전 승인제 생존 확인)는 이번에도 미해소로 여전히 유효. school 축(가중치 0.35)이 0 인 사실은 WEIGHT-1 의 score_notes 로 사용자에게 전달된다.",
-    "tests": "backend 890 passed / 63 skipped (failures=0 errors=0) · frontend 501 passed (33 files) · tsc --noEmit 통과 — 지시 수치 재현, 감사 후 재실행도 동일. 내 변이 11종: L1 tripwire 제거 KILLED(3) · L2 tripwire 를 비용상한 뒤로 KILLED(3) · D1 budget_krw 미배선 KILLED(70) · C1 LIKE 접두 원복 KILLED(1) · P1 간선→통근 KILLED(3) · P3 응급실 미태그 True KILLED(3) · P2 SURVIVED(등가) · L3 앵커미스. 변이 후 6개 파일 바이트 원복. 독립 계측: LLM 호출 후보 5/20/61 → 5/5/5(top_n=5) · FIN budget_krw 미지정 items 0(제외 3) vs 15억 items 3(제외 0). 운영 DB 읽기전용: poi park 8,171·subway 762·mart 3,770·hospital 2,244 · geom NULL 0 · transit_plan 34 · (이름,단계) 중복 0 · subway lines 739/762 · intercity 43 · ER true 47/false 29/미태그 2,168 · complex 16,462·좌표없음 901 · 1km 내 POI 없음 96 · 광명 통근1/간선3 · EXPLAIN Bitmap Index Scan on idx_complex_geom. needs_db 63 미실행."
+    "ambiguous_zone_verdict": "옳다 — 비대칭이 자의적이지 않고 '모호성이 데이터로 해소되는가' 하나의 기준을 따른다. 같은 학구ID·같은 학교명은 한 구역이 여러 폴리곤으로 쪼개진 것이라 MultiPolygon 병합이 원본의 뜻이고 정보 손실이 0이다. 같은 학구ID·다른 학교명(고덕함박초/현민초)은 ID 재사용이라 어느 폴리곤이 어느 학교 것인지 알 방법이 없고, 하나를 고르면 배정을 지어내는 것이므로 버리는 게 맞다(fail-closed, reb.py '애매하면 매칭하지 않는다'와 일관). 변이 '애매한 ID 를 골라 쓴다' KILLED.",
+    "stale_verdict": "옳다 — 지우는 쪽이 더 위험하다. '학구 폐지'와 '원천 부분배포'를 구분할 수 없는데 지우면 반쪽 배포된 날 배정이 광범위하게 사라진다(school 가중치 0.35의 핵심 축). 구역 재조정은 같은 자연키를 UPDATE 하므로 stale 을 만들지 않아, stale 은 ID 자체가 배포본에서 사라질 때만 생긴다. 낡은 행도 district_as_of 를 들고 있고 assess_school 이 결과에 실으므로 완전한 침묵도 아니다. 다만 stale>0 일 때 로그 한 줄로만 남으면 아무도 안 보므로 verify 스크립트가 경고로 드러낼 것(SCHOOL-2 low).",
+    "pref_debt": "later",
+    "notes": "PASS · 배포 가능 · 차단 0건. 재현: backend 918 passed/63 skipped(890→+28) · frontend 501 무변경 — 지시 수치 일치. 변이 9종 후 2개 파일 바이트 원복. 서버 조회만(운영 DB 쓰기 0회). backend/docs·frontend/docs 에 아무 파일도 만들지 않았다(커밋 훅 주의 준수). ※ 이전 라운드의 '무키 경로 없음, 확정적 미확보' 판단이 틀렸음을 PM 이 잡아 재착수시킨 건이다 — '확정적으로 없다'는 조사 범위의 한계였지 사실이 아니었고, 스스로 뒤집은 것은 옳다. [1 ★거리 대체 없음 — 실호출 재현] 문서가 아니라 운영 DB 실호출(location_facts+evaluate_location)로 확인. 미포함 단지 6건 전수에서 in_district=False·name=None 이고 missing='배정 초등학교 확인 불가(학구도 미포함) — 최근접 학교 거리로 대체하지 않음'. assert name is None 을 6건 모두 통과(담당자 보고 3건보다 넓게 봤고 동일). 비수도권도 확인 — 부산 해운대·대전 유성 반경 20km 내 학구도 0건이라 district_data_available=False 경로로 갈린다. **'미포함'과 '미확보'가 다른 문장으로 갈리는 것이 중요하다**(전자는 '우리는 아는데 여기 아니다', 후자는 '우리가 모른다'). 코드도 그 구조 — analysis.py:143-155 가 두 경우 모두 fact.distance_m 을 읽기 전에 반환한다. 변이: '미포함일 때 최근접 학교명 대체' KILLED(1) · '미확보인데 배정 단정' KILLED(2). [2 실호출 원 단위 재현] 쎄비앙102동 948.058m 서울역삼초 · 래미안블레스티지 215.334m 서울개현초 · 압구정하이츠파크 1128.574m 서울청담초 — 보고(948/215/1129)와 일치, 셋 다 in_district=True. [3 분류·산출률] complex 16,462 · 좌표없음 901 · 포함 15,548 · 미포함 13 · school_district 3,246 · poi(school) 2,209 · **94.45%**. 901+15,548+13=16,462 으로 한 행도 설명 없이 남지 않는다(예측 94.5% 일치). '전' 값 재구성 타당성 검증: district_data_available=False 만 되돌린 방법이 적재 이전과 동일하려면 그 플래그가 꺼졌을 때 school 축이 다른 입력을 안 봐야 하는데, assess_school 이 즉시 (None,[...]) 반환해 distance_m·name 을 읽지 않고, _school_score(None)→None 이며, school.distance_m 의 유일한 다른 소비처(analysis.py:458)는 b.school_in_district 가 참일 때만 타는 **건물 단위** 경로다. 게다가 이번에 추가된 poi(school) 2,209 는 infra 축(mart·park·hospital_er)에 안 들어간다 → 델타는 school 축에만 귀속. **방법이 옳다.** 497/500(99.4%) 변동·평균 +0.48·범위 −27.6~+27.1 의 양방향 분포도 '일률 가점이 아니라 실제 변별' 주장을 뒷받침한다(일률 가점이면 분산이 0에 가까워야 한다). [4 원천 결함 2건 — 둘 다 옳다] (가)완전중복 접기: ON CONFLICT DO UPDATE 는 한 문장에서 같은 대상 행을 두 번 건드리면 문장 전체가 깨진다. 배치 내 접기가 정석이고 poi_loader 와 일관. **ON_ERROR_STOP 덕에 전부 롤백돼 가짜 성공이 없었던 것**이 중요하다 — DEPLOY-1 에서 요구했던 설정이 실제 사고에서 값을 했다. 변이 '접기 제거' KILLED(1). (나)비대칭은 위 ambiguous_zone_verdict 참조. [5 그 밖] 자연키 kesi:{학구ID}/{학교ID} 의 필요성을 실측 입증 — 3,246행 중 DISTINCT 학구ID 2,652, **공동학구 462건**이라 학구ID 단독으로는 키가 성립하지 않는다. source_ref 중복 0건. 중·고 차단은 ELEMENTARY 필터가 파싱·위치 **두 단계**에 걸려 있고 **양쪽 다 변이 KILLED** — 위험(_SCHOOL_SQL 이 학교급 구분 없이 최근접 1건을 골라 가장 가까운 중학교가 '배정 초등학교'로 보고됨)이 docstring 에 정확히 기재. M1 shx 워드→바이트 ×2 누락 **KILLED(2)** — '레코드 2개를 둬야 잡힌다'는 설명대로 실제로 잡힌다. shp/shx/dbf 누락검사 제거 KILLED(1). achievement_pct NULL 유지 옳다(초등은 국가수준 평가 대상 아님, 출처·기준연도 없는 수치 미사용 규칙과 일관). **멱등 3회는 내가 재현하지 못했다** — 로더 실행이 운영 DB 쓰기라 지시(조회만)에 따라 돌리지 않았다. 자연키 UNIQUE(012)+ON CONFLICT DO UPDATE+배치 내 접기라는 기전만 정적 확인했고 '2·3차 신규 0/갱신 3,246' 은 이 구조와 정합적이다. **실행 재현이 아님을 명시한다.** [PREF-1 = later, 경고를 집행하지 않는 이유를 밝힌다] 실측상 아무것도 안 바뀌었다(buildMapQuery 는 area_min/max·built_after 만, 백엔드 prefer 참조 0건, 고지는 가중치 절 하나뿐). CR-027 에서 '다음에도 안 하면 판정을 달리하겠다'고 썼으나 **집행하지 않는다** — 차단은 결과로 정당화되어야지 내가 앞서 한 경고로 정당화되어선 안 되고, 피해는 3회 내내 같으며(설정화면 3개 입력의 오해, 추천 결과 자체는 정확하고 score_axes 로 정직히 표기), 여기서 막으면 사용자가 API 승인까지 받아온 학구도 기능이 라벨 한 줄 때문에 미뤄져 그 거래가 사용자에게 손해다. 경고를 반복하는 것이 조건을 값싸게 만든다는 지적은 옳으므로 **'다음엔 진짜'라는 말을 더 하지 않는다.** 다만 이번 라운드로 성격이 나빠진 건 사실이다 — school 축이 0%→94.45% 로 살아나면서 weights.location(학군 포함, 동작함)과 prefer.school_district(학군 중요도 0~5, 미동작·무고지)가 같은 화면에서 둘 다 '학군 중요도'로 읽히는데 하나만 동작한다. 셋 중 이게 가장 오도적이라 **요구를 한 줄로 좁힌다**: 그 슬라이더 옆에 '아직 순위에 반영되지 않습니다 — 학군 비중은 위 가중치에서 조절됩니다'. 프론트를 다음에 건드릴 때 같이 넣으면 된다. [road_segment] crosses_main_road 를 NULL 로 두는 현재 동작이 옳다(모르는 것을 False 로 쓰면 '대로를 안 건넌다'는 없는 판정). '이제서야 의미가 생겼다'는 말도 맞다 — _school_score 의 −15 감점은 배정이 확인된 뒤에만 타는데 그 전제가 94.45% 로 채워졌다. **다음 라운드 필수는 아니다**(결함이 아니라 미구현이고 NULL 처리가 정직하다). 우선순위 높은 다음 후보로 SCHOOL-3(low) 등재. [배포 주의] DEPLOY-2 가 **네 라운드째** 열려 있다 — 서버 소스 갱신 절 · 가입 열기 전 승인제 생존 확인. 이번엔 마이그레이션 012 도 손수 적용 대상이며, 절차서에 012 절이 추가돼 테스트를 통과한 것은 확인했다.",
+    "tests": "backend 918 passed / 63 skipped (890→+28, failures=0 errors=0) · frontend 501 무변경 — 지시 수치 재현, 감사 후 재실행 동일. 내 변이 9종 전부 유효분 KILLED: S1 미포함→최근접 대체(1) · S2 미확보인데 배정 단정(2) · S3 중·고 차단해제 파싱단계(1) · S4 위치단계(1) · S5 애매 학구ID 채택(1) · S7 중복행 접기 제거(1) · M1 shx 워드→바이트 ×2 누락(2) · S8 shp/shx/dbf 누락검사 제거(1). S6 는 no-op 앵커(무효 변이). 변이 후 school_zone.py·analysis.py 바이트 원복 확인. 운영 DB 읽기전용 실호출: 미포함 6건 전수 name=None + assert 통과 · 쎄비앙102동 948.058m/래미안블레스티지 215.334m/압구정하이츠파크 1128.574m · 부산·대전 반경 20km 학구도 0건 · complex 16,462/좌표없음 901/포함 15,548/미포함 13 = 94.45% · school_district 3,246 · poi(school) 2,209 · DISTINCT 학구ID 2,652 · 공동학구 462 · source_ref 중복 0 · road_segment 0. 멱등 3회는 미재현(운영 DB 쓰기 금지). needs_db 63 미실행."
   },
   "security_review": {
     "status": "passed",
-    "id": "SR-022",
-    "at": "2026-07-26T23:10:00+09:00",
-    "date": "2026-07-26",
-    "scope": "LLM 실전 배선(routes.py -> AnthropicLLM, SR4-2 가 실전이 되는 시점) · POI-1 외부데이터 유입(OSM Overpass/NEIS · app/ingest/poi*.py · migrations/011 · 14,947행) · REC-5 bbox 및 SR21-4 후속 · FIN 자금계획(plan/warnings/assumptions) · UX 잔여",
+    "id": "SR-023",
+    "at": "2026-07-27T00:40:00+09:00",
+    "date": "2026-07-27",
+    "scope": "SCHOOL-1 학구도 - 손으로 짠 SHP/DBF 바이너리 파서(app/ingest/school_zone.py) · 외부 파일 다운로드(scripts/fetch_school_zone.py) · gzip SQL 스트리밍 적재(scripts/load_school_zone.py) · migrations/012 · config/sources.yaml",
     "reviewer": "security-reviewer (herdr re-review 대행)",
     "blocking": [],
     "deploy_approved": true,
-    "llm_verdict": "safe-to-enable",
+    "parser_verdict": "memory-safe",
     "g5_blockers": [],
     "key_reissue_required": false,
-    "key_reissue_target": "DEC-001 유지. ANTHROPIC_API_KEY 는 아직 서버에 없으며 사용자가 직접 투입 예정 - 투입 전 콘솔 사용량 한도 설정 권고(SR22-5).",
-    "notes": "PASS - 배포를 막을 보안 사유 없음. LLM 판정: 켜도 된다(safe-to-enable). SR21-4 RESOLVED. 재현: backend 953 tests / 0 failures / 63 skipped = 890 passed · frontend 33 files / 501 passed - 지시 수치 일치. [1순위 - LLM 이 처음으로 진짜 외부로 나가는 시점] 주장 검증에 그치지 않고 httpx.post 를 가로채 build_llm->AnthropicLLM->_once 전 구간을 실제 코드로 태운 뒤 **전송 직전 HTTP 본문**을 뜯었다. 결과: api.anthropic.com/v1/messages 로 2건 전송, 메시지 본문 6,577자. 프로젝트 자신의 extract_amounts 값비교 기준 보유현금 812,345,678·연소득 123,456,789·기존대출 51,234,567 **전부 없음**, 파생값 한도 1,338,630,000 은 정상 포함, API 키는 x-api-key **헤더에만** 있고 본문에는 False(2건 모두). ※ 내가 처음 쓴 '값//10000' 휴리스틱이 '12345' 를 잡아 유출로 보였으나 값비교로 재검하면 메시지 본문에 해당 문자열이 0건이었다 - 내 검사기의 오탐이었고 로그에 정정을 남겼다. [검사 순서 - 구조 확인] orchestrator 617행 forbidden 이 비면 PromptSafetyError(fail-loud) -> 631행 assert_no_secrets -> 633행 scan_injection -> 636행 이후 프롬프트 길이 상한·budget.take()(비용/회로차단) -> 649행 실제 호출. 주장대로 tripwire 가 비용 상한·회로차단보다 **먼저**다. 걸리면 폴백이 아니라 PromptSafetyError 로 호출 자체를 막아 유출을 정상동작으로 만들지 않는다. [키 유출 경로 - 3 시나리오 실측] repr/str 모두 api_key=*** 로 오버라이드됨. (a)네트워크 예외에 키를 심어 던짐 -> 'Claude API 연결 실패: RuntimeError' 만 남고 leaks=False(예외 타입명만, 그것도 mask_secrets 경유 + from None) (b)400 응답 본문에 키·프롬프트 반사 -> 'status=400' 만, leaks=False(본문 미탑재) (c)500 -> 'status=500', leaks=False. DEBUG 전체 로그 캡처에서도 키 0건. vars() 는 여전히 _api_key 원문을 갖지만(파이썬 한계) 이를 찍는 코드는 없다. 서버 .env 에 ANTHROPIC_API_KEY 없음(0건, 600 root:root) - 현재 build_llm->None 규칙기반 폴백이라는 보고와 일치. [판정① 방어 충분한가 - 충분(조건부)] 3겹이 전부 실재하고 각각 독립 검증됨: 구조(AnalysisContext·Finding 이 파생값만) -> tripwire(값비교·순서·fail-loud) -> 전송 실측(0건). '충분'의 근거는 tripwire 가 아니라 1차 구조다. 조건은 forbidden_amounts 를 계속 채우는 것이고 비면 fail-loud 라 조용한 무장해제는 불가능하다. [판정④ 비용 방어는 보안 사안 - 그렇다] 키가 개인 과금 계정이라 폭주가 곧 재산 피해다. 확인된 통제: 출력토큰 상한(min(max_tokens, MAX_OUTPUT_TOKENS)) · 프롬프트 길이 상한(초과 시 자르지 않고 호출 안 함) · job 당 호출횟수 상한(LLMBudget.take) · 연속실패 회로차단 · 유한 재시도+지수백오프+지터+Retry-After 존중+4xx 미재시도 · 상한 도달을 notes 로 고지. 잔여 SR22-5(low): 이 통제는 전부 job 1건 **내부** 상한이고 job 반복 제출의 누적 소비에는 상한이 없다(바깥 방어는 nginx re_api 10r/s 와 승인제뿐). [★판정③ 새 위험 = SR22-1 medium 비차단] 저장 XSS 는 불성립 - LLM 응답(headline/why/why_not/next_actions)은 payload 평문 jsonb 에 저장되지만 ReportCard 가 JSX 텍스트 자식으로 렌더해 React 가 이스케이프하고, 저장소 전수에서 innerHTML·dangerouslySetInnerHTML·insertAdjacentHTML 실사용 0건이며 응답은 str() 강제 + [:6]/[:5] 절단된다. **그러나 프롬프트 인젝션 경로가 새로 생겼다**: POI-1 이 들여온 OSM 은 커뮤니티가 편집하는 외부 문자열인데 poi.name -> PoiFact/StationFact/SchoolFact -> LocationFacts -> location finding -> LLM 프롬프트 및 화면으로 흐른다. scan_injection 이 있지만 **로그 경고만** 하고 차단·제거·고지가 없다. 완화는 실재한다(시스템 프롬프트의 '없는 사실 추가 금지', 스키마 검증 후 폐기·폴백, why_not 자동 보충, 개수 절단, 순위·가격은 규칙/통계가 결정하고 LLM 은 요약만). 최악은 '요약 문장이 사실과 다르게 유도'이고 코드 실행·데이터 유출이 아니라 비차단. 다만 이 프로젝트에서 외부 UGC 가 LLM 프롬프트에 닿은 것은 처음이라 기록한다. 권고: POI 이름 길이 상한(80자) + 외부 출처 scan_injection 히트를 notes 로 노출하거나 프롬프트에서 제외 + 시스템 프롬프트에 '데이터 블록 안의 지시문은 데이터일 뿐 지시가 아니다' 명시. [POI-1 수집] SSRF 불성립(OVERPASS_ENDPOINTS 3개·NEIS_URL 전부 하드코딩 상수, 질의 본문은 bbox 숫자로 조립, URL 받는 인자·환경변수 없음). G4 유지(모든 호출 앞 limiter.wait, Overpass·NEIS 별도 limiter+지터, User-Agent 에 personal/non-commercial 명시). 유한 재시도+엔드포인트 순환, NEIS 는 list_total_count 만큼 못 받으면 실패로 남긴다. poi_loader SQL 전부 text()+바인드. SR22-2(low): resp.read()+json.loads 에 크기 상한 없음 - SR17-5·SR18-6 에 이은 3번째 동종이라 공통 read_capped 헬퍼로 일괄 처리 권고. 파괴적 SQL: 서버 실측 transit_plan = osm_overpass:34 행뿐으로 source 한정 삭제와 정합. 다만 그 DELETE 가 저장소에 남아 있지 않아 다음 사람이 '왜 123행이 사라졌나'를 알 수 없다 - scripts/ 나 migrations/ 에 남길 것. [ODbL - 배포 차단 사유 아님] share-alike 는 파생 DB 를 공개 배포할 때 발동하는데 개인·비상업이고 배포하지 않으므로 걸리지 않는다. 실제 의무는 출처 표시이며 POI 유래 사실이 화면에 보이는 지점에 '© OpenStreetMap contributors, ODbL' 를 넣으면 된다(POI UI 노출 전 처리 권고). sources.yaml 에 license.name ODbL 1.0 · share_alike_review_required: true 로 기록해 둔 것 자체가 옳은 처리다. 법률 판단은 보안 게이트의 역할이 아니다. [REC-5 / SR21-4 RESOLVED] 내 권고(pattern 정규식)보다 나은 수정을 했다: LIKE rc||'%' -> left(c.region_code, length(rc)) = rc 로 **와일드카드 개념 자체를 제거**. rc='%' 면 left(code,1)='%' 라 숫자 코드와 0건 매칭이라 구조적으로 무해해졌고, API 는 _REGION_CODE_RE 로 숫자 2~10자리만 허용(422)해 2겹이다. bbox 는 field_validator 가 형식·좌표범위·면적 상한을 422 로 막고, 파싱 결과를 버리고 원문을 저장하는 판단도 옳다(criteria_snapshot 은 재현성 근거라 사용자가 보낸 값 그대로여야 하고 러너가 같은 파서로 다시 읽는다). 프론트 parseBbox 에 상한을 안 넣은 판단도 타당 - 넣으면 잘못된 입력이 '범위 제한 없음(전국)'으로 조용히 넓어진다. SR22-4(info): 리포지토리만 보면 rc='' 일 때 left(code,0)='' 가 참이라 전체 매칭이지만 API 검증이 앞에서 막아 도달 불가 - 심층방어 빈틈으로만 기록(AND rc <> '' 한 조각이면 닫힘). [FIN 자금계획 - 자산 원본 0건 실측] compute_affordability(target=15억)를 실제로 돌려 값비교로 훑음: plan·warnings·assumptions·evidence **전부 보유현금·연소득 원본 없음**. 들어 있는 숫자는 파생값(필요대출·한도·초과분·월상환)이거나 사용자 자신이 입력한 희망가다. SR22-3(info) 정직 기재: plan.own_cash_krw = usable_cash_krw = 792,345,678 은 cash 812,345,678 - 예비비 20,000,000 이고 그 예비비가 assumptions 에 그대로 적혀 있어 **역산 가능**하다. 무해한 이유는 이 산출물이 소유자 본인에게만 나가고(인증·IDOR) _derive_forbidden 이 usable_cash_krw 를 tripwire 검사값에 포함시켜 프롬프트 경로를 막기 때문이다 - 설계가 이미 이 사실을 알고 있다는 뜻이라 정합적이다. 다만 '파생값이니 안전'을 일반 규칙으로 쓰지 말 것: 이 값은 안전한 게 아니라 노출면이 제한되고 tripwire 가 따로 지키는 것이다. [희망가 비암호화 판단 - 수용 가능하나 근거는 다듬을 것] '사실 vs 취향' 구분은 깔끔하지 않다. 희망가 15억은 자산의 하한을 추정하게 해 준다(5천만원 가진 사람이 15억을 넣지 않는다). 정확한 표현은 **정밀도의 차이**다 - 현금·소득은 정확한 금액이라 암호화, 희망가는 대략적 구간 추정이고 사용자가 스스로 정한 값이라 평문. DB 덤프(T1) 시 얻는 것은 '예산 대략 15억대'까지이고 실제 자산은 여전히 암호문이다. 1인 서비스에서 합리적 트레이드오프이며 평문이어야 조회·UX 가 성립한다 - 차단 사유 아님. security.md 분류 근거를 '사실/취향'이 아니라 '정확한 금액/추정 구간'으로 고쳐 적기를 권고. [서버 실측 - 조회 전용] .env 에 ANTHROPIC_API_KEY 없음(600 root:root) · 5432 리스너 0 · poi 14,947행(보고와 일치) · transit_plan osm_overpass:34 · 실사용자 id=11 approved/is_admin=t **미변경** · 라이브 CSP 에 connect-src 'self' https://dapi.kakao.com 반영 확인(SR-021 판정 적용됨) · 동거 서비스(itsmine-*·autobtc) 조회만 변경 0회. [키 투입 전 사용자 조치] ①ANTHROPIC_API_KEY 는 .env 에만(600 유지), 이미지·저장소·명령줄 금지 ②Anthropic 콘솔에서 사용량 알림/한도를 걸 것(우리 상한은 job 1건 내부까지 - SR22-5) ③키 투입 후 첫 추천 1건으로 notes 의 '규칙 기반' 문구가 사라지는지 확인(연결 실증).",
+    "key_reissue_target": "DEC-001 유지. ANTHROPIC_API_KEY 는 여전히 서버에 없음 - 투입 전 콘솔 사용량 한도 설정 권고(SR22-5, 유효).",
+    "notes": "PASS - 배포를 막을 보안 사유 없음. 파서 판정: memory-safe(적대적 입력 11종 실측). 재현: backend 981 tests / 0 failures / 63 skipped = 918 passed · frontend 501(이번 라운드 변경 0건) - 지시 수치 일치. [1순위 손으로 짠 SHP 파서 - 추론이 아니라 직접 먹였다] shp_polygon_to_wkb 는 외부 파일의 부호 있는 32비트 정수(part_count·point_count·part_index)를 그대로 언팩·인덱싱한다. 적대적 입력 11종 실측 결과: part_count/point_count = 2^31-1(과대 할당 유도) -> struct.error 즉시, 음수 -> struct.error, part_index 음수/과대 -> IndexError, 본문 절단/빈 바이트 -> struct.error, point_count > 실제 좌표 -> struct.error. **전 케이스 피크 메모리 0.00MB · 0.1ms 미만 · 과대 할당 0 · 무한 루프 0.** 왜 안전한가(중요): ①struct.unpack(f'<{N}i', buf) 는 버퍼가 정확히 N×4 바이트일 것을 요구하므로 N 이 21억이면 **할당 전에** 예외가 난다 - 즉 과대 할당을 막는 것은 우리 코드가 아니라 struct 모듈의 크기 검사다 ②N 이 음수면 포맷이 '<-5i' 가 되어 bad char in struct format 으로 거절 ③모든 반복이 range() 이고 while 이 없어 무한 루프가 성립 불가 ④_shx_offsets 의 오프셋이 음수·과대여도 파이썬 슬라이스가 범위 안전(실측: offset=-2000/length=-100 -> 길이 0, offset=2^31 -> 길이 0, 예외도 OOB 읽기도 없음). ×2 워드 변환은 이 안전성에 영향을 주지 않는다. 실패 방향도 옳다 - 예외가 밖으로 전파돼 스크립트가 죽으므로 fail-closed 이고 깨진 데이터가 조용히 적재되지 않는다. zip slip 불성립(zf.read 로 이름 읽기만 하고 extract* 미사용, 아카이브 파일명이 경로로 쓰이는 지점 0건). [SQL 인젝션 - 8종 시도 전부 차단] 로컬에서 SQL 텍스트를 만들어 gzip 업로드 후 psql 스트리밍 적재하는 구조라 '학교명에 따옴표가 오면?' 이 핵심인데 _literal() 의 달러인용이 답이다. 실측: 고전 인젝션 '; DROP TABLE ... -> 리터럴 유지 · abc$sz$; DROP -> ValueError(fail-closed, 유일한 탈출구를 명시 차단) · 대문자 $SZ$ -> 차단(PG 달러태그는 대소문자 구분이라 종료 안 됨) · 기본 달러인용 $$ -> 차단 · 역슬래시 -> 차단(달러인용은 백슬래시 이스케이프 미해석) · 개행+세미콜론 -> 차단 · 따옴표 섞인 학교명 -> 차단 · NUL 바이트 -> 리터럴 유지(PG 가 거부해 ON_ERROR_STOP 으로 멈춤 = fail-closed 데이터 품질 문제이지 인젝션 아님). _stage_values 는 10개 필드 전부 _literal 경유하고 attrs 는 json.dumps 후 다시 _literal 을 탄다. f-string SQL 상수 4개의 치환 대상은 SOURCE_KESI 모듈 상수 하나뿐 - 외부값 0건. [다운로드] SSRF 불성립 - PORTAL·META_URL·FILE_URL 하드코딩 상수이고 메타 응답의 atchFileId·fileDetailSn·dataNm(신규)은 전부 httpx params= 의 쿼리 값으로만 쓴다(응답이 URL 을 줘도 요청 대상 불변). check_payload 가 zip 매직바이트·CSV 헤더를 확인해 아니면 저장하지 않는다. 무키 다운로드라 키 유출 표면 자체가 없다. [★SR23-1 medium - SR22-2 격상] 응답 크기 상한 부재가 **네 번째** 반복이다(SR17-5 fetch_legal_dong_codes -> SR18-6 fetch_reb_complex_master -> SR22-2 fetch_poi -> 이번 fetch_school_zone). 개별 위험은 여전히 낮다(URL 하드코딩·수동 실행·컨테이너 밖 호스트 실행). 격상 이유는 개별 위험이 아니라 **패턴**이다 - 새 다운로더가 생길 때마다 같은 구멍이 재생산되고, 이번은 지금까지 중 가장 큰 페이로드(35MB SHP)이며 Overpass 는 더 커질 수 있다. 이 프로젝트는 반복 결함을 구조로 옮겨 해결한 전례가 있다(SR17-3 -> _common import 부작용). 통과조건: 공통 read_capped(resp, max_bytes) 헬퍼 1개로 네 곳을 함께 닫고 초과 시 조용히 자르지 말고 실패시킬 것. [SR23-2 low] 파서의 메모리 안전성이 **암묵적**이다 - 우리가 part_count·point_count 를 검증해서가 아니라 struct 의 크기 요구와 슬라이스 범위 안전성이 막아 주는 것이고, 그 사실이 코드에 적혀 있지 않다. memoryview 로 바꾸거나 리스트를 미리 잡는 최적화가 들어오면 안전성이 사라진다 -> 명시적 상한 + 퍼즈 회귀 테스트 1건 권고. [외부 문자열 -> 프롬프트: SR22-1 과 같은 구조지만 위험도는 낮다] 학교명·학구명이 school_district/poi(school) -> SchoolFact.name -> analysis.py:157 assigned_elementary -> :377 evidence claim -> LLM 프롬프트+화면 으로 흐른다. 그러나 OSM 은 누구나·익명·즉시 편집 가능하고 다음 수집에 바로 반영되는 반면, 학구도는 교육행정 시스템 공식 명칭이라 외부인이 바꿀 경로가 없고 반기 1회(3월·9월) 배포이며 변경에 행정 절차가 든다. SR22-1 의 핵심 우려('제3자가 우리 프롬프트에 문자열을 주입할 수 있다')가 이 출처에는 성립하지 않는다 -> 독립 신규 발견으로 올리지 않고 SR22-1 의 권고 적용으로 함께 덮는다. XSS: 프론트 이번 라운드 변경 0건, innerHTML/dangerouslySetInnerHTML 실사용 0건(유일 grep 히트는 금지 주석), React 자동 이스케이프. [적재 안전성] 파괴적 SQL 없음 - INSERT/UPSERT 뿐이고 _STALE_COUNT 는 옛 행을 세기만 하고 지우지 않는다(DELETE 0건). 1차 실패 롤백 확인 - 서버 ingest_log 에 kesi_school_zone:elementary|ok|3246|0 한 행뿐이고 실패한 1차 시도의 로그 행이 없다 = ingest_log INSERT 도 같은 트랜잭션에서 함께 롤백됐다는 뜻 = **가짜 성공이 남지 않았다**. 0건 방어 있음(load_school_zone.py:104 if not records: raise SystemExit). 마이그레이션 012 는 정적 DDL(ADD COLUMN IF NOT EXISTS·COMMENT·부분 유니크 인덱스), 사용자 입력 0, 자연키를 kesi:{학구ID}/{학교ID} 로 잡아 공동학구까지 고려했고 연 2회 재배포를 멱등하게 만든다. [개인정보·G2] 서버 실측 - school_district 컬럼은 id·school_poi_id·geom·source·as_of·source_ref, poi(school) attrs 키는 district_as_of·level·office·school_id·zone_id·zone_name 뿐으로 교사·학생·연락처 등 개인 관련 필드 **0건**. 전부 학교 단위 공개 행정정보이고 이 데이터로 개인 식별 불가. achievement_pct NULL 판단은 G2 에 맞다 - sources.yaml 에 '초등은 국가수준 평가 대상도 아니다' 사유가 적혀 있고 도메인도 is not None 일 때만 쓴다(출처·기준연도 없는 수치를 지어내지 않는다). [SR23-3 info] sources.yaml 의 school_zone 에 license 블록이 없다(같은 파일 OSM 항목엔 ODbL 1.0 + share_alike_review_required 가 있음). 공공데이터포털 파일데이터는 통상 공공누리 제1유형(출처표시)이라 위험은 낮으나 유형을 확인해 기록해 두면 다음 사람이 다시 조사하지 않는다 - SR-022 의 ODbL 출처표시 권고와 함께 처리 권고. [이전 지적] SR22-5(LLM 반복 제출 누적 상한 없음)는 여전히 유효 - 서버 .env 에 ANTHROPIC_API_KEY 가 아직 없지만 권고 성격이 '키를 넣기 전에 콘솔 한도를 걸어라'이므로 지금이 조치 적기다. SR22-2 는 해소가 아니라 SR23-1 로 격상 이관. [서버 실측 - 조회 전용] school_district 3,246 · poi(school) 2,209(보고 일치) · trade 611,518 · complex 16,462 · 사용자 id=11 approved/is_admin=t **전부 미변경**. 동거 서비스 조회만, 변경 0회. backend/docs·frontend/docs 에 상태 파일 생성 안 함(커밋 훅 차단 회피). [측정 중 관찰] 전체 실행 1·2회차에서 test_school_zone 의 **서로 다른** 테스트가 각각 1건씩 실패했다가 3회차에 0 fail(918 passed) 로 복귀했다. 단독 실행은 통과하며 매번 다른 테스트가 걸리는 것은 SR-019~022 에서 반복 관찰된 동시 편집 중 일시 현상이다. 배포 직전 트리 동결 후 최종 그린 1회 확인 권고.",
     "log": "docs/03-build/security-review-log.md",
-    "tests": "backend 953 tests / 0 failures / 0 errors / 63 skipped = 890 passed · frontend 33 files / 501 passed - 지시 수치 일치. httpx.post 가로채기로 실제 전송 본문 6,577자 검사(자산 3종 0건 · 키 헤더 전용). 키 유출 3 시나리오(네트워크 예외·400 본문 반사·500) 전부 0건. FIN 산출물 4종 값비교 0건. 서버 조회 전용 실측.",
-    "verified_resolved": [
-      "SR21-4"
-    ]
+    "tests": "backend 981 tests / 0 failures / 0 errors / 63 skipped = 918 passed(3회차 기준) · frontend 501(변경 0건) - 지시 수치 일치. SHP 파서 적대적 입력 11종 실측(과대할당·무한루프·OOB 0건, 피크 0.00MB). SQL 인젝션 8종 실측 전부 차단. 서버 조회 전용으로 적재량·컬럼·attrs 키·ingest_log 확인.",
+    "verified_resolved": []
   },
   "open_findings": [
+    {
+      "id": "SCHOOL-2",
+      "verdict": "OPEN",
+      "severity": "low",
+      "blocks": "없음",
+      "found_by": "CR-028 (code-reviewer, herdr re-review 대행)",
+      "date_found": "2026-07-27",
+      "owner": "re-data",
+      "title": "stale(이번 배포분에 없는 옛 학구 행)이 0 이 아닐 때 로그 한 줄로만 남는다 - 아무도 안 본다",
+      "evidence": [
+        "load_school_zone.py 의 _STALE_COUNT 가 stale 을 세고 _INGEST_LOG 가 '이번 배포분에 없는 옛 행 N' 으로 ingest_log 에 남긴다",
+        "지우지 않는 판단 자체는 옳다 — '학구 폐지'와 '원천 부분배포'를 구분할 수 없고, 지우면 반쪽 배포된 날 배정이 광범위하게 사라진다(school 가중치 0.35)",
+        "구역 재조정은 같은 자연키(kesi:{학구ID}/{학교ID})를 UPDATE 하므로 stale 을 만들지 않는다 — stale 은 ID 자체가 배포본에서 사라질 때만 생긴다(폐지 또는 부분배포)",
+        "낡은 행도 district_as_of 를 들고 있고 assess_school 이 결과에 실으므로 완전한 침묵은 아니다",
+        "그러나 stale 이 0 이 아닌 날 원장 한 줄만 남으면 사람이 폐지인지 부분배포인지 판정할 계기가 없다",
+        "현재는 첫 적재라 stale 0 이므로 실동작 확인은 다음 배포분에서 가능하다"
+      ],
+      "pass_conditions": [
+        "verify_school_district.py 가 stale > 0 이면 경고로 드러내고(가능하면 비정상 종료코드) 사람이 폐지/부분배포를 판정하도록 할 것",
+        "가능하면 stale 행에 플래그를 달아 도메인이 신뢰도를 낮출 수 있게 할 것(삭제는 하지 말 것)"
+      ],
+      "note": "함께 이월 SCHOOL-3(low): road_segment 0행이라 crosses_main_road NULL 유지 — 현재 동작이 옳다(모르는 것을 False 로 쓰면 '대로를 안 건넌다'는 없는 판정이 된다). 다만 _school_score 의 −15 감점이 배정 확인 뒤에만 타는데 그 전제가 94.45% 로 채워져 이제 의미가 생겼다. 결함이 아니라 미구현이므로 다음 라운드 필수는 아니고 우선순위 높은 다음 후보다."
+    },
+    {
+      "id": "PREF-1",
+      "verdict": "OPEN (3회 이월 - CR-028 에서 요구 축소)",
+      "severity": "medium",
+      "blocks": "없음",
+      "found_by": "CR-026 (code-reviewer, herdr re-review 대행)",
+      "date_found": "2026-07-26",
+      "owner": "frontend-react",
+      "title": "prefer 선호값이 저장만 되고 안 쓰임 - 이번 라운드로 '학군 중요도' 슬라이더가 가장 오도적이 됐다",
+      "evidence": [
+        "CR-028 재실측: buildMapQuery 는 여전히 area_min_m2·area_max_m2·built_after 만 전송, 백엔드 prefer 참조 0건, '아직 반영되지 않습니다' 고지는 가중치 절 하나뿐",
+        "★ 이번 라운드로 성격이 나빠졌다 — school 축이 0% → 94.45% 로 살아나면서, weights.location(학군 포함, **동작함**)과 prefer.school_district(학군 중요도 0~5, **미동작·무고지**)가 같은 화면에서 둘 다 '학군 중요도'로 읽히는데 하나만 동작한다",
+        "차단하지 않는 이유: 피해가 3회 내내 같다(설정화면 3개 입력의 오해). 추천 결과 자체는 정확하고 score_axes·score_notes 로 무엇이 반영됐는지 정직하게 표기된다. 데이터 손상·보안·장애가 아니다",
+        "여기서 차단하면 사용자가 API 승인까지 받아온 학구도 기능이 라벨 한 줄 때문에 미뤄진다 — 사용자에게 손해인 거래다",
+        "감사자 note: CR-027 에서 '다음에도 안 하면 판정을 달리하겠다'고 썼으나 집행하지 않는다. 차단은 결과로 정당화되어야지 앞서 한 경고로 정당화되어선 안 된다. 경고 반복이 조건을 값싸게 만든다는 지적이 옳으므로 '다음엔 진짜'라는 말을 더 하지 않고 요구를 최소로 좁힌다"
+      ],
+      "pass_conditions": [
+        "최소 한 줄: prefer.school_district 슬라이더 옆에 '이 값은 아직 순위에 반영되지 않습니다 — 학군 비중은 위 「무엇을 더 중요하게 볼까요」에서 조절됩니다'",
+        "역세권(subway 762 적재 완료라 배선 가능)·최소 세대수(total_households 채워짐)는 그다음",
+        "프론트를 다음에 건드릴 때 함께 넣으면 된다 — 독립 라운드를 잡을 필요 없다"
+      ],
+      "note": "3회 연속 이월이나 severity 는 medium 유지. 요구를 '학군 슬라이더 고지 한 줄' 로 좁혔다."
+    },
+    {
+      "id": "SR23-1",
+      "verdict": "OPEN",
+      "severity": "medium",
+      "blocks": "없음 - 비차단(SR22-2 에서 격상)",
+      "found_by": "SR-023 (security-reviewer, herdr re-review 대행)",
+      "date_found": "2026-07-27",
+      "owner": "re-data",
+      "title": "외부 다운로드 응답 크기 상한 부재가 네 번째 반복 - 개별 위험이 아니라 패턴이 문제다",
+      "evidence": [
+        "scripts/fetch_school_zone.py 의 download() 가 resp.content 로 35MB SHP 를 통째로 메모리에 올린다(크기 확인 없음)",
+        "같은 결함의 네 번째다: SR17-5(fetch_legal_dong_codes) -> SR18-6(fetch_reb_complex_master) -> SR22-2(fetch_poi) -> 이번(fetch_school_zone)",
+        "이번이 지금까지 중 가장 큰 페이로드이고, Overpass 는 bbox 에 따라 그보다 더 커질 수 있다",
+        "개별 위험은 여전히 낮다: URL 이 하드코딩 상수(SSRF 불성립) · 사람이 수동 실행 · backend 컨테이너(192m) 밖 호스트에서 실행",
+        "격상 근거: 새 다운로더가 생길 때마다 같은 구멍이 재생산되고 있다. 이 프로젝트는 반복 결함을 '부르는 사람이 잊을 수 없는 자리'로 옮겨 해결한 전례가 있다(SR17-3 -> _common import 부작용)"
+      ],
+      "pass_conditions": [
+        "공통 read_capped(resp, max_bytes) 헬퍼 1개를 만들어 네 다운로더를 함께 닫을 것",
+        "상한 초과 시 조용히 자르지 말고 SystemExit/FetchError 로 실패시킬 것",
+        "가능하면 새 다운로더가 자동으로 그 헬퍼를 쓰게 되는 형태(공통 클라이언트 팩토리 등)로"
+      ],
+      "note": "SR22-2 를 해소한 것이 아니라 격상 이관한 항목이다. 네 번 반복됐다는 사실 자체가 구조로 옮기라는 신호다."
+    },
+    {
+      "id": "SR23-2",
+      "verdict": "OPEN",
+      "severity": "low",
+      "blocks": "없음 - 비차단",
+      "found_by": "SR-023 (security-reviewer, herdr re-review 대행)",
+      "date_found": "2026-07-27",
+      "owner": "re-data",
+      "title": "SHP 파서의 메모리 안전성이 암묵적이다 - 우리가 검증해서가 아니라 struct·슬라이스가 막아 주는 것이다",
+      "evidence": [
+        "적대적 입력 11종 실측 결과는 안전하다: 과대 할당 0 · 무한 루프 0 · OOB 0 · 피크 메모리 0.00MB · 전 케이스 0.1ms 미만",
+        "그러나 안전한 이유는 명시적 검증이 아니다: struct.unpack(f'<{N}i', buf) 가 버퍼 크기를 정확히 요구해 N 이 21억이면 할당 전에 예외가 나고, N 이 음수면 포맷 문자열이 깨져 거절되며, 파이썬 슬라이스가 음수·과대 오프셋에 범위 안전하다",
+        "shp_polygon_to_wkb 어디에도 part_count·point_count 에 대한 명시적 상한·부호 검사가 없다",
+        "따라서 memoryview 로 바꾸거나 성능을 위해 리스트를 미리 할당하는 최적화가 들어오면 이 안전성은 조용히 사라진다",
+        "현재 테스트는 정상 입력 위주이고 적대적 입력에 대한 회귀 테스트가 없다"
+      ],
+      "pass_conditions": [
+        "part_count·point_count 에 명시적 상한과 부호 검사 추가(예: 0 <= n <= 1_000_000)",
+        "적대적 입력 퍼즈 회귀 테스트 1건 - 과대/음수 카운트, 절단 본문, 음수 part_index 를 넣어 예외 또는 None 이 나오는지 단언"
+      ],
+      "note": "지금 옳다는 것과 앞으로도 옳다는 것은 다르다. 방어가 외부 라이브러리의 부수효과에 기대고 있다는 사실을 코드에 적어 두는 것만으로도 가치가 있다."
+    },
+    {
+      "id": "SR23-3",
+      "verdict": "OPEN",
+      "severity": "info",
+      "blocks": "없음 - 비차단",
+      "found_by": "SR-023 (security-reviewer, herdr re-review 대행)",
+      "date_found": "2026-07-27",
+      "owner": "PM",
+      "title": "sources.yaml 의 school_zone 에 license 블록이 없다 - 공공누리 유형 확인·기록 권고",
+      "evidence": [
+        "config/sources.yaml 의 school_zone 항목은 provider·endpoint·cadence·auth·구판 경고까지 충실하지만 license 블록이 없다",
+        "같은 파일의 OSM 항목에는 license.name: 'ODbL 1.0' 과 share_alike_review_required: true 가 있어 대비된다",
+        "공공데이터포털 파일데이터는 통상 공공누리 제1유형(출처표시)이라 의무는 출처 표시 정도이고 share-alike 같은 강한 조항이 없어 위험은 낮다"
+      ],
+      "pass_conditions": [
+        "해당 데이터셋의 공공누리 유형을 확인해 sources.yaml 에 license 블록으로 기록",
+        "SR-022 의 ODbL 출처 표시 권고와 함께 처리(POI·학구도 유래 사실이 화면에 보이는 지점에 출처 표기)"
+      ],
+      "note": "차단 사유가 아니다. 다음 사람이 같은 조사를 반복하지 않게 하는 기록의 문제다."
+    },
     {
       "id": "POI-2",
       "verdict": "OPEN",
@@ -55,30 +164,6 @@
         "점수 계산은 바꾸지 말 것(현재 동작이 옳다). 무엇을 봤는지만 말하면 된다"
       ],
       "note": "함께 이월 POI-3(low): GTX 노선명이 transit_plan.name 에 한글 음차(수도권광역급행철도에이선)로 들어온다. 원천을 안 고친 판단은 옳으므로(GEO-1 이후 원칙) 표시·검색 계층에서만 'GTX-A' 로 별칭 매핑할 것. 역 poi.attrs.lines 는 이미 'GTX-A' 로 정상이라 점수에는 영향 없다. POI-4(low): 서울역 등이 OSM 에서 분리 노드라 여러 행이고 각 행의 line_count 가 나뉘어 환승 가치가 과소평가된다(보수적 방향이라 우선순위 낮음)."
-    },
-    {
-      "id": "PREF-1",
-      "verdict": "OPEN (재확인 - CR-027)",
-      "severity": "medium",
-      "blocks": "없음 - 다음 라운드 조건(2회 연속 이월)",
-      "found_by": "CR-026 (code-reviewer, herdr re-review 대행)",
-      "date_found": "2026-07-26",
-      "owner": "frontend-react",
-      "title": "역세권·학군 중요도·최소 세대수 선호값이 여전히 저장만 되고 안 쓰이며 고지도 없다 - 이번 라운드로 역세권의 데이터 핑계는 소멸했다",
-      "evidence": [
-        "CR-027 재실측: buildMapQuery 는 여전히 area_min_m2·area_max_m2·built_after 만 전송한다",
-        "백엔드 recommend.py·orchestrator.py·routes.py 의 prefer 참조 여전히 0건",
-        "ConditionsScreen 의 '아직 반영되지 않습니다' 고지는 여전히 **가중치 절에만** 있다",
-        "★ 상황 변화: POI-1 로 subway 762건이 적재돼 **역세권은 이제 배선 가능하다** — '데이터가 없어서 못 한다'가 더는 성립하지 않는다(학군은 school_district 0행이라 유효하며 학구도 API 착수 임박)",
-        "★ 이번 라운드가 **동작하는 선호값(희망 매매가)을 새로 추가**해, 같은 화면에서 되는 입력과 안 되는 입력의 비대칭이 커졌다",
-        "차단하지 않는 이유는 CR-026 과 동일 — 설정화면 3개 입력의 오해이고 데이터 손상·보안·장애가 아니며 사용자는 1인(지적한 당사자)이다"
-      ],
-      "pass_conditions": [
-        "최소 조치(고지 5줄): 가중치 절과 같은 패턴으로 역세권·학군·세대수에 '아직 반영되지 않습니다' 를 붙일 것",
-        "역세권은 데이터가 생겼으므로 실제 배선을 우선 검토(subway POI + PROXIMITY_BANDS['station'])",
-        "학구도 API 작업이 이 화면을 어차피 건드리므로 그때 함께 처리"
-      ],
-      "note": "2회 연속 이월이다. 다음 라운드에도 손대지 않으면 백로그가 아니라 패턴으로 보고 판정을 달리하겠다."
     },
     {
       "id": "SR22-1",

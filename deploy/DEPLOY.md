@@ -225,6 +225,9 @@ docker exec realestate-db psql -U realestate -d realestate -c "
    WHERE table_name='recommendation_job' AND column_name='result_meta';"   # 있으면 010 적용됨
 docker exec realestate-db psql -U realestate -d realestate -c "
   SELECT indexname FROM pg_indexes WHERE indexname='uq_poi_source_ref';"   # 있으면 011 적용됨
+docker exec realestate-db psql -U realestate -d realestate -c "
+  SELECT indexname FROM pg_indexes
+   WHERE indexname='uq_school_district_source_ref';"                       # 있으면 012 적용됨
 
 # (2) 백업 먼저 (파괴적이지 않아도 습관으로)
 mkdir -p /root/realestate-backup
@@ -233,8 +236,11 @@ docker exec realestate-db pg_dump -U realestate -d realestate --schema-only \
 
 # (3) 미적용분만 순서대로. 파일은 모두 ADD COLUMN IF NOT EXISTS 라 재실행해도 안전하다
 #     011 은 입지(F3) 수집의 멱등성(자연키)을 만든다 — 없으면 poi 재수집이 행을 쌓는다.
+#     012 는 학구도(school_district)에 같은 자연키를 준다 — 학구도는 매년 3·9월
+#     재배포되므로 없으면 재적재가 행을 쌓고 '배정 초등학교'가 어느 판인지 알 수 없어진다.
 for f in backend/migrations/009_user_approval.sql backend/migrations/010_job_result_meta.sql \
-         backend/migrations/011_poi_natural_key.sql; do
+         backend/migrations/011_poi_natural_key.sql \
+         backend/migrations/012_school_district_natural_key.sql; do
   echo "--- $f ---"
   docker exec -i realestate-db psql -U realestate -d realestate -v ON_ERROR_STOP=1 < "$f"
 done
