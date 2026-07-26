@@ -1441,3 +1441,656 @@ XHR 로 보내려면 CORS 승인이 필요한데 없다. → **성립하지 않�
 예외 기록 없이 사용했고, 그 결정이 전제한 보완통제가 하나도 없다"* — 는 **설계를 낮추는 방식이
 아니라 구현을 설계에 맞추는 방식으로** 해소됐다. 반려 당사자로서 직접 43+10 항목을 실행해
 확인했고, 같은 입력에 같은 결과가 나온다. 커밋 게이트를 더 이상 이 건으로 막지 않는다.
+
+---
+
+## SR-017 · 2026-07-26 · **실데이터 수집 파이프라인 감사** (security-reviewer, herdr re-review 대행)
+
+**판정: FAIL** — 차단 3건(`SR17-1` high · `SR17-2` high · `SR17-3` medium)
+대상: working tree 미커밋 변경 (신규 스크립트 7 + `app/ingest/*` · `app/worker.py` · `config/*` · `.gitignore`)
+재현: `cd backend && python -m pytest -q` → **RC=0 · 380 passed / 50 skipped** (PM 보고와 일치, 직접 실행 확인)
+
+> 결론 요약: **서버에 남은 키 흔적은 0건이다**(전체 파일시스템 스캔으로 실증). 그러나 **키가 새는
+> 경로 자체는 닫히지 않았다.** 이번에 안 샌 이유는 방어가 동작해서가 아니라 **수집 6회가 전부
+> `status=ok · 실패 0건` 이었기 때문**이다. 예외가 한 번이라도 나면 같은 사고가 재발하고,
+> 그 중 하나는 **공개 저장소에 커밋되는 파일**로 들어간다.
+
+---
+
+### 1) ★ 키 유출의 완전한 봉쇄 — **미완 (SR17-1, high, 차단)**
+
+#### 1-A. 로거 억제는 사고의 절반만 막았다 — 진짜 경로는 **예외 메시지**다
+
+`httpx` 의 `raise_for_status()` 가 만드는 `HTTPStatusError` 는 **요청 URL 을 통째로 메시지에 싣는다.**
+직접 실행해 확인:
+
+```
+EXC_TYPE: HTTPStatusError
+EXC_STR : Server error '500 Internal Server Error' for url
+          'https://apis.data.go.kr/.../getRTMSDataSvcAptTrade?serviceKey=SUPERSECRETKEY123&LAWD_CD=11680...'
+LEAKS_KEY: True
+```
+
+로그 레벨을 아무리 낮춰도 이건 안 막힌다. **우리 코드가 그 예외를 문자열로 만들어 직접 출력**하기 때문이다:
+
+| # | 유출 경로 | 위치 | 도달 지점 | 심각도 |
+|:--:|---|---|---|:--:|
+| L1 | `f"수집/적재 실패: {exc}"` → `run.failures` | `backend/app/ingest/runner.py:179` | ① `scripts/run_ingest.py:116` 의 `print` → 운영에서 `/tmp/*.log` 로 리다이렉트됨 ② `runner.py:96` `logger.warning` — **WARNING 이라 configure_logging 억제 대상이 아니다** | **High** |
+| L2 | `f"{ym}: {type(exc).__name__}: {exc}"` | `backend/scripts/verify_region_codes.py:82` | ① `:189` `print` ② **`classify()` → `verdict:` 문자열 → `config/region_code_verification.yaml` 에 기록(`:91`, `:205`)** | **Critical 경로** |
+
+**L2 가 가장 위험하다.** `config/region_code_verification.yaml` 은 이번 커밋 대상(`?? config/region_code_verification.yaml`)이고,
+원격은 **공개 저장소** `https://github.com/wansoo88/realestate.git` 다. 검증 중 API 오류가 한 번이라도
+나면 인증키가 **git 이력에 영구히** 박힌다 — 파일을 지워도 이력에서는 안 지워진다.
+
+지금 파일이 깨끗한 이유는 방어가 아니라 운이다:
+- `region_code_verification.yaml` → `summary.error: 0` (94개 코드 전부 오류 없이 통과)
+- 운영 DB `ingest_log` 6행 → **전부 `status=ok`, 실패 0건** (직접 조회 확인)
+
+공공데이터포털은 과부하 시 5xx 를 흔하게 돌려준다. 12만 건을 수 시간 긁는 배치에서 예외 0건은
+**재현을 기대할 수 없는 조건**이다.
+
+#### 1-B. 구조적 방어(마스킹 유틸)가 **없다** — 있다고 기록된 것도 사실이 아니다
+
+저장소에 문자열 마스킹 유틸이 없다. 유일한 후보인 `mask_sensitive()` 는 **dict 키 기반**이라
+문자열에는 아무 일도 하지 않는다. 직접 실행:
+
+```
+mask_sensitive("https://apis.data.go.kr/x?serviceKey=SECRET123&a=b")
+  → "https://apis.data.go.kr/x?serviceKey=SECRET123&a=b"    # 그대로 반환
+LEAKS: True
+```
+
+따라서 `app/main.py:92` 의 `logger.exception(..., mask_sensitive(str(request.url)))` 는
+**마스킹이 아니라 항등함수**다. `SR-006 §4` 가 "예외 URL 마스킹 ✅" 로 기록한 항목은
+**과잉 주장**이었다(SR-005 → SR-006 에서 한 번 겪은 것과 같은 유형의 오류다). 여기서 정정한다.
+
+#### 1-C. 로거 억제의 커버리지 — 7개 중 2개만
+
+| 스크립트 | `configure_logging` | 비밀 취급 | 판정 |
+|---|:--:|---|---|
+| `run_ingest.py` | ✅ `:73` | MOLIT 키 | 억제됨 (그러나 L1 로 샘) |
+| `verify_recommendation.py` | ✅ `:161` | DB·암호화키 | 억제됨 |
+| **`verify_region_codes.py`** | ❌ | **MOLIT 키를 쿼리스트링으로 전송** | **미억제 — L2 의 당사자** |
+| `geocode_complexes.py` | ❌ | 카카오 키(헤더) | 미억제 (키는 URL 밖이라 저위험) |
+| `ingest_report.py` | ❌ | DB DSN | 미억제 (HTTP 없음) |
+| `fetch_legal_dong_codes.py` | ❌ | 없음 | 무관 |
+| `_common.py` | (제공자) | — | — |
+
+`verify_region_codes.py` 가 지금 httpx INFO 를 안 찍는 것은 **우연**이다 — 루트 로거를 아무도
+설정하지 않아 `logging.lastResort` 핸들러(WARNING)가 INFO 를 버릴 뿐이다. 임포트 체인 어딘가에서
+`basicConfig(INFO)` 가 한 줄 들어오는 순간 사고가 그대로 재발한다.
+
+**설계 결함**: 억제가 **비밀을 쥔 쪽**(`make_http_fetch` / `molit.build_params`)이 아니라
+**호출자 7명 각각**에게 맡겨져 있다. 이건 "사람이 기억해야 하는 방어"이고, 이 원장은 SR-006 에서
+같은 이유로 이미 한 번 반려한 적이 있다.
+
+#### 1-D. 서버 잔존 흔적 — **0건 (실측)**
+
+`ssh root@<DEPLOY_HOST>` 로 조회만 수행(변경·삭제 없음). 키 원문 20자 + URL 인코딩 변형 두 가지로 검색:
+
+| 대상 | 결과 |
+|---|---|
+| 전체 파일시스템(`/`, `/proc`·`/sys` 제외) 원문 | **`/opt/realestate/.env` 단 1건** (권한 `600 root:root`) |
+| 전체 파일시스템 URL 인코딩 변형 | **0건** |
+| `journalctl` (전체 · 최근 7일) | **0건** |
+| `/var/lib/docker/containers/**-json.log` | **0건** (`serviceKey` 문자열 2건은 **본 감사자가 방금 실행한 psql 오류문** — 2026-07-25 15:03 UTC, 키 값 미포함) |
+| `/tmp` (`*.log` 포함 전수), `/root`, `/var/log`, `/home` | **0건** |
+| `~/.bash_history` (549줄, 최종수정 7/2) | **0건**. `DATABASE_URL` 언급 4건은 전부 autobtc 것 |
+| `nohup.out` | 존재하지 않음 |
+| git 전체 ref(`git rev-list --all`) | **0건** |
+| 운영 DB `ingest_log.message` 6행 | **0건** (메시지는 `"N개 (지역·달) 시도, 실패 0건"` 형식 — `failures` 는 DB 에 안 들어간다) |
+
+부수 확인 — `safe_dsn()` 은 **실제로 동작**한다. 서버 `/tmp/ingest_backfill.log:1`, `/tmp/geocode.log:1` 등:
+`[INFO] DB postgresql+psycopg://realestate:***@172.19.0.2:5432/realestate`. DB 비밀번호·카카오 키도
+`.env` 밖 0건.
+
+#### 1-E. 키 재발급 판단 — **재발급하라 (YES)**
+
+- 사고 자체는 **실재했다**(PM 보고: 첫 실행에서 httpx INFO 가 `serviceKey` 를 평문 출력).
+- 그 출력물은 **서버 어디에도 남지 않았다**(위 실측). 즉 노출면은 파일이 아니라
+  **당시 세션의 터미널 출력과 그것을 담은 에이전트 대화 기록**이다. 우리가 **소유하지도, 파기를
+  확인하지도 못하는 저장소**다.
+- 따라서 "누가 봤는지"를 추론할 방법이 없다. **평문 노출 후에는 추론하지 말고 회전한다**가 원칙이다.
+- 비용이 사실상 0 이다: data.go.kr 인증키는 무료·셀프 재발급이고, 반영은 `.env` 한 줄 교체 +
+  `docker compose up -d` 뿐이다. 사용자 데이터·서비스 중단 영향 없음.
+- 반대로 방치 비용은 비대칭이다: 도난 시 **일일 한도가 남에게 소진**되고, 그때 우리 배치는
+  `resultCode != 00` 으로 실패하는데 그게 "그날 거래가 없었다"와 겉보기에 잘 구분되지 않는다.
+
+→ **PM 은 사용자에게 MOLIT 인증키 재발급을 요청할 것.** (카카오 REST 키는 헤더 전송이라 이번
+유출과 무관 — 재발급 불필요. §6 참조)
+
+---
+
+### 2) 새 스크립트 7개의 비밀정보 취급 — **PASS**
+
+| 점검 | 결과 | 근거 |
+|---|:--:|---|
+| 비밀을 커맨드라인 인자로 받는가 (`ps` 노출) | ✅ **없음** | 7개 전부 `argparse` 에 비밀 인자 0개. 키·DSN 은 `_common.require()` / `load_env()` 로 **환경변수만** 사용 |
+| DB 비밀번호가 출력에 실리는가 | ✅ 차단 | `safe_dsn()` 이 `://user:***@` 로 치환. `run_ingest.py:96`·`geocode_complexes.py:53`·`ingest_report.py:89` 전부 `safe_dsn` 경유. 서버 로그 실측으로 동작 확인 |
+| 키가 생성 파일에 실리는가 | ❌ **SR17-1 L2** | `verify_region_codes.py` 만 예외 — §1-A |
+| 설정 미비 시 동작 | ✅ | `require()` 가 `SystemExit` — '도는 척' 하지 않음 |
+
+> 잔여(비차단): `DATABASE_URL` 을 셸에서 `export` 하는 사용법이 docstring 에 안내돼 있어
+> 대화형 셸에서 쓰면 `~/.bash_history` 에 DSN(비밀번호 포함)이 남는다. 이번 서버 실측에서는
+> **실제로 남지 않았다**(비대화형 SSH). 안내 문구에 `read -s` 또는 `.env` 사용 권고 1줄 추가 권장.
+
+---
+
+### 3) 생성된 설정파일의 민감정보 — **PASS**
+
+`config/region_code_verification.yaml`(94코드) · `config/regions_capital.yaml` 전수 점검:
+
+- `serviceKey|api_key|password|secret|token|KakaoAK` → **0건**
+- 사설/공인 IP 정규식(`\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}`) → **0건** (배포 IP·컨테이너 IP 없음)
+- URL 은 2건뿐이며 **둘 다 공개 엔드포인트**: `apis.data.go.kr/1613000/RTMSDataSvcAptTrade/...`,
+  `www.code.go.kr/stdcode/regCodeL.do` — 비밀 아님, 출처 표기로 오히려 바람직
+- 내용은 코드·명칭·월별 건수·판정 사유뿐. `summary.error: 0` 이라 §1-A L2 의 오류 문자열도 미포함
+
+⚠️ 단 이 PASS 는 **현재 파일 한정**이다. `error > 0` 인 상태로 재생성되면 곧바로 FAIL 이 된다
+(그게 SR17-1 이 차단인 이유다).
+
+---
+
+### 4) `.gitignore` 변경 및 커밋 대상 — **PASS 1건 · 주의 1건**
+
+- `data/reference/` 추가 **적절**. `git check-ignore -v` 실검증:
+  `.gitignore:40:data/reference/ → data/reference/legal_dong_code_full.txt` **IGNORED**.
+  2.4MB 배포본을 커밋 대신 스크립트로 재취득하는 판단이 옳다.
+- `.env` 여전히 IGNORED 확인.
+- 커밋 대상 실측(`git status --porcelain`): 신규 8건(스크립트 7 + 검증 yaml 1), 수정 16건.
+  **키·인증서·개인키·백업 파일 0건.** 단 `verify_recommendation.py` 는 §5 사유로 이 상태로 커밋 불가.
+- **주의(비차단, `SR17-7`)**: 서버 `/opt/realestate` 의 `.gitignore` 는 아직 **커밋된 구버전**이라
+  그곳에서는 `?? data/` 가 무시되지 않는다(실측). 서버에서 `git add -A` 를 먼저 하면 2.4MB 가
+  들어간다. 이 커밋을 서버로 반영한 뒤 작업할 것.
+
+---
+
+### 5) `SR17-2` (high, 차단) — **운영 DB 계정의 비밀번호가 공개 저장소로 나간다**
+
+```python
+# backend/scripts/verify_recommendation.py:50
+TEST_PASSWORD = "<평문 비밀번호 리터럴 — SR17-2 조치 시 삭제·리뷰로그에서도 제거>"
+...
+return repo.create_user(email, hash_password(TEST_PASSWORD)), True   # :57
+```
+> ⚠️ 이 리뷰로그 자체가 **공개 저장소 커밋 대상**이라, 지적하려고 값을 인용하는 것만으로
+> 같은 유출이 된다. SR17-2 조치와 함께 값을 지웠다(`tests/test_script_hygiene.py` 가 재발을 막는다).
+
+이건 "테스트용 더미 상수"가 아니다. **이 값으로 만들어진 계정이 운영 DB 에 살아 있다.** 직접 조회:
+
+```
+ id |              email               |      hash_prefix       |          created_at
+  1 | verify+recommend@example.invalid | $argon2id$v=19$m=19456 | 2026-07-25 13:56:36+00
+```
+
+- 저장소는 **public** (`github.com/wansoo88/realestate`, SR-001 확인). 커밋 즉시
+  **동작하는 자격증명이 인터넷에 공개**된다 — CWE-798 / OWASP A07.
+- 재현: 배포(G5) 후 `POST /api/v1/auth/login` 에 `verify+recommend@example.invalid` +
+  위 문자열 → **인증된 세션 획득**. 그 세션으로 `/me/profile`·`/affordability`·`/recommendations`
+  전부 호출 가능하다. 소유자 계정은 아니지만 **인증 경계 안쪽 발판**이고, 추천 파이프라인은
+  Claude API 를 태우므로 **비용 유발 경로**이기도 하다(SR5-2 토큰 상한 미설정과 결합).
+- 비밀번호 강도(22자·혼합)는 무의미하다. **공개된 순간 강도는 0 이다.**
+- 현재 즉시 착취는 불가하다 — `docker ps` 상 `realestate-db-1` 만 떠 있고 API 컨테이너가 없다.
+  그래서 **커밋 차단**이지 사고 대응은 아니다. 다만 **커밋이 곧 공개**이므로 순서가 중요하다.
+
+**통과 조건**
+1. `TEST_PASSWORD` 상수 제거 → `os.environ["VERIFY_PASSWORD"]` 또는 `secrets.token_urlsafe(24)` 로
+   매 실행 생성(생성값도 출력하지 않는다).
+2. 운영 DB 의 `app_user id=1` 과 그 종속 데이터(`user_profile`, `recommendation_job` 2건)를
+   **삭제하거나** 비밀번호를 임의값으로 교체. (파괴적 작업이라 본 감사자는 조회만 했다 — PM 이 결정)
+3. 회귀: 스크립트 소스에 비밀번호 리터럴이 없음을 확인하는 grep 테스트 1건.
+
+---
+
+### 6) 지오코딩(카카오 키) — **PASS**
+
+- 키는 **`Authorization: KakaoAK <key>` 헤더**로만 나간다(`app/ingest/geocode.py:134`).
+  쿼리스트링에 없다 → ① httpx INFO 의 URL 로그에 안 찍히고 ② `HTTPStatusError` 메시지의
+  `request.url` 에도 안 실린다. **§1 과 같은 유형의 사고가 구조적으로 성립하지 않는다.**
+- 파이썬 트레이스백은 지역변수를 출력하지 않으므로 `headers` 도 노출되지 않는다.
+- `geocode_complexes.py` 가 `configure_logging` 을 안 부르는 것은 사실이나, 위 이유로 **키 유출
+  위험은 없다**(찍혀도 URL 에 비밀이 없다).
+- **결론: 카카오 REST 키는 재발급 불필요.** 다만 §1 의 교훈을 일반화해 억제·마스킹을 공통화하면
+  이 스크립트도 자동으로 덮인다.
+
+---
+
+### 7) G4 (수집 합법성) — **CONFIRM PASS**
+
+| 점검 | 결과 | 근거 |
+|---|:--:|---|
+| 페이지 루프가 rate limit 을 우회하는가 | ✅ **우회 없음** | 바깥 루프가 (지역·달)마다 `limiter.wait()`(`runner.py:171`), 안쪽 페이지 루프가 `page > 1` 마다 `limiter.wait()`(`:136-137`). 1페이지는 바깥 wait 로 이미 지연됨 — **모든 HTTP 호출 앞에 정확히 한 번씩** 간격이 보장된다 |
+| 무한 루프 방지 | ✅ | `MAX_PAGES = 50` 상한. 초과 시 조용히 자르지 않고 `MolitPaginationError` |
+| 검증 스크립트의 rate limit | ✅ | `verify_region_codes.probe:76` 가 월마다 `limiter.wait()` (0.4s + jitter) |
+| 실행 간격 실측 | ✅ | `run_ingest --min-interval` 기본 **0.4s(≈2.5 rps)**, geocode 기본 **0.25s(≈4 rps)** — 공공API·카카오 쿼터 대비 보수적 |
+| 포털(호가) 수집이 추가됐는가 | ✅ **없음** | 신규 외부 호출은 3곳뿐이며 **전부 공공/공식 API**: 국토부 실거래가, 행정안전부 코드관리시스템(`code.go.kr`), 카카오 로컬(공식 REST). 스크래핑·HTML 파싱 0건 |
+| robots fail-closed | ✅ 유지 | `app/ingest/robots.py` 무변경, 미판정 시 거부. 이번 소스들은 공식 API 라 적용 대상 아님 |
+| 공공API 만으로 성립하는가(이중화 요구) | ✅ | 이번 라운드 12만 건이 **전부 공공 API 산출물** — G4 의 "포털 꺼도 동작" 요구를 실데이터로 입증한 셈 |
+
+---
+
+### 8) 서버 상태 — **PASS** (조회 전용. 타 실서비스 무변경)
+
+| 점검 | 결과 |
+|---|---|
+| DB 포트 개방 | ✅ **미개방**. `ss -tlnp` 에 5432 리스너 없음. `docker ps` 의 `realestate-db-1` **Ports 칸 공란** |
+| compose 에 `ports:` 추가됐나 | ✅ **없음**. `docker-compose.deploy.yml` 의 유일한 매핑은 `"127.0.0.1:${API_BIND_PORT:-8013}:8000"` (루프백 한정) |
+| `.env` 권한 | ✅ `600 root:root` |
+| 외부 노출 포트 | 22 / 80 / 443 / **8080** — 8080 은 `autobtc` 컨테이너(타 서비스, 선재). pjt13 은 0.0.0.0 노출 0건 |
+| 타 서비스 영향 | ✅ **없음**. `itsmine-*`·`autobtc` 는 `docker ps`·`inspect` 조회만. 중지·재시작·설정변경·파일삭제 **0회** |
+
+---
+
+### 9) 검증용 계정 `verify+recommend@example.invalid` (id=1) — **SR17-6 (low, 비차단)**
+
+| 관점 | 판단 |
+|---|---|
+| 약한 비밀번호인가 | ❌ 아니다(22자·대소문자·기호). **문제는 강도가 아니라 공개 예정이라는 것** → §5 `SR17-2` 로 승격 |
+| 실계정과 혼동되나 | ❌ 낮다. `.invalid` 는 RFC 6761 예약 TLD 라 실제 메일이 갈 수 없고, `verify+` 접두로 의도가 드러난다. **작명은 잘했다** |
+| 저장된 데이터가 민감한가 | ❌ 아니다. 현금 8억·소득 1.2억은 CLI 기본값(가공값)이며 `user_profile` 에 **AES-256-GCM 암호문**으로 저장됨(평문 컬럼 0) |
+| 잔존 자체의 위험 | ⚠️ 낮음-중간. ① 사용자 수 1 인 시스템에서 **유일한 계정이 테스트 계정**이라 운영 통계·감사 로그가 오염된다 ② `recommendation_job` 2건이 실사용 이력으로 오독될 수 있다 ③ id=1 이 소유자 계정에 배정되지 못한다 |
+
+**의견**: 보안 결함이라기보다 **위생 문제**다. 단 §5 때문에 어차피 손대야 하므로,
+**G5 배포 전에 id=1 계정 + 프로필 + job 2건을 삭제**하고 소유자 계정을 첫 사용자로 만들 것을 권고한다.
+(파괴적 작업이므로 본 감사자는 실행하지 않았다.)
+
+---
+
+### 10) 그 밖에 확인한 것 (PASS)
+
+| 항목 | 결과 | 근거 |
+|---|:--:|---|
+| **zip slip** (`fetch_legal_dong_codes.py`) | ✅ **불성립** | `extract()` 가 아카이브 내부 파일명을 **경로로 쓰지 않는다** — `infolist()[0]` 의 내용만 읽어 `--out` 으로 지정된 경로에 쓴다(`:71-74`, `:92`). `z.extract*` 계열 미사용 |
+| **SSRF** | ✅ **불성립** | `LIST_URL`·`DOWNLOAD_URL` **하드코딩 상수**(`:37-38`). URL 을 받는 인자·환경변수 없음 |
+| 응답 위장 방어 | ✅ | ZIP 매직바이트(`PK`) 확인 + 헤더 문자열 검증 — HTML 오류페이지를 데이터로 저장하지 않음 |
+| **SQL 인젝션** | ✅ **0건** | 신규/수정 SQL 전부 `text()` + 바인드 파라미터. 문자열 결합·f-string SQL 0건. `unnest(CAST(:pats AS text[]))`(verify_recommendation.py:70,111)도 파라미터 바인딩. `postgis.py:735` 의 `CAST(:area_m2 AS numeric)` 변경은 **AmbiguousParameter 수정**이지 인젝션 표면 아님 |
+| IDOR 회귀 | ✅ 유지 | `repo.get_job(job_id, user.id)` — 2인자 강제 시그니처 무변경 |
+| 프롬프트 안전(SR4-2) 회귀 | ✅ 유지 | `orchestrator.py` 변경은 `dong_effect` 창 인자 제거뿐. finding 구성·`assert_no_secrets` 배선 무변경 |
+| 자산 암호화 | ✅ 유지 | `verify_recommendation.py` 가 `encrypt_amount(..., user_id, field=...)` 로 AAD 바인딩 유지 |
+
+---
+
+### 신규 발견 요약
+
+| ID | 심각도 | 제목 | 차단 |
+|---|:--:|---|:--:|
+| `SR17-1` | **high** | MOLIT 인증키가 예외 메시지로 샌다 — 로거 억제로는 못 막고, 그중 하나는 **공개 저장소 커밋 파일**로 들어간다 | **커밋** |
+| `SR17-2` | **high** | 운영 DB 에 살아 있는 계정의 비밀번호가 소스에 하드코딩 — 공개 저장소 커밋 예정 (CWE-798) | **커밋** |
+| `SR17-3` | medium | `configure_logging` 이 7개 중 2개만 덮음 + 억제가 비밀 보유자가 아닌 호출자 책임 | **커밋** |
+| `SR17-4` | low | `mask_sensitive()` 가 문자열에 대해 no-op — SR-006 의 "예외 URL 마스킹 ✅" 기록 정정 | 비차단 |
+| `SR17-5` | low | `fetch_legal_dong_codes.py` 응답·압축해제 크기 무제한 (zip bomb) — 메모리 192~256MB 박스 | 비차단 |
+| `SR17-6` | low | 검증 계정 id=1 잔존 (위생) | G5 권고 |
+| `SR17-7` | info | 서버 `.gitignore` 가 구버전이라 `data/` 미무시 | 비차단 |
+
+### 판정
+
+**FAIL.** 사유는 단순하다 — **이번 라운드의 사고가 "완전히 처리됐다"는 전제가 실측과 다르다.**
+로거 억제는 유효한 조치지만 **사고의 절반**이고, 나머지 절반(예외 메시지 → stdout/로그/**커밋 파일**)은
+그대로 열려 있다. 게다가 그 열린 경로 중 하나는 **공개 저장소에 영구 기록**되는 곳이다.
+여기에 **공개될 예정인 실계정 비밀번호**(SR17-2)가 겹쳐, 이 working tree 는 지금 상태로 커밋되면 안 된다.
+
+서버 위생(잔존 흔적 0), 수집 합법성(G4), DB 미노출, SQL 인젝션, IDOR·암호화 회귀는 **전부 통과**했다.
+차단 사유는 **비밀정보 취급 3건에 한정**되며, 셋 다 국소 수정으로 닫을 수 있다.
+
+**PM 조치 요청**: ① 사용자에게 **MOLIT 인증키 재발급** 요청(§1-E · 카카오 키는 불필요)
+② `SR17-1`·`SR17-2`·`SR17-3` 수정 후 재감사.
+
+---
+
+## SR-018 · 2026-07-26 · **SR17-1/2/3 수정 재검증 + 카카오 키 노출 사고 + 부동산원/지오코딩 신규 코드** (security-reviewer, herdr re-review 대행)
+
+**판정: PASS** — 차단 0건. SR17-1·SR17-2·SR17-3 **전부 RESOLVED**.
+대상: `git log -1`(5703bca) 이후 working tree 전체 — 수정 28 · 신규 21
+재현: `cd backend && python -m pytest -q` → **RC=0 · 593 tests / failures 0 / errors 0 / skipped 54 = 539 passed** (junit 실측, 지시 수치와 일치)
+
+> 결론 요약: **초록불을 믿지 않고 부러뜨려 봤다.** 마스킹에 우회 입력 18종, 위생 테스트에 변이 6종,
+> SR4-2 그물에 변이 1종을 넣었다. 구조적 방어는 실제로 서 있다. 다만 **수정 자체가 만든 신규 흠 1건**
+> (SR18-3 — 유출 비밀번호가 아직 커밋 대상 파일에서 복원 가능)과 low/info 6건을 남긴다.
+> 카카오 키 사고는 **저장소·서버 어디에도 흔적이 없음을 실측으로 확인**했고, 그럼에도
+> **REST 키 재발급은 필요**하다고 본다(근거는 2절).
+
+---
+
+### 1) SR17-1 — 키가 예외 메시지로 샌다 → **RESOLVED**
+
+#### 1-A. 마스킹 유틸에 우회 입력 18종 투입 → **유출 0건**
+
+`app/core/masking.py` 를 반례로 두들겼다. 실제 실행 결과:
+
+| 입력 형태 | 결과 |
+|---|:--:|
+| `serviceKey=<KEY>` (원문) | 마스킹됨 |
+| `serviceKey%3D<KEY>%26a%3Db` (1회 인코딩) | 마스킹됨 |
+| `serviceKey%253D<KEY>%26a%3Db` (2회 인코딩) | 마스킹됨 |
+| `{"serviceKey": "<KEY>"}` / `{'serviceKey': '<KEY>'}` (JSON·dict repr) | 마스킹됨 |
+| `?key=<KEY>` (쿼리 안의 짧은 이름만) | 마스킹됨 |
+| `SERVICEKEY=<KEY>` (대문자) | 마스킹됨 |
+| `wrong appKey(<KEY>) format` (**카카오 오류 echo 형태**) | 마스킹됨 (env 리터럴 경로) |
+| `Authorization: KakaoAK <KEY>` / `{'Authorization': 'KakaoAK <KEY>'}` | 마스킹됨 |
+| 값에 `+ / = %` 가 섞인 base64 키 · 공백/개행/세미콜론 종결 · `repr()` 중첩 따옴표 | 마스킹됨 |
+| 평문 문장 안의 키 리터럴(파라미터 이름 없음) | 마스킹됨 (`SECRET_ENV_VARS` 리터럴 치환) |
+
+값 종결 문자 집합(`_VALUE`)이 `+ / = % - _` 를 **값 안에 남기도록** 설계돼 있어, base64 키가 중간에서
+잘려 앞부분이 노출되는 흔한 실수가 없다. `_QUERY_RE` 의 `(?<![A-Za-z0-9_])` 선행부정으로
+`sort_token=` 류 오탐도 막았다.
+
+#### 1-B. 비밀을 **가진 계층**에서 감싸는가 — 우회 경로 전수
+
+저장소 전체의 직접 httpx 호출은 **4곳뿐**이고 전부 확인했다:
+
+| 위치 | 비밀 보유 | 처리 |
+|---|:--:|---|
+| `app/ingest/run_molit.py:47` `make_http_fetch` | **인증키(쿼리)** | OK — `masked_error(..., extra_secrets=params의 key/token) from None` |
+| `app/ingest/geocode.py:442` `_httpx_get` | **카카오 키(헤더)** | OK — 동일 처리. 헤더에서 키 값을 뽑아 `extra_secrets` 로 전달 |
+| `app/agents/llm.py:61` Anthropic | ANTHROPIC 키(헤더) | OK — 구조적 안전. 오류 시 `status=` 만 담아 `LLMError` 로 올리고 **본문·URL 미포함** |
+| `scripts/fetch_legal_dong_codes.py:48` · `scripts/fetch_reb_complex_master.py:95` | **없음**(무인증 공개 다운로드) | OK — 유출 대상 없음 |
+
+**신규 코드가 뚫는 우회로는 없다.** `reb.py` 는 순수 파서로 네트워크 호출 0건이고,
+`fetch_reb_complex_master.py` 는 인증이 없는 포털 파일 다운로드다(키를 아예 안 쥔다).
+주소 지오코딩(`KakaoAddressSearch`)은 키워드검색과 **같은 `_httpx_get`** 을 탄다.
+
+키 없이 실행해도 안전함을 실증(`ConnectError` 경로):
+
+```
+_httpx_get('http://127.0.0.1:9/x', {'Authorization': 'KakaoAK <32자키>'}, ...)
+  -> SecretSafeError / leaks: False
+```
+
+#### 1-C. 이중·삼중 그물
+
+- `runner.py:129 _why()` 가 `service_key` 리터럴로 **재마스킹**(주입된 fetch 가 무엇이든 경계를 못 넘음)
+- `verify_region_codes.probe():82` 가 동일 재마스킹 → `classify()` → `render()` 직전 문서 전체 재마스킹
+- `install_log_masking()` = 레코드 팩토리 + 핸들러 `SecretMaskingFilter`(**`exc_text` traceback 까지**)
+
+실행 검증 — 루트 로거를 DEBUG 로 열고 httpx INFO 를 직접 발생시켜도 새지 않는다:
+
+```
+INFO:httpx:HTTP Request: GET https://apis.data.go.kr/x?serviceKey=*** "HTTP/1.1 200 OK"
+ERROR:probe:수집 실패
+  ... SecretSafeError: MOLIT 요청 실패: HTTPStatusError: Client error '403' for url '...serviceKey=***&LAWD_CD=1'
+LOGBUF LEAKS KEY: False
+```
+
+#### 1-D. `raise ... from None` 은 `__context__` 를 **끊지 않는다** (신규 SR18-1, low)
+
+지시받은 항목이라 실행으로 확인했다. 결과는 **보고와 다르다**:
+
+```
+type        : SecretSafeError
+__cause__   : None
+__context__ : HTTPStatusError("... serviceKey=SUPERSECRETKEY1234567890== ...")   <- 원문 보유
+traceback   : LEAKS KEY = False    <- 표준 포매팅은 __suppress_context__ 를 존중해 출력 안 함
+체인 순회    : LEAKS RAW = True     <- __context__ 를 따라가는 리포터라면 다시 보인다
+```
+
+`from None` 은 `__cause__=None` + `__suppress_context__=True` 를 설정할 뿐 **`__context__` 는 그대로 남는다.**
+`traceback`·`logging` 은 이를 존중하므로 **실사용 경로에서의 유출은 없다**(위 실측). 그러나
+`masking.py:167-168` 의 주석 "원본 예외는 **체인에서 끊는다**" 는 **사실이 아니다** — 여기서 정정한다.
+SR-006 → SR17-4 에서 "마스킹이 있다"는 잘못된 기록이 판단을 흐렸던 것과 같은 종류의 위험이다.
+※ 운영에서는 `MOLIT_API_KEY` 가 프로세스 env 에 있어 리터럴 치환이 한 겹 더 걸린다.
+
+**조치(low)**: `masked_error()` 안에서 `exc.__context__ = None` 을 명시하거나, 주석을
+"끊는다" → "표준 포매팅에서 억제된다" 로 정정. 둘 중 하나면 된다.
+
+#### 1-E. DSN 비밀번호는 **env 존재에 의존**한다 (신규 SR18-2, low)
+
+`main.py` 는 "SQLAlchemy 예외는 DSN(비밀번호 포함)을 담는다"며 `install_log_masking()` 을 건다.
+그런데 `mask_secrets` 에 **DSN 모양 정규식이 없다** — `POSTGRES_PASSWORD` 가 그 프로세스 env 에
+실려 있을 때만 리터럴로 지워진다. 실측:
+
+```
+env 있음 : postgresql+psycopg://realestate:***@172.19.0.2:5432/realestate
+env 없음 : postgresql+psycopg://realestate:Pg-Secret-1234567890@172.19.0.2:5432/realestate   <- 유출
+```
+
+API 컨테이너는 env 가 실리므로 현재 실害는 없다. 다만 `DATABASE_URL` 만 주고 `POSTGRES_PASSWORD` 를
+안 주는 실행 형태(스크립트에서 흔하다)에서는 보호가 사라진다.
+**조치(low)**: `_common.safe_dsn` 의 `://([^:/@]*):[^@]*@` 정규식을 `mask_secrets` 안으로 옮긴다.
+
+#### 1-F. 회귀 테스트가 진짜인가 — 변이 M5
+
+`_EQ` 에서 URL 인코딩 지원(`%3D`/`%253D`)을 제거 → `test_masks_url_encoded_forms` **FAIL**.
+테스트가 실제 동작을 붙잡고 있다. (주의: `masking.py` 는 미추적 파일이라 `git checkout` 이 통하지 않는다 —
+변이 후 원본 정규식으로 직접 복원했고, 복원 후 전체 593 tests / failures 0 으로 동일성 확인)
+
+---
+
+### 2) 카카오 REST 키 1회 노출 — **흔적 0건 · 그럼에도 재발급 필요**
+
+#### 2-A. 흔적 조사 (서버·저장소, 조회 전용)
+
+키 값을 화면에 찍지 않고 변수로만 다뤄 스캔했다(원문 + `quote`/`quote_plus`/`unquote`/소문자 hex 변형).
+
+| 대상 | 결과 |
+|---|:--:|
+| 서버 파일시스템 `/opt /root /home /tmp /var/tmp /var/log /etc /srv /var/lib/docker/containers` | **`/opt/realestate/.env` 1건뿐** (600 root:root) |
+| `/root/.bash_history` (20,636B) | **0건**. mtime **2026-07-02** — 비대화형 ssh 는 history 를 안 남긴다. "출력은 세션 기록에만 남았다"는 보고와 정합 |
+| `journalctl --since -7days` (appkey/kakao) | **0건** |
+| `docker logs realestate-db-1` | **0건** |
+| `/var/log/nginx/*` | **0건** |
+| `git rev-list --all` 전 이력 (KAKAO_REST · KAKAO_JS · MOLIT 3종) | **0건** |
+| 커밋 대상 파일 실값 대조 — 로컬 224개 / 서버 222개, 비밀 6종(KAKAO×2·MOLIT·POSTGRES_PASSWORD·JWT_SECRET·FIELD_ENCRYPTION_KEY) + 인코딩 변형 | **0건** |
+
+`config/region_code_verification.yaml`(신규 커밋 대상) 재확인: `summary.error: 0`, URL 은 공개 엔드포인트 1건, 키 흔적 0.
+
+#### 2-B. 재발급 판단 — **REST 키 YES · JS 키 NO**
+
+| 키 | sha256[:12] | 판단 | 근거 |
+|---|---|:--:|---|
+| `KAKAO_REST_API_KEY` | `8e1d324dc6af` | **재발급 필요** | 우리 코드는 이 값을 `Authorization: KakaoAK <키>` 로 보낸다. 카카오의 `wrong appKey(<값>) format` 은 **보낸 값을 그대로 되돌려주는** 오류다 → 화면에 찍힌 값은 REST 키다. 서버 전용 비밀이며 도메인 제한 같은 보완 통제가 **없다**. 노출면은 파일이 아니라 **우리가 소유·파기 확인을 못 하는 세션 기록**이다. "누가 봤는지 증명 못 하면 회전한다"가 원칙이고, 비용은 콘솔 재발급 + `.env` 한 줄 |
+| `KAKAO_JS_APP_KEY` | `4386ba299da6` | **재발급 불필요** | **REST 키와 다른 값임을 해시로 확인**(js_eq_rest=NO). 이번 사고에 전송되지 않았다. 게다가 JS 키는 설계상 브라우저로 나가는 공개 키다(`frontend/dist` 포함 — SR-013 에서 정상으로 확인). 실효 통제는 **카카오 콘솔의 플랫폼 도메인 허용목록**이다 |
+
+**함께 확인할 것**
+
+1. 카카오 콘솔이 **앱 단위로만** 키를 재발급하는 경우 JS 키도 함께 바뀐다 → `frontend/.env` 갱신 + **프론트 재빌드** 필요.
+2. JS 키의 **플랫폼 도메인 허용목록**이 배포 도메인만 등록돼 있는지 확인(미등록 = 누구나 우리 쿼터 사용).
+3. **`MOLIT_API_KEY` 재발급(SR-017 요청)이 아직 미이행이다.** 서버 `.env` mtime = **2026-07-25 22:20**
+   (SR-017 작성 시각 07-26 00:20 이전) → 이후 갱신 없음. 두 키를 한 번에 처리 권고.
+
+#### 2-C. 재발 방지 — 코드가 아니라 **운영 절차**로
+
+우리 마스킹은 파이썬 프로세스 안에서만 작동한다. **원격 셸의 `curl` 출력은 덮지 못한다.**
+그러니 코드로 더 막으려 하지 말고 절차로 굳혀야 한다. `deploy/DEPLOY.md` 에 명문화 권고:
+
+1. **원격에서 API 형식 확인은 우리 스크립트로만.** `verify_region_codes.py` / `geocode_complexes.py --dry-run`
+   은 이미 마스킹 경로다. 임시 `curl` 은 금지.
+2. 부득이한 `curl` 은 **본문을 보지 않는다**: `curl -sS -o /dev/null -w '%{http_code}\n' ...` 로 상태코드만.
+   본문이 필요하면 반드시 출력 필터를 건다(32자 hex·`serviceKey=` 값을 `sed` 로 `***` 치환).
+3. **키를 명령줄에 붙여넣지 않는다**: `set -a; . /opt/realestate/.env; set +a` 후 `$KAKAO_REST_API_KEY` 참조.
+   명령줄에 값이 안 남아 `ps`·history·에러 echo 노출면이 함께 줄어든다.
+4. **키 회전 절차를 체크리스트로**: 콘솔 재발급 → `.env` 수정 → `docker compose up -d` → 검증 스크립트 1회 →
+   구 키 폐기 확인. 지금은 절차가 없어 SR-017 의 재발급 요청이 미이행 상태로 남아 있다.
+
+---
+
+### 3) SR17-2 — 하드코딩 자격증명 → **RESOLVED** (단, 신규 SR18-3)
+
+#### 3-A. 수정 확인
+
+- `TEST_PASSWORD` 상수 **제거**. `make_test_password()` = `"Vr1!" + secrets.token_urlsafe(24)`,
+  `VERIFY_TEST_PASSWORD` env 우회 지원, **생성값을 출력하지 않는다**.
+- `purge_user()` 가 `.invalid`(RFC 6761/2606 예약 TLD) 이외 주소를 **engine 에 닿기 전에** `SystemExit`.
+  파괴적 경로를 문법으로 막았다 — 테스트로 고정됨.
+- **운영 DB 정리 완료(직접 조회)**: `app_user` **0행** · `user_profile` **0** · `recommendation_job` **0**.
+  백업은 저장소 밖 `/root/realestate-backup/sr17-2_user_rows_20260726-074659.sql`(디렉터리 700).
+  → **SR17-6(검증 계정 잔존)도 함께 CLOSE.**
+- 변이 M1(`TEST_PASSWORD = "..."` 재도입) → **3개 테스트 동시 FAIL**. 그물이 실제로 작동한다.
+
+#### 3-B. 그런데 유출된 비밀번호가 **아직 커밋 대상 파일에서 복원된다** (SR18-3, medium, 비차단)
+
+`backend/tests/test_script_hygiene.py:94`:
+
+```python
+leaked_marker = "<앞조각>" + "<뒷조각>"    # ← 이렇게 쪼개도 이어붙이면 원본이다(SR18-3)
+```
+
+문자열 연결은 **파싱 시점에 합쳐진다.** 이 줄을 읽는 사람에게 값은 그대로 보인다.
+쪼갠 이유는 오직 **이 테스트의 자기 자신 검사에 걸리지 않기 위해서**다 —
+즉 검사기가 **구조적으로 자기를 면제**한다(`.py` 를 스캔 대상에 넣어 놓고도 자기는 통과).
+origin 은 공개 저장소이고 커밋은 되돌릴 수 없다.
+
+**차단하지 않은 이유(판단 근거를 남긴다)**: SR17-2 의 차단 논거는 "**동작하는** 자격증명 공개"였다.
+그 계정은 지금 없다(위 3-A, 직접 조회). 인증 표면이 사라졌으므로 CWE-798 이 아니라
+**정보노출(CWE-200)** 로 강등된다. 남는 실질 위험은 **비밀번호 패턴 노출**
+(`<용도>-<단어>-<연도>!`)과 **재사용 가능성**뿐이다.
+
+**→ 사용자 결정 필요**: 이 값을 **다른 곳에 재사용한 적이 있다면 이 항목은 즉시 차단으로 올라간다.**
+없다면 push 전에 아래 1줄만 고치면 된다.
+
+**조치(권고, G5 전 필수)**: 값을 파일에 적지 말고 해시로 비교한다 — 금지값의 `sha256` 지문만 커밋하고
+파일 안의 토큰을 훑어 지문이 일치하면 FAIL. 또는 금지값을 미추적 파일/환경변수로 읽는다.
+어느 쪽이든 **자기면제가 사라진다.**
+
+#### 3-C. 정적 검사의 실효성 — 변이 6종 중 **6종 미탐지** (SR18-5, low)
+
+`test_no_hardcoded_secret_literals_in_app_and_scripts` 는 `NAME = "리터럴"` 형태만 본다.
+아래를 `scripts/ingest_report.py` 에 주입했더니 **7개 테스트 전부 초록**이었다:
+
+| 변형 | 탐지 |
+|---|:--:|
+| `CONFIG = {"password": "Sup3rS3cret..."}` (dict 값) | 미탐지 |
+| `CREDS = ("admin", "Sup3rS3cret...")` (튜플 값) | 미탐지 |
+| `DB_PASSWORD = "Sup3r" + "S3cret..."` (문자열 연결) | 미탐지 |
+| `_p = "Sup3rS3cret..."` (이름이 규칙에 안 걸림) | 미탐지 |
+| `API_KEY_LIVE = f"sk-live-{...}"` (f-string) | 미탐지 |
+| `dict(password="Sup3rS3cret...")` (키워드 인자) | 미탐지 |
+
+세 번째 변형(문자열 연결)이 **정확히 SR18-3 에서 쓰인 우회 기법**이다 — 작성자가 구멍을 알고 썼다.
+지금 실제 위반은 없으므로 low. **조치**: dict 값·키워드 인자·`BinOp` 문자열 연결을 AST 검사에 추가하고,
+고엔트로피 문자열 일반 스캔을 한 겹 얹는다.
+
+---
+
+### 4) SR17-3 — 억제가 호출자 책임 → **RESOLVED**
+
+- `scripts/_common.py:130` 이 **import 부작용으로** `configure_logging()` 실행
+  → `basicConfig` + `httpx/httpcore/urllib3/anthropic` WARNING + `install_log_masking()`.
+- **스크립트 13개 전수 확인: 13/13 이 `from _common import` 를 탄다.** 빠진 것 없음.
+- `app/main.py` `create_app()` → `install_log_masking()`. `app/worker.py` → 레벨 억제 + `install_log_masking()`.
+- 변이로 실효성 확인:
+  - M2 `from _common import` → `from _common  import`(공백 1개) → `test_every_script_goes_through_common_entrypoint` **FAIL**
+  - M3 `_common` 의 import 시점 `configure_logging()` 주석 처리 → `test_common_installs_masking_on_import` **FAIL**
+  - `test_no_script_configures_logging_without_common` 이 `basicConfig` 직접 호출도 차단
+
+**잔여(SR18-4, low)**: `print()` 는 마스킹 그물 **밖**이다. 현재 예외를 찍는 `print` 3곳은 전부
+`mask_secrets` 또는 마스킹된 예외 타입을 거치므로(전수 grep) 실害 0. 다만 이 보장은 **구조가 아니라 관습**이다.
+`fetch_reb_complex_master.check_header` 는 응답 앞 200바이트를 그대로 찍는데, 그 엔드포인트는 무인증이라 현재 무해.
+
+---
+
+### 5) 신규 코드 보안 (3순위)
+
+#### 5-A. 외부 파일 다운로드 — `reb.py` · `fetch_reb_complex_master.py`
+
+| 항목 | 결과 | 근거 |
+|---|:--:|---|
+| **SSRF (메타 응답을 따라가나)** | **불성립** | 2단계를 타지만 **URL 은 안 따라간다.** `META_URL`·`FILE_URL` 이 하드코딩 상수(`:47-48`)이고, 메타 응답에서 취하는 값은 `atchFileId`·`fileDetailSn` **둘뿐**이며 httpx `params=` 의 **쿼리 값으로만** 쓴다(`:120-123`). 응답이 URL 을 주더라도 요청 대상이 바뀌지 않는다. URL 을 받는 인자·환경변수도 없다 |
+| **zip slip / 경로탈출** | **불성립** | 이 스크립트는 **압축을 풀지 않는다.** 응답 바이트를 `out_dir / ds.filename`(**상수**)에 그대로 기록(`:159-160`). 아카이브에서 온 문자열이 경로에 들어가는 지점 0 |
+| **응답 위장** | OK | `check_header()` 가 헤더 첫 줄의 필수 컬럼을 확인하고 **불일치면 저장하지 않는다** — 200 으로 오는 오류 HTML 을 데이터로 적재하지 않음 |
+| **URL 하드코딩** | 의도적 | 갱신마다 바뀌는 `atchFileId` 를 박지 않으려 메타 조회를 두는 설계. 판단 타당 |
+| **응답 크기 제한** | **없음** (SR18-6, low) | `resp.content` 를 상한 없이 메모리 적재 + `follow_redirects=True`. SR17-5(`fetch_legal_dong_codes`)와 동종이고 대상이 더 크다(실측 `data/` 52MB). 완화: URL 하드코딩 + 사람이 수동 실행 + 호스트 실행(컨테이너 192MB 밖). 권고: 스트리밍 + 누적 100MB 상한 |
+| `reb.py` 자체 | OK | **순수 파서, 네트워크 0.** `decode_csv` 는 한글이 안 보이면 성공으로 치지 않음(깨진 데이터 무단 적재 방지). `parse_pnu` 는 19자리 숫자 아니면 추측 없이 `None` |
+
+#### 5-B. 마이그레이션 007 · 008 — 정적 DDL, 이상 없음
+
+사용자 입력이 섞이는 지점 **0**. 전부 리터럴 DDL 이다. 오히려 방어가 늘었다:
+`complex_geom_confidence_chk`(값 오염 차단) · `complex_reb_match_pair_chk`(한쪽만 채우는 스크립트 버그를
+데이터가 아니라 **스키마가** 막음). 파티션(`trade`)·자연키(004)·007 미변경. FK/UNIQUE 미부여 사유도 주석에 명시.
+
+#### 5-C. 신규 SQL 전수 — **문자열 포매팅 0건**
+
+- 전 신규 스크립트의 SQL 은 `text()` + 바인드. `match_reb_complexes.py` 의 **대량 UPDATE** 는
+  `conn.execute(text(_UPDATE_MATCH), updates[i:i+1000])` — executemany 파라미터 바인딩(`:reb_id`·`:method`·`:id`).
+  `_SELECT_REB` 도 `{"kinds": list(kinds)}` 바인드.
+- f-string 이 들어간 SQL 은 **2곳뿐이고 둘 다 하드코딩 상수 식별자**다:
+  `geocode_complexes.py:117,121` ← `table = "backup.complex_geom_pre_geo1"`(리터럴, argparse 미노출) ·
+  `postgis.py:892 _POIS_SQL` ← SQL 상수 조립. **외부 입력 경로 없음.**
+
+#### 5-D. SR4-2 회귀 — 없음 (변이로 확인)
+
+`assert_no_secrets` 배선(`orchestrator.py:468`) · `_derive_forbidden` 보강 · `portfolio_summary` 의
+빈 forbidden fail-loud 전부 유지. **변이 M6**: `finance_finding` 의 rationale 에 `usable_cash_krw` 원본을
+주입 → `test_파이프라인_프롬프트에_자산금액이_없다` 등 **2건 FAIL**(`PromptSafetyError`). 그물이 실제로 작동한다.
+실거래 기준 후보(`price_basis="trade"`)는 시세·면적·거래건수만 싣고 **사용자 자산이 들어가는 지점 0**.
+
+#### 5-E. IDOR — 회귀 없음
+
+`repo.get_job(job_id, user.id)` 2인자 강제 시그니처가 `base`·`memory`·`postgis` 전부 동일하게 유지.
+`base.py:12` 의 "`get_job(job_id)` 같은 시그니처는 만들지 않는다" 원칙 무변경.
+
+#### 5-F. G4 rate limit — 신규 경로도 준수 (관찰 1건)
+
+모든 카카오 호출 앞에 `self._limiter.wait()`(키워드 `:481` · **주소 `:539`**). 기본 0.3s/jitter 0.2s.
+`verify_region_codes` 0.4s, `run_ingest`·`verify_reb_matching` 는 인자. 신규 외부호출은 전부 공공/공식 API
+(국토부 · code.go.kr · data.go.kr 파일데이터 · 카카오 로컬)이고 **HTML 스크래핑 0건**.
+
+**SR18-7 (info)**: `geocode_complexes.py:190 _limiter()` 가 키워드용·주소용에 **별개 인스턴스**를 만든다
+(`return RateLimiter(...)`). 한 단지가 두 경로를 다 타면 실효 간격이 절반이 된다
+(기본 `--min-interval 0.25` 기준 최대 약 8req/s). 카카오 쿼터 안이지만 **의도한 간격은 아니다.**
+권고: 인스턴스 1개를 두 검색기가 공유.
+
+#### 5-G. 서버 — 유지
+
+- `ss -tlnp`: **5432 리스너 없음**. `docker ps`: `realestate-db-1` **Ports 공란**.
+- `docker-compose.yml`·`docker-compose.deploy.yml` **무변경**(`git diff` 공백). `db`·`redis` 에 `ports:` 없음.
+  유일 매핑은 `127.0.0.1:${API_BIND_PORT:-8013}:8000`.
+- `/opt/realestate/.env` **600 root:root**.
+- 타 실서비스(`itsmine-*`·`autobtc`)는 **조회만** 수행 — 중지·재시작·설정변경·삭제 **0회**.
+
+---
+
+### 6) 기타 관찰
+
+| ID | 심각도 | 내용 |
+|---|:--:|---|
+| `SR18-8` | info | `backend/docs/03-build/.review-state.json` (신규 미추적, 305B) — 저장소 루트 정본과 **다른 위치의 중복 게이트 파일**(`{"status":"ran"}` 뿐). 비밀은 없으나 게이트 훅이 어느 쪽을 읽느냐로 판정이 갈릴 수 있다. **커밋 전 삭제 권고** |
+| `SR17-7` | info(유지) | 서버 `.gitignore` 가 구버전 → `data/reference/legal_dong_code_full.txt` 미무시(`.csv` 는 이미 무시됨). 공개 정부자료라 비밀 아님. 이번 커밋 pull 로 해소 |
+| `SR17-5` | low(유지) | `fetch_legal_dong_codes.py` 응답·압축해제 크기 상한 여전히 없음 |
+| `SR15-4` | **G5 차단(유지)** | CSP 헤더 부재 — nginx 에 HSTS·nosniff·X-Frame-Options·Referrer-Policy 4종만 |
+| `SR15-3`/R-09 | low(유지) | 서버측 토큰 폐기 수단 — SR-016 재평가 그대로 |
+
+---
+
+### 신규 발견 요약
+
+| ID | 심각도 | 제목 | 차단 |
+|---|:--:|---|:--:|
+| `SR18-3` | **medium** | 유출 비밀번호가 `test_script_hygiene.py:94` 에서 **여전히 복원 가능** — 검사기가 자기를 면제한다 | 비차단(**G5 전 필수** · 재사용 이력 있으면 즉시 차단) |
+| `SR18-1` | low | `raise ... from None` 이 `__context__` 를 끊지 않는다 — 주석의 "끊는다"는 사실이 아님(표준 포매팅에서 억제될 뿐) | 비차단 |
+| `SR18-2` | low | `mask_secrets` 에 DSN 정규식 부재 — DSN 비밀번호 보호가 `POSTGRES_PASSWORD` env 존재에 의존 | 비차단 |
+| `SR18-4` | low | `print()` 는 마스킹 그물 밖 — 현재 실害 0이나 보장이 구조가 아니라 관습 | 비차단 |
+| `SR18-5` | low | AST 비밀 리터럴 검사가 dict·튜플·문자열연결·f-string·kwarg·비규칙명을 **전부 놓친다**(변이 6/6 미탐지) | 비차단 |
+| `SR18-6` | low | `fetch_reb_complex_master.py` 응답 크기 상한 없음 + `follow_redirects=True` | 비차단 |
+| `SR18-7` | info | `geocode_complexes` 가 rate limiter 인스턴스를 2개 만들어 실효 간격이 절반 | 비차단 |
+| `SR18-8` | info | `backend/docs/03-build/.review-state.json` 중복 게이트 파일 | 비차단 |
+
+### CLOSE 처리
+
+`SR17-1` **RESOLVED** · `SR17-2` **RESOLVED** · `SR17-3` **RESOLVED** ·
+`SR17-4` **RESOLVED**(`mask_secrets` 신설로 해소) · `SR17-6` **CLOSED**(운영 DB 계정·job 삭제 실측 확인)
+
+### 3단계 security-review 체크리스트 (security.md 7절)
+
+- [x] `user_id` 조건 없는 사용자 자원 쿼리가 없는가 — `get_job(job_id, user_id)` 2인자 유지
+- [x] 자산 3종 암호화 저장(평문 컬럼 0) — AAD 바인딩 유지
+- [x] `/me/profile`·`/affordability` 본문이 로그에서 제외되는가 — 무변경 + `install_log_masking` 추가
+- [x] Claude 프롬프트에 원본 금액이 포함되지 않는가 — 변이 M6 로 실증
+- [x] 원시 SQL 문자열 조합이 없는가 — 신규 전수 확인, f-string 2곳은 상수
+- [x] `db`·`redis` 에 `ports:` 가 없는가 — compose 무변경 + 서버 실측
+- [x] `.env`·키·백업 파일이 커밋되지 않았는가 — 커밋 대상 224파일 × 비밀 6종 실값 대조 **0건**
+- [x] 세율·대출한도가 출처·기준일자를 가진 설정인가 — 무변경
+- [x] 수집기가 robots·rate limit 을 준수하는가 — 신규 경로 포함 확인
+- [x] 포털 소스를 끄고도 서비스가 동작하는가 — 실거래 기준 후보(`price_basis="trade"`)로 오히려 강화
+
+### 판정
+
+**PASS.** SR17-1·SR17-2·SR17-3 이 **구조적으로** 닫혔고, 그 사실을 반례 18종·변이 7종·
+실값 스캔(로컬 224 + 서버 222 파일 × 비밀 6종)으로 교차 검증했다. 인증/인가·인젝션·미암호화 전송
+결함 0건, 커밋 대상 비밀 유출 0건.
+
+차단하지 않은 대신 **두 가지를 사용자에게 올린다**:
+
+1. **카카오 REST 키 재발급**(+ 미이행 상태인 MOLIT 키 재발급 동시 처리, 2-B 절)
+2. **SR18-3** — 유출 비밀번호가 아직 커밋 대상 파일에서 복원된다. 계정이 이미 삭제돼
+   동작하는 자격증명은 아니므로 차단하지 않았으나, **그 값을 다른 곳에 재사용한 적이 있다면
+   판정은 즉시 뒤집힌다.** push 전 1줄 수정을 권고한다.

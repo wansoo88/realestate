@@ -36,9 +36,10 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-BACKEND_DIR = Path(__file__).resolve().parents[1]
-if str(BACKEND_DIR) not in sys.path:
-    sys.path.insert(0, str(BACKEND_DIR))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+# ⚠️ `_common` import 자체가 sys.path·로깅 억제·비밀 마스킹을 설치한다(SR17-3).
+#    스크립트마다 각자 배선하면 하나가 빠지고, 그 하나로 키가 샌다. 지우지 말 것.
+from _common import BACKEND_DIR, load_env  # noqa: E402,F401
 
 #: 수도권 시도 코드. 서비스 범위가 수도권 아파트다(CLAUDE.md).
 CAPITAL_SIDO = ("11", "41", "28")      # 서울특별시 · 경기도 · 인천광역시
@@ -184,6 +185,7 @@ def main(argv: list[str] | None = None) -> int:
         print("[DONE] --dry-run 이므로 적재하지 않았습니다.")
         return 0
 
+    load_env()
     url = os.getenv("TEST_DATABASE_URL") or os.getenv("DATABASE_URL", "")
     if not url:
         print("[FAIL] TEST_DATABASE_URL(또는 DATABASE_URL)이 필요합니다.")

@@ -14,6 +14,7 @@ import logging
 from collections.abc import Iterable, Sequence
 from typing import Any
 
+from app.core.masking import masked_error
 from app.ingest import molit
 from app.ingest.loader import PostgisTradeLoader, RegionResolver
 from app.ingest.ratelimit import RateLimiter
@@ -35,14 +36,29 @@ def make_http_fetch(endpoint: str = MOLIT_ENDPOINT, *, client: Any = None,
 
     공공데이터포털은 오류도 HTTP 200 으로 주므로, 여기서는 전송 계층 오류만 raise 하고
     결과코드 판정은 parse_response 가 한다(molit.py).
+
+    ⚠️ SR17-1 — 이 함수는 **인증키를 아는 유일한 지점**이다(params 로 들어온다).
+    `raise_for_status()` 가 던지는 `httpx.HTTPStatusError` 의 문자열에는 요청 URL 이
+    통째로 들어가고, 그 URL 에는 `serviceKey=<인증키>` 가 실려 있다. 이 예외를 그대로
+    올리면 호출부(runner → run.failures → stdout/YAML)가 키를 그대로 받아 적는다.
+    그래서 **여기서 마스킹한 예외로 감싸 올린다.** 호출부가 기억해서 지우는 방식은
+    한 곳만 빠져도 새기 때문에, 비밀을 가진 이 계층이 책임진다.
     """
     def fetch(params: dict[str, str]) -> str:
         c = client
         if c is None:
             import httpx
             c = httpx
-        resp = c.get(endpoint, params=params, timeout=timeout)
-        resp.raise_for_status()
+        # 이 요청에 실린 실제 키도 리터럴로 넘긴다 — 파라미터 이름을 못 알아보는
+        # 경로(리다이렉트 URL, 본문 echo 등)로 새도 값 자체가 지워진다.
+        secrets = tuple(v for k, v in params.items()
+                        if "key" in k.lower() or "token" in k.lower())
+        try:
+            resp = c.get(endpoint, params=params, timeout=timeout)
+            resp.raise_for_status()
+        except Exception as exc:                 # noqa: BLE001 - 마스킹해 다시 올린다
+            raise masked_error(exc, prefix="MOLIT 요청 실패: ",
+                               extra_secrets=secrets) from None
         return resp.text
 
     return fetch

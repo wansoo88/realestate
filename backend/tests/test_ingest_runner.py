@@ -135,6 +135,61 @@ def test_한_배치_적재실패가_다른_배치를_막지_않는다():
     assert logged and logged[0].status == "partial"
 
 
+# ---------------------------------------------------------------------------
+# 페이지네이션 — 1000건 넘는 시군구·달이 조용히 잘리면 안 된다
+# (실측 2026-07-25: 화성시 동탄구 202605 totalCount=1411)
+# ---------------------------------------------------------------------------
+
+def _xml(items: int, total: int) -> str:
+    body = "".join(
+        "<item><거래금액> 82,500</거래금액><년>2026</년><월>7</월>"
+        f"<일>{i % 28 + 1}</일><아파트>테스트단지</아파트><전용면적>84.97</전용면적>"
+        "<지역코드>41597</지역코드><층>10</층></item>"
+        for i in range(items)
+    )
+    return ("<response><header><resultCode>00</resultCode></header><body><items>"
+            f"{body}</items><totalCount>{total}</totalCount></body></response>")
+
+
+def test_1000건_넘는_달은_페이지를_돌아_전부_받는다():
+    """★ 1페이지만 받으면 411건이 오류 없이 사라진다 — 200 OK · resultCode 00 이라 아무도 모른다."""
+    seen_pages: list[str] = []
+
+    def fetch(params: dict) -> str:
+        seen_pages.append(params["pageNo"])
+        return _xml(10, 25) if params["pageNo"] != "3" else _xml(5, 25)
+
+    run = run_molit_trade_ingest(
+        service_key="KEY", region_codes5=["41597"], months=["202605"],
+        fetch=fetch, now=NOW, rate_limiter=_fake_limiter([]),
+        log_sink=lambda r: None, rows_per_page=10)
+
+    assert seen_pages == ["1", "2", "3"]
+    assert run.rows_ok == 25                 # 10 + 10 + 5
+    assert run.status == "ok"
+
+
+def test_총건수를_못채우면_성공으로_기록하지_않는다():
+    """잘린 데이터를 status=ok 로 남기면 '조용한 결측'이 그대로 굳는다."""
+    run = run_molit_trade_ingest(
+        service_key="KEY", region_codes5=["41597"], months=["202605"],
+        fetch=lambda p: _xml(0, 500) if p["pageNo"] == "2" else _xml(10, 500),
+        now=NOW, rate_limiter=_fake_limiter([]),
+        log_sink=lambda r: None, rows_per_page=10)
+
+    assert run.status == "failed"
+    assert any("500" in why for _, why in run.failures)
+
+
+def test_totalCount가_없으면_덜찬_페이지가_끝_신호():
+    """구버전 응답 호환 — totalCount 가 없어도 무한 루프에 빠지지 않는다."""
+    run = run_molit_trade_ingest(
+        service_key="KEY", region_codes5=["11680"], months=["202607"],
+        fetch=lambda p: _OK_XML, now=NOW, rate_limiter=_fake_limiter([]),
+        log_sink=lambda r: None, rows_per_page=1000)
+    assert run.status == "ok" and run.rows_ok == 1
+
+
 def test_증분_월목록은_신고지연_흡수용_이전달을_포함():
     months = incremental_months(dt.date(2026, 7, 25), lookback_months=1)
     assert months == ["202606", "202607"]

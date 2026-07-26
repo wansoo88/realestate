@@ -35,6 +35,9 @@ yarn-error.log*
 # === 데이터 (원천 수집물은 커밋하지 않음) ===
 data/raw/
 data/cache/
+# 법정동코드 전체자료(2.4MB, 행정안전부 배포본). 커밋 대신
+# backend/scripts/fetch_legal_dong_codes.py 로 언제든 다시 받는다.
+data/reference/
 *.csv
 *.parquet
 *.sqlite

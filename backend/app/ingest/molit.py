@@ -225,6 +225,29 @@ def parse_response(xml_text: str, *, now: dt.datetime | None = None) -> list[Mol
     return out
 
 
+def parse_total_count(xml_text: str) -> int | None:
+    """응답의 `totalCount`. 없으면 None.
+
+    왜 필요한가 (2026-07-25 실측)
+    -----------------------------
+    한 페이지 최대 1000건인데 거래가 많은 시군구는 그걸 넘는다:
+    화성시 동탄구 202605 는 `totalCount=1411` 인데 1페이지만 받으면 **1000건만** 오고
+    나머지 411건은 오류 없이 사라진다. 응답도 200, resultCode 도 00 이라
+    **아무도 모르게 지역 한 달치가 30% 빈다.** 그래서 총건수를 읽어 페이지를 돈다.
+    """
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return None
+    el = root.find(".//totalCount")
+    if el is None or not (el.text or "").strip():
+        return None
+    try:
+        return int((el.text or "").strip())
+    except ValueError:
+        return None
+
+
 def build_params(*, service_key: str, region_code5: str, ym: str,
                  rows: int = 1000, page: int = 1) -> dict[str, str]:
     """요청 파라미터. `region_code5` 는 시군구 5자리, `ym` 은 YYYYMM."""

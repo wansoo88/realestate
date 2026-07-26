@@ -80,6 +80,10 @@ _HAZARD_SCAN_RADIUS_M = float(max(HAZARD_RADIUS_M.values()))
 #: 동별 간선도로 거리 밴드가 (30,300)m 라 그보다 넉넉히 본다.
 _BUILDING_ROAD_RADIUS_M = 1_000.0
 
+#: 후보 정렬용 실거래 창(일). 적정가 밴드의 마지막 사다리(36개월)와 맞춘다 —
+#: 그보다 오래된 거래는 밴드가 쓰지 않으므로 "가격 근거 있음"으로 세면 안 된다.
+_CANDIDATE_TRADE_WINDOW_DAYS = 36 * 30
+
 #: 단지 하나당 가져올 실거래 최대 건수. 시세 통계는 최근 36개월까지만 보므로
 #: (valuation/models.py PERIOD_LADDER) 전 이력을 끌어올 이유가 없다.
 #: 대단지 10년치가 수천 행이라 상한이 없으면 후보 50개 × 수천 행이 메모리로 올라온다.
@@ -551,6 +555,10 @@ class PostgisRepository:
     #: region_codes 는 **5자리 시군구 코드**로 온다(config/regions_capital.yaml).
     #: 반면 complex.region_code 는 10자리 법정동코드다 → **접두 매칭**이 필요하다.
     #: 이걸 완전일치로 짜면 후보가 항상 0건이 되고, 러너는 빈 결과를 정상으로 취급한다.
+    #:
+    #: ⚠️ 호가(listing)로 **조인해 거르지 않는다.** 공공 오픈API 에는 호가가 없어
+    #:    수집이 막히면 이 테이블이 통째로 비고, INNER JOIN 이면 후보가 구조적으로 0건이 된다
+    #:    (CHARTER G4: 공공API 만으로도 서비스가 성립해야 한다). 매물 수는 **정렬 신호일 뿐**이다.
     _CANDIDATES_SQL = text("""
         SELECT c.id,
                c.name,
@@ -577,6 +585,21 @@ class PostgisRepository:
               AND li.status = 'active'
               AND li.duplicate_of IS NULL
         ) l ON true
+        LEFT JOIN LATERAL (
+            -- 가격 근거가 될 최근 실거래. idx_trade_complex_date 를 탄다.
+            -- affordable_trades 는 **예산으로 실제 체결된 적이 있는** 거래 수다.
+            -- 단지 중위가로 예산을 재면 안 된다 — 대단지는 중위가 25억이어도 소형은
+            -- 10억이라 "살 수 있는 물건이 있는 단지"를 통째로 놓친다.
+            SELECT count(*) AS recent_trades,
+                   count(*) FILTER (
+                       WHERE CAST(:max_price_krw AS bigint) IS NULL
+                          OR tr2.price_krw <= CAST(:max_price_krw AS bigint)
+                   ) AS affordable_trades
+            FROM trade tr2
+            WHERE tr2.complex_id = c.id
+              AND NOT tr2.is_cancelled
+              AND tr2.contract_date >= current_date - CAST(:trade_window_days AS int)
+        ) tc ON true
         WHERE (
                 cardinality(CAST(:region_codes AS text[])) = 0
                 OR EXISTS (
@@ -584,8 +607,18 @@ class PostgisRepository:
                     WHERE c.region_code LIKE rc || '%'
                 )
               )
-        -- 활성 매물이 있는 단지를 먼저 본다. 호가가 없으면 추천할 물건 자체가 없다.
-        ORDER BY COALESCE(l.active_listings, 0) DESC, c.id
+        -- ① 활성 매물이 있는 단지를 먼저 본다(지금 살 수 있는 물건이 있는 쪽).
+        -- ② **예산으로 체결된 거래가 있는 단지**를 먼저 본다.
+        --    ⚠️ 거르는 게 아니라 **정렬**이다. 예산 초과 단지도 LIMIT 안에 남고
+        --       파이프라인이 사유와 함께 떨어뜨린다(ux/README.md §4).
+        --       이 줄이 없으면 LIMIT 50 이 거래 많은 = 비싼 대단지로 다 차서,
+        --       예산이 작은 사용자에게는 후보가 전멸한다(실측: 송파 136 후보 중 117 예산초과).
+        -- ③ 그다음 실거래 표본이 많은 단지 — 적정가 밴드를 만들 수 있어야 후보로 선다.
+        --    이게 없으면 LIMIT 이 id 순으로 잘려 거래 0건 단지 50개를 뽑고 후보가 0건이 된다.
+        ORDER BY COALESCE(l.active_listings, 0) DESC,
+                 COALESCE(tc.affordable_trades, 0) DESC,
+                 COALESCE(tc.recent_trades, 0) DESC,
+                 c.id
         LIMIT CAST(:limit AS int)
     """)
 
@@ -598,10 +631,17 @@ class PostgisRepository:
         `max_price_krw` 로 **걸러내지 않는다.** 예산 초과 단지도 그대로 넘기고
         파이프라인이 "왜 제외됐는지" 사유와 함께 떨어뜨린다(ux/README.md §4).
         여기서 조용히 지우면 사용자는 그 단지를 아예 못 본다.
+        다만 **정렬에는 쓴다** — LIMIT 안에서 자리를 다툴 때 예산으로 살 수 있었던
+        단지에 우선권을 준다. 안 그러면 거래 많은 = 비싼 대단지가 LIMIT 을 다 채우고
+        예산이 작은 사용자에게는 후보가 전멸한다(거르는 것과 순서를 주는 것은 다르다).
+
+        호가 유무로도 걸러내지 않는다 — 호가가 없으면 실거래 기준으로 후보가 된다(G4).
         """
         with self._engine.connect() as conn:
             rows = conn.execute(self._CANDIDATES_SQL, {
                 "region_codes": list(region_codes or []),
+                "trade_window_days": _CANDIDATE_TRADE_WINDOW_DAYS,
+                "max_price_krw": max_price_krw,
                 "limit": limit,
             }).all()
 
@@ -728,9 +768,13 @@ class PostgisRepository:
             VALUES (:job_id, :complex_id, :building_id,
                     -- 면적으로 unit_type 을 찾되, 없으면 NULL (스키마가 허용한다).
                     -- 없는 타입을 만들어 넣지 않는다 — 수집이 채울 자리다.
+                    -- ⚠️ 두 자리 모두 CAST 가 필요하다. `:area_m2 IS NOT NULL` 은 타입 문맥이
+                    --    없어서 area_m2 가 NULL 로 오면 PostgreSQL 이 파라미터 타입을 못 정하고
+                    --    AmbiguousParameter 로 **저장 자체가 실패**한다(실DB 검증에서 발견).
+                    --    인메모리 리포지토리로는 재현되지 않는 경로다.
                     (SELECT ut.id FROM unit_type ut
                       WHERE ut.complex_id = :complex_id
-                        AND :area_m2 IS NOT NULL
+                        AND CAST(:area_m2 AS numeric) IS NOT NULL
                         AND ut.area_m2 = CAST(:area_m2 AS numeric)
                       ORDER BY ut.id LIMIT 1),
                     :rank, :total_score, :est_price_krw, :timing_signal,
@@ -743,7 +787,10 @@ class PostgisRepository:
             "area_m2": area_m2,
             "rank": item.get("rank"),
             "total_score": item.get("total_score"),
-            "est_price_krw": item.get("ask_price_krw"),
+            # 판단에 실제로 쓴 기준가. 호가 기준이면 호가와 같고, 실거래 기준이면
+            # 실거래 중위(추정)다. **어느 쪽인지는 payload 의 price_basis 가 정본** —
+            # 이 컬럼만 보고 호가로 읽으면 안 된다(그래서 payload 를 함께 저장한다).
+            "est_price_krw": item.get("est_price_krw", item.get("ask_price_krw")),
             "timing_signal": item.get("timing_signal"),
             "payload": json.dumps(item, ensure_ascii=False, default=str),
         }).one()

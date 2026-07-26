@@ -66,9 +66,16 @@ def engine():
     with eng.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
         conn.exec_driver_sql("DROP SCHEMA IF EXISTS public CASCADE")
         conn.exec_driver_sql("CREATE SCHEMA public")
+        # ⚠️ 파라미터 없이 **raw 커서**로 실행한다. exec_driver_sql 로 넘기면 psycopg3 가
+        #    SQL 안의 '%' 를 파라미터 자리표시자로 읽어, COMMENT 에 '77~93%' 같은 퍼센트가
+        #    들어간 정상 마이그레이션이 `incomplete placeholder` 로 깨진다(006, 실DB 검증에서 발견).
+        #    운영은 psql(docker-entrypoint-initdb.d)로 적용돼 '%' 가 리터럴이므로,
+        #    **테스트도 psql 과 같은 의미로 실행해야** 검증이 운영을 대표한다.
+        raw = conn.connection.dbapi_connection
         for path in MIGRATIONS:
             # 파일 안에 BEGIN/COMMIT 이 있으므로 드라이버에 그대로 넘긴다.
-            conn.exec_driver_sql(path.read_text(encoding="utf-8"))
+            with raw.cursor() as cur:
+                cur.execute(path.read_text(encoding="utf-8"))
     yield eng
     eng.dispose()
 
@@ -472,6 +479,77 @@ def test_후보조회는_예산으로_거르지_않는다(repo, engine):
     _seed_complex(engine, name="비싼단지", lon=127.05, lat=37.50)
     got = repo.recommendation_candidates(region_codes=["11680"], max_price_krw=1)
     assert len(got) == 1
+
+
+def _seed_trades(engine, complex_id: int, *, n: int, price_krw: int) -> None:
+    with engine.begin() as conn:
+        for i in range(n):
+            conn.execute(text("""
+                INSERT INTO trade (complex_id, contract_date, price_krw, area_m2, source)
+                VALUES (:cid, current_date - CAST(:days AS int), :price, 84.97, 'molit')
+            """), {"cid": complex_id, "days": 15 * i + 1, "price": price_krw})
+
+
+def test_후보조회는_호가가_0건이어도_단지를_돌려준다(repo, engine):
+    """★핵심 회귀 (CHARTER G4): 공공API 에는 호가가 없다.
+
+    호가로 INNER JOIN 하거나 `active_listings > 0` 을 WHERE 에 두면 `listing` 이 빈
+    운영 DB 에서 후보가 **구조적으로 항상 0건**이 된다(2026-07-26 실측: listing 0건).
+    """
+    cid = _seed_complex(engine, name="호가없는단지", lon=127.05, lat=37.50)
+    _seed_trades(engine, cid, n=8, price_krw=800_000_000)
+
+    got = repo.recommendation_candidates(region_codes=["11680"])
+    assert [c.id for c in got] == [cid]
+    assert got[0].active_listings == 0        # 호가는 정말로 0건이다
+    assert got[0].recent_price_krw == 800_000_000
+
+
+def test_후보조회는_실거래_표본이_많은_단지를_먼저_준다(repo, engine):
+    """LIMIT 이 id 순으로 잘리면 거래 0건 단지만 뽑혀 후보가 0건이 된다."""
+    quiet = _seed_complex(engine, name="거래없는단지", lon=127.05, lat=37.50)
+    busy = _seed_complex(engine, name="거래많은단지", lon=127.06, lat=37.51)
+    _seed_trades(engine, busy, n=10, price_krw=800_000_000)
+
+    got = repo.recommendation_candidates(region_codes=["11680"])
+    assert [c.id for c in got] == [busy, quiet]   # id 순이면 quiet 가 먼저였을 것
+
+
+def test_후보조회는_예산안에서_체결된_단지를_먼저_준다(repo, engine):
+    """예산은 **정렬 신호**다(거르지 않는다).
+
+    이게 없으면 LIMIT 이 '거래 많은 = 비싼 대단지'로 다 차서 예산이 작은 사용자에게는
+    후보가 전멸한다(송파 실측: 후보 136 중 117 예산초과).
+    """
+    pricey = _seed_complex(engine, name="비싼대단지", lon=127.05, lat=37.50)
+    modest = _seed_complex(engine, name="저렴한단지", lon=127.06, lat=37.51)
+    _seed_trades(engine, pricey, n=20, price_krw=2_500_000_000)   # 표본은 더 많다
+    _seed_trades(engine, modest, n=8, price_krw=700_000_000)
+
+    # 예산 없으면 표본 많은 쪽이 먼저
+    assert [c.id for c in repo.recommendation_candidates(region_codes=["11680"])] \
+        == [pricey, modest]
+
+    # 예산이 있으면 예산 안에서 체결된 단지가 먼저 — 그래도 비싼 단지가 사라지진 않는다
+    got = repo.recommendation_candidates(region_codes=["11680"],
+                                         max_price_krw=1_000_000_000)
+    assert [c.id for c in got] == [modest, pricey]
+
+
+def test_후보조회는_호가있는_단지를_최우선으로_준다(repo, engine):
+    """호가가 살아 있으면 '지금 살 수 있는 물건'이 있는 쪽이 먼저다."""
+    listed = _seed_complex(engine, name="호가있는단지", lon=127.05, lat=37.50)
+    traded = _seed_complex(engine, name="실거래만단지", lon=127.06, lat=37.51)
+    _seed_trades(engine, traded, n=20, price_krw=700_000_000)
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO listing (complex_id, ask_price_krw, area_m2, status, source)
+            VALUES (:cid, 900000000, 84.97, 'active', 'portal')
+        """), {"cid": listed})
+
+    got = repo.recommendation_candidates(region_codes=["11680"],
+                                         max_price_krw=1_000_000_000)
+    assert [c.id for c in got] == [listed, traded]
 
 
 def test_후보조회에_시세와_매물수가_실린다(repo, engine):

@@ -36,6 +36,41 @@ from app.ingest.molit import SOURCE_NAME, MolitTrade
 RegionResolver = Callable[[str, str | None], str | None]
 
 
+def make_db_region_resolver(engine: Any) -> RegionResolver:
+    """`region` 테이블을 한 번 읽어 (시군구5, 법정동명) → 10자리 코드로 매핑한다.
+
+    왜 미리 통째로 읽는가
+    ---------------------
+    적재 루프 안에서 단지마다 SELECT 하면 수만 번의 왕복이 된다. 수도권 법정동은
+    3천 건 규모라 메모리에 올려도 무시할 크기다(소형 VPS 라 이런 선택이 중요하다).
+
+    ⚠️ 매핑되지 않으면 **추측하지 않고 None** 을 준다 — 틀린 지역코드는 틀린 지역
+       통계를 낳고, complex.region_code 는 FK 라 없는 코드를 넣으면 적재가 통째로 깨진다.
+       읍면동 레벨(뒤 2자리 '00', 읍면동 3자리 ≠ '000')만 후보로 쓴다. 리(里) 레벨까지
+       넣으면 같은 이름이 겹쳐 엉뚱한 코드가 잡힌다.
+    """
+    from sqlalchemy import text
+
+    mapping: dict[tuple[str, str], str] = {}
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT code, dong FROM region
+            WHERE dong IS NOT NULL
+              AND substr(code, 6, 3) <> '000'
+              AND substr(code, 9, 2) = '00'
+            ORDER BY code
+        """)).all()
+    for r in rows:
+        mapping.setdefault((r.code[:5], (r.dong or "").strip()), r.code)
+
+    def resolve(sgg5: str, legal_dong: str | None) -> str | None:
+        if not legal_dong:
+            return None
+        return mapping.get((sgg5, legal_dong.strip()))
+
+    return resolve
+
+
 @dataclass
 class LoadResult:
     """한 번 이상의 load() 누적 결과. ingest_log 보완 지표.

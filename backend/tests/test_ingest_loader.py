@@ -11,12 +11,7 @@ from pathlib import Path
 import pytest
 
 from app.ingest import normalize
-from app.ingest.geocode import (
-    KakaoGeocoder,
-    NullGeocoder,
-    build_query,
-    enrich_geom,
-)
+from app.ingest.geocode import build_query
 from app.ingest.loader import InMemoryTradeLoader
 from app.ingest.molit import parse_response
 from app.ingest.ratelimit import RateLimiter
@@ -217,51 +212,13 @@ def test_러너가_로더로_적재하고_로그를_남긴다(sample_xml):
 
 
 # ---------------------------------------------------------------------------
-# 지오코딩 — 좌표 확보 (카카오 키워드검색)
+# 지오코딩 — 좌표 확보. 검증·충돌 차단 전부 tests/test_geocode.py 로 옮겼다
+# (CR-020 GEO-1). 여기서는 정규화 키가 질의로 이어지는 접점만 지킨다.
 # ---------------------------------------------------------------------------
 
 def test_지오코딩_질의는_법정동_단지명(trades):
     q = build_query(normalize.complex_key(trades[0]))
     assert q == "대치동 ○○아파트"
-
-
-def test_enrich_geom_은_찾은것만_반영하고_못찾으면_센다():
-    # 첫 단지는 좌표 있음, 둘째는 없음(None)
-    coords = {"대치동 ○○아파트": (127.056, 37.494)}
-
-    class FakeGeo:
-        def geocode(self, query):
-            return coords.get(query)
-
-    updates: list[tuple[int, float, float]] = []
-    res = enrich_geom(
-        [(1, "대치동 ○○아파트"), (2, "역삼동 △△아파트")],
-        FakeGeo(),
-        lambda cid, lon, lat: updates.append((cid, lon, lat)))
-
-    assert res.resolved == 1 and res.unresolved == 1
-    assert updates == [(1, 127.056, 37.494)]
-
-
-def test_null_geocoder는_항상_None():
-    assert NullGeocoder().geocode("아무거나") is None
-
-
-def test_kakao_는_x경도_y위도_순서로_돌려준다():
-    """x=경도(lon), y=위도(lat). 뒤집으면 지도에서 바다에 찍힌다."""
-    def fake_get(url, headers, params):
-        assert headers["Authorization"].startswith("KakaoAK ")
-        return {"documents": [{"x": "127.0561", "y": "37.4941", "place_name": "○○아파트"}]}
-
-    geo = KakaoGeocoder("KEY", http_get=fake_get, rate_limiter=_silent_clock_limiter())
-    assert geo.geocode("대치동 ○○아파트") == (127.0561, 37.4941)
-
-
-def test_kakao_결과없으면_None():
-    geo = KakaoGeocoder("KEY", http_get=lambda u, h, p: {"documents": []},
-                        rate_limiter=_silent_clock_limiter())
-    assert geo.geocode("없는단지") is None
-    assert geo.geocode("   ") is None       # 빈 질의는 호출도 안 함
 
 
 # ---------------------------------------------------------------------------

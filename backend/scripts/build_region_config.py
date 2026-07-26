@@ -17,9 +17,10 @@ import os
 import sys
 from pathlib import Path
 
-BACKEND_DIR = Path(__file__).resolve().parents[1]
-if str(BACKEND_DIR) not in sys.path:
-    sys.path.insert(0, str(BACKEND_DIR))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+# ⚠️ `_common` import 자체가 sys.path·로깅 억제·비밀 마스킹을 설치한다(SR17-3).
+#    스크립트마다 각자 배선하면 하나가 빠지고, 그 하나로 키가 샌다. 지우지 말 것.
+from _common import BACKEND_DIR, load_env  # noqa: E402,F401
 
 from app.core.regions import CAPITAL_SIDO, DEFAULT_PATH, READY_STATUS  # noqa: E402
 
@@ -99,6 +100,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--as-of", help="생성일(YYYY-MM-DD). 기본: 오늘")
     args = ap.parse_args(argv)
 
+    load_env()
     url = os.getenv("TEST_DATABASE_URL") or os.getenv("DATABASE_URL", "")
     if not url:
         print("[FAIL] TEST_DATABASE_URL(또는 DATABASE_URL)이 필요합니다.")

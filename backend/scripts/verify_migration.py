@@ -24,9 +24,10 @@ import os
 import sys
 from pathlib import Path
 
-BACKEND_DIR = Path(__file__).resolve().parents[1]
-if str(BACKEND_DIR) not in sys.path:
-    sys.path.insert(0, str(BACKEND_DIR))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+# ⚠️ `_common` import 자체가 sys.path·로깅 억제·비밀 마스킹을 설치한다(SR17-3).
+#    스크립트마다 각자 배선하면 하나가 빠지고, 그 하나로 키가 샌다. 지우지 말 것.
+from _common import BACKEND_DIR, load_env, mask_secrets  # noqa: E402
 
 #: 파일명 순서 = 적용 순서. 운영에서 docker-entrypoint-initdb.d 가 하는 것과 같다.
 MIGRATIONS = sorted((BACKEND_DIR / "migrations").glob("[0-9]*.sql"))
@@ -66,6 +67,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="public 스키마를 지우지 않고 적용만 시도한다")
     args = parser.parse_args(argv)
 
+    load_env()
     url = os.getenv("TEST_DATABASE_URL", "")
     if not url:
         print("[FAIL] TEST_DATABASE_URL 이 없습니다. 검증할 DB 를 지정하세요.")
@@ -138,7 +140,8 @@ def main(argv: list[str] | None = None) -> int:
             conn.exec_driver_sql(
                 "TRUNCATE region, complex, trade RESTART IDENTITY CASCADE")
     except Exception as exc:                       # noqa: BLE001 - 로그가 목적
-        print(f"[FAIL] {type(exc).__name__}: {exc}")
+        # DSN(비밀번호 포함)이 SQLAlchemy 예외 문자열에 실려 나올 수 있다.
+        print(mask_secrets(f"[FAIL] {type(exc).__name__}: {exc}"))
         return 1
     finally:
         engine.dispose()

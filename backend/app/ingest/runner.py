@@ -23,10 +23,19 @@ import logging
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 
+from app.core.masking import mask_secrets
 from app.ingest import molit
 from app.ingest.ratelimit import RateLimiter
 
 logger = logging.getLogger("ingest.runner")
+
+#: 한 (지역·달)에서 돌 최대 페이지 수. 1000건×50 = 5만건이면 어떤 시군구·달도 넘지 않는다.
+#: 상한을 두는 이유는 응답이 이상할 때 무한 루프로 API 를 두들기지 않기 위해서다.
+MAX_PAGES = 50
+
+
+class MolitPaginationError(RuntimeError):
+    """총건수만큼 못 받았다. **잘린 데이터를 성공으로 기록하지 않기 위해** 실패로 올린다."""
 
 #: (params) -> 응답 본문 텍스트. 주입 안 하면 실행 시 명시적으로 실패한다.
 Fetcher = Callable[[dict[str, str]], str]
@@ -117,6 +126,51 @@ def run_molit_trade_ingest(
     run = IngestRun(source=molit.SOURCE_NAME, target_table="trade", started_at=now)
     attempted = 0
 
+    def _why(label: str, exc: BaseException) -> str:
+        """실패 사유 문자열. **인증키를 지우고** 만든다 (SR17-1).
+
+        `run.failures` 는 stdout·로그·`config/region_code_verification.yaml`(커밋 대상)
+        로 그대로 흘러간다. fetch 계층이 이미 마스킹하지만, `service_key` 를 아는 계층은
+        여기도 마찬가지이므로 주입된 fetch 가 무엇이든 이 지점에서 한 번 더 지운다.
+        """
+        return mask_secrets(f"{label}: {exc}", extra_secrets=(service_key,))
+
+    def fetch_all_pages(region: str, ym: str) -> int:
+        """한 (지역·달)의 **모든 페이지**를 받아 적재하고 건수를 돌려준다.
+
+        페이지를 안 돌면 1000건 넘는 달이 조용히 잘린다(molit.parse_total_count 주석).
+        """
+        collected = 0
+        total: int | None = None
+        for page in range(1, MAX_PAGES + 1):
+            if page > 1:
+                limiter.wait()               # 페이지 사이에도 rate limit 을 지킨다
+            params = molit.build_params(service_key=service_key, region_code5=region,
+                                        ym=ym, rows=rows_per_page, page=page)
+            body = fetch(params)
+            trades = molit.parse_response(body, now=now)
+            if page == 1:
+                total = molit.parse_total_count(body)
+            if row_sink is not None and trades:
+                row_sink(trades)             # 적재 실패도 이 배치의 실패로 잡힌다
+            collected += len(trades)
+            if not trades:
+                break
+            if total is not None:
+                if collected >= total:
+                    break
+            elif len(trades) < rows_per_page:
+                break                        # totalCount 가 없으면 '덜 찬 페이지'가 끝 신호
+        else:
+            # 상한까지 돌고도 안 끝났다 — 조용히 자르지 않고 실패로 남긴다.
+            raise MolitPaginationError(
+                f"페이지 상한 {MAX_PAGES} 초과 (수집 {collected}/{total} 건) — "
+                "잘린 채로 성공 처리하지 않는다")
+        if total is not None and collected < total:
+            raise MolitPaginationError(
+                f"총 {total}건 중 {collected}건만 받았습니다 — 누락을 성공으로 기록하지 않는다")
+        return collected
+
     # INGEST-1: 적재(row_sink)까지 try 안에서 처리하고, log_sink 는 finally 로 옮긴다.
     # 적재가 실패해도 예외가 새어 루프를 죽이면 안 되고(다른 지역·달은 계속돼야 한다),
     # 무엇보다 **어떤 경우에도 ingest_log 는 남아야** 한다 — '조용한 실패'가 가장 위험하다.
@@ -126,20 +180,13 @@ def run_molit_trade_ingest(
                 attempted += 1
                 limiter.wait()                  # rate limit — 예의가 아니라 가용성
                 try:
-                    params = molit.build_params(
-                        service_key=service_key, region_code5=region, ym=ym,
-                        rows=rows_per_page)
-                    body = fetch(params)
-                    trades = molit.parse_response(body, now=now)
-                    if row_sink is not None:
-                        row_sink(trades)         # 적재 실패도 이 배치의 실패로 잡힌다
-                    run.rows_ok += len(trades)
+                    run.rows_ok += fetch_all_pages(region, ym)
                 except molit.MolitParseError as exc:
                     run.rows_failed += 1
-                    run.failures.append((f"{region}:{ym}", f"파싱 실패: {exc}"))
+                    run.failures.append((f"{region}:{ym}", _why("파싱 실패", exc)))
                 except Exception as exc:        # 네트워크·적재 등 — 실패로 남기고 계속
                     run.rows_failed += 1
-                    run.failures.append((f"{region}:{ym}", f"수집/적재 실패: {exc}"))
+                    run.failures.append((f"{region}:{ym}", _why("수집/적재 실패", exc)))
 
         if run.rows_failed == 0:
             run.status = "ok"

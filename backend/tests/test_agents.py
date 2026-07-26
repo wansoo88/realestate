@@ -220,6 +220,63 @@ def test_시세에이전트는_동별_실측을_근거에_싣는다():
     assert any(e.claim and "실측" in e.claim for e in f.evidence)  # 실측 근거
 
 
+def test_밴드가_6개월이어도_동실측은_살아있다():
+    """★F4-1 회귀: **호출부**가 band.period_months 를 dong_effect 에 넘기면 깨져야 한다.
+
+    aptDong 은 등기 완료 후에만 채워져서(등기有 86.3% / 無 2.0%) 최근 6개월 창에는 거의 없다.
+    그런데 거래가 많은 단지일수록 적정가 밴드는 6개월에서 멈춘다 — 호출부가 그 창을 그대로
+    넘기면 **하필 가장 불리한 창**으로 실측하게 되어 동별 근거가 통째로 사라진다.
+    (dong_effect 의 기본 인자만 검사하는 테스트로는 이 회귀를 못 잡는다 — CR-020 F4-1 지적)
+    """
+    # 최근 6개월에 6건 → 밴드는 6개월로 확정된다. 등기 전이라 동 정보 없음.
+    recent = [TradeRow(contract_date=TODAY - dt.timedelta(days=15 * i + 5),
+                       price_krw=int(8.0 * OKU), area_m2=84.97, floor=10)
+              for i in range(6)]
+    # 10~13개월 전(등기 완료 구간) → 동 정보 있음. 24개월 창에서만 잡힌다.
+    older = ([TradeRow(contract_date=TODAY - dt.timedelta(days=300 + 20 * i),
+                       price_krw=int(8.6 * OKU), area_m2=84.97, floor=10, apt_dong="101")
+              for i in range(3)]
+             + [TradeRow(contract_date=TODAY - dt.timedelta(days=340 + 20 * i),
+                         price_krw=int(7.4 * OKU), area_m2=84.97, floor=10, apt_dong="105")
+                for i in range(3)])
+
+    f = valuation_finding(_candidate(ask_oku=8.0, trades=recent + older), TODAY)
+    assert any("실측" in (e.claim or "") for e in f.evidence), (
+        "밴드 기간(6개월)을 dong_effect 에 넘기면 동 실측이 사라진다 — 자체 창을 써야 한다"
+    )
+
+
+def test_파이프라인도_밴드기간이_아니라_자체창을_쓴다():
+    """★F4-1(M1b) 회귀: **파이프라인 호출부**도 밴드 기간을 넘기면 안 된다.
+
+    valuation_finding 만 검사하는 테스트로는 `run_mvp_pipeline` 안의 두 번째 dong_effect
+    호출부가 되돌아가도 못 잡는다(CR-021 이 변이 M1b 로 실증). 두 호출부를 각각 못박는다.
+    """
+    from app.agents.orchestrator import run_mvp_pipeline
+
+    # 최근 6개월 6건(등기 전 — 동 없음) → 밴드는 6개월로 확정
+    recent = [TradeRow(contract_date=TODAY - dt.timedelta(days=15 * i + 5),
+                       price_krw=int(8.0 * OKU), area_m2=84.97, floor=10)
+              for i in range(6)]
+    # 10~13개월 전(등기 완료 — 동 있음) → 24개월 창에서만 잡힌다
+    older = ([TradeRow(contract_date=TODAY - dt.timedelta(days=300 + 20 * i),
+                       price_krw=int(8.6 * OKU), area_m2=84.97, floor=10, apt_dong="101")
+              for i in range(3)]
+             + [TradeRow(contract_date=TODAY - dt.timedelta(days=340 + 20 * i),
+                         price_krw=int(7.4 * OKU), area_m2=84.97, floor=10, apt_dong="105")
+                for i in range(3)])
+
+    ctx = AnalysisContext(affordability=_afford_within(),
+                          candidates=[_candidate(ask_oku=8.0, trades=recent + older)],
+                          as_of=TODAY)
+    out = run_mvp_pipeline(ctx, llm=None)
+    assert out["items"], f"후보가 전부 제외됨: {out['excluded']}"
+    dv = out["items"][0]["dong_valuation"]
+    assert dv["available"] is True, (
+        "파이프라인 호출부가 밴드 기간(6개월)을 dong_effect 에 넘기면 동 실측이 사라진다"
+    )
+
+
 def test_파이프라인_아이템에_동별_실측이_담긴다():
     from app.agents.orchestrator import run_mvp_pipeline
 
@@ -246,6 +303,130 @@ def test_동정보없으면_파이프라인이_폴백을_명시한다():
     assert dv["available"] is False
     assert dv["method"] == "동정보없음"
     assert dv["confidence"] == 0.0                              # 폴백 — 지어내지 않음
+
+
+# ---------------------------------------------------------------------------
+# 호가 없는 후보 (price_basis=trade) — 공공API 만으로 성립해야 한다 (CHARTER G4)
+# ---------------------------------------------------------------------------
+
+def _trade_only_candidate(price_oku=8.0, area=84.97, trades=None) -> Candidate:
+    """대표 호가가 **없는** 후보. 가짜 호가를 끼우지 않는다."""
+    return Candidate(
+        complex_id=2048, complex_name="호가없는단지", unit_type_id=None, area_m2=area,
+        group=None,
+        trades=trades if trades is not None else _trades(price_oku=price_oku, area=area),
+        total_households=800, listings=[],
+    )
+
+
+def test_호가없는_후보의_시세판정은_밴드_중심이다():
+    f = valuation_finding(_trade_only_candidate(), TODAY)
+    assert f.verdict == "현재 매물 없음 — 최근 실거래 기준"
+    assert "적정가 밴드" in f.rationale
+    assert f.evidence, "적정가 밴드가 근거로 실려야 한다"
+
+
+def test_호가없는_후보에는_호가갭_점수를_만들지_않는다():
+    """비교 대상(호가)이 없다. 갭도 점수도 지어내면 G2 위반이다."""
+    f = valuation_finding(_trade_only_candidate(), TODAY)
+    assert f.score is None, "호가가 없는데 갭 점수를 만들어냈다"
+    assert "%" not in f.verdict
+    assert "적정가 범위" not in f.verdict and "적정가 상단" not in f.verdict
+
+
+def test_호가없는_후보는_매물없음을_리스크로_남긴다():
+    f = valuation_finding(_trade_only_candidate(), TODAY)
+    assert any("매수 가능한 매물이 확인되지 않" in r.detail for r in f.risks)
+
+
+def test_호가없는_후보에서도_동별_실측은_살아있다():
+    """★F4 회귀: dong_effect 는 실거래 기반이라 호가 유무와 무관하다."""
+    f = valuation_finding(_trade_only_candidate(trades=_trades_with_dong()), TODAY)
+    assert any("실측" in (e.claim or "") for e in f.evidence)
+
+
+def test_호가없는_후보도_표본부족이면_판단보류():
+    f = valuation_finding(_trade_only_candidate(trades=[]), TODAY)
+    assert f.verdict == "판단 보류"
+    assert f.missing
+
+
+def test_매물리서처는_호가가_없으면_정상매물이라_말하지_않는다():
+    from app.agents.orchestrator import listing_finding
+    f = listing_finding(_trade_only_candidate(), None, TODAY)
+    assert f.verdict == "판단 보류"
+    assert f.score is None
+    assert any("호가" in m for m in f.missing)
+
+
+def test_후보_속성이_가격근거를_구조적으로_구분한다():
+    """`price_basis` 는 파생 속성이다 — 호출부가 실수로 뒤바꿀 여지를 없앤다."""
+    from app.agents.orchestrator import PRICE_BASIS_LISTING, PRICE_BASIS_TRADE
+
+    listing_cand = _candidate(ask_oku=8.0)
+    assert listing_cand.price_basis == PRICE_BASIS_LISTING
+    assert listing_cand.ask_price_krw == int(8.0 * OKU)
+    assert listing_cand.target_floor == 10
+
+    trade_cand = _trade_only_candidate()
+    assert trade_cand.price_basis == PRICE_BASIS_TRADE
+    assert trade_cand.ask_price_krw is None
+    assert trade_cand.target_floor is None      # 보정할 대상 층 자체가 없다
+
+
+def test_기준가는_호가가_없으면_실거래_중위다():
+    from app.agents.orchestrator import reference_band, reference_price_krw
+
+    cand = _trade_only_candidate(price_oku=8.0)
+    band = reference_band(cand, TODAY)
+    assert reference_price_krw(cand, band) == band.median_krw
+
+    # 실거래 표본이 없으면 **기준가도 없다**(0 이나 임의값으로 채우지 않는다).
+    empty = _trade_only_candidate(trades=[])
+    assert reference_price_krw(empty, reference_band(empty, TODAY)) is None
+
+
+def test_파이프라인은_가격근거없는_후보를_사유와_함께_제외한다():
+    cand = _trade_only_candidate(trades=[])
+    ctx = AnalysisContext(affordability=_afford_within(), candidates=[cand], as_of=TODAY)
+    out = run_mvp_pipeline(ctx, llm=None)
+    assert out["items"] == []
+    assert out["excluded"] and "가격 근거 없음" in out["excluded"][0]["reason"]
+    assert out["excluded"][0]["price_basis"] == "trade"
+
+
+def test_파이프라인_예산초과_사유가_근거를_구분한다():
+    """호가 초과와 실거래 추정 초과는 다른 문장이어야 한다."""
+    listing_over = _candidate(ask_oku=50.0, trades=_trades(price_oku=50.0))
+    trade_over = _trade_only_candidate(price_oku=50.0)
+    ctx = AnalysisContext(affordability=_afford_within(),
+                          candidates=[listing_over, trade_over], as_of=TODAY)
+    out = run_mvp_pipeline(ctx, llm=None)
+
+    assert out["items"] == []
+    reasons = {e["price_basis"]: e for e in out["excluded"]}
+    assert "호가" in reasons["listing"]["reason"]
+    assert reasons["listing"].get("price_estimated") is False
+    assert "실거래" in reasons["trade"]["reason"] and "추정" in reasons["trade"]["reason"]
+    assert reasons["trade"]["price_estimated"] is True
+
+
+def test_점수를_매길_근거가_없으면_0이_아니라_None():
+    """0.0 은 '나쁘다'로 읽힌다. '모른다'와 구분되지 않으면 그것도 환각이다(G2)."""
+    ctx = AnalysisContext(affordability=_afford_within(),
+                          candidates=[_trade_only_candidate()], as_of=TODAY)
+    out = run_mvp_pipeline(ctx, llm=None)
+    assert out["items"]
+    assert out["items"][0]["total_score"] is None
+    assert out["items"][0]["score_basis"] is None
+    assert any("total_score" in n for n in out["notes"])
+
+
+def test_실거래기준_후보가_있으면_notes에_고지한다():
+    ctx = AnalysisContext(affordability=_afford_within(),
+                          candidates=[_trade_only_candidate()], as_of=TODAY)
+    out = run_mvp_pipeline(ctx, llm=None)
+    assert any("price_basis=trade" in n for n in out["notes"])
 
 
 def test_입지데이터가_없으면_지어내지_않는다():

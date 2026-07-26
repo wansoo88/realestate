@@ -19,6 +19,7 @@ import statistics
 from collections.abc import Iterable, Sequence
 
 from app.domain.valuation.models import (
+    DONG_PERIOD_MONTHS,
     FLOOR_BANDS,
     MIN_SAMPLE,
     MIN_SAMPLE_DONG,
@@ -104,11 +105,15 @@ def dong_effect(
     trades: Iterable[TradeRow],
     *,
     area_m2: float | None = None,
-    months: int | None = None,
+    months: int | None = DONG_PERIOD_MONTHS,
     as_of: dt.date | None = None,
     min_sample_dong: int = MIN_SAMPLE_DONG,
 ) -> DongValuation:
     """동(棟)별 가격 편차를 ₩/㎡ 중위로 실측한다(F4).
+
+    ⚠️ 기간은 **적정가 밴드와 분리**한다(기본 DONG_PERIOD_MONTHS=24). aptDong 은 등기 후에만
+    채워져서 최근 6개월 창에서는 동 정보가 33~58% 로 떨어진다 — 밴드 기간을 그대로 쓰면
+    거래가 많은 단지일수록 실측이 실패한다(models.DONG_PERIOD_MONTHS 주석의 실측 근거 참조).
 
     면적 구성 차이를 보정하려고 절대가가 아니라 ₩/㎡ 를 쓴다: 큰 평형이 많은 동이
     입지와 무관하게 비싸 보이는 착시를 없앤다. 기준(분모)은 **단지 전체** 거래의

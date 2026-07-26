@@ -81,10 +81,22 @@ def test_채워지지_않은_설정은_거부한다(tmp_path):
     assert "손으로 코드를 적지 마세요" in str(exc.value)
 
 
-def test_저장소_기본설정은_아직_미채움_상태다():
-    """커밋된 config/regions_capital.yaml 은 생성 전이라 거부돼야 정상이다."""
-    with pytest.raises(RegionConfigError):
-        load_capital_sigungu(REPO_ROOT / "config" / "regions_capital.yaml")
+def test_저장소_기본설정은_공식자료로_생성돼_있다():
+    """커밋된 config/regions_capital.yaml 은 공식 법정동코드에서 생성된 상태여야 한다.
+
+    2026-07-25 생성: 서울 25 · 인천 11 · 경기 55 = 91건.
+    인천이 10이 아니라 11인 것은 2026-07 행정구역 개편(중구·동구→제물포·영종,
+    서구→서해·검단) 결과이고, 경기 55 는 31개 시군 + 24개 일반구다.
+    ⚠️ 개수를 못 박지 않는 이유: 법정동은 계속 바뀐다. 여기서 검증하는 것은
+       '생성된 상태이며 수도권 밖 코드가 섞이지 않았다'는 불변식이다.
+    """
+    sgg = load_capital_sigungu(REPO_ROOT / "config" / "regions_capital.yaml")
+    assert len(sgg) >= 66                                   # 서울25+인천10+경기31 하한
+    assert all(s.sido_code in CAPITAL_SIDO for s in sgg)
+    codes = {s.code for s in sgg}
+    assert {"11680", "11650", "41135", "28185"} <= codes    # 강남·서초·분당·연수
+    assert len(codes) == len(sgg)                           # 중복 없음
+    assert config_as_of(REPO_ROOT / "config" / "regions_capital.yaml") is not None
 
 
 def test_파일이_없으면_거부한다(tmp_path):

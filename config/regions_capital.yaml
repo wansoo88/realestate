@@ -1,40 +1,116 @@
 # regions_capital.yaml — 수도권 시군구 코드 (수집 배치 `run_daily` 입력)
 #
-# ⚠️ 아직 채워지지 않았습니다. `status: generated` 가 아니면 로더가 거부합니다.
-#
-# 왜 손으로 적지 않는가
-# ---------------------
-# 법정동은 신설·폐지·통합이 계속 일어납니다. 없어진 코드로 수집을 돌리면
-# **0건이 돌아오는데, 그게 "그 지역에 거래가 없었다"와 구분되지 않습니다.**
-# 조용히 비는 데이터가 이 제품에서 가장 위험한 실패 방식이라, 목록은
-# 공식 법정동코드에서 **생성**합니다.
-#
-# 채우는 방법
-# -----------
-#   1) 행정안전부 행정표준코드관리시스템에서 '법정동코드 전체자료' 를 받는다
-#      https://www.code.go.kr/stdcode/regCodeL.do
-#      (공공데이터포털: https://www.data.go.kr/data/15092039/fileData.do)
-#   2) region 테이블에 적재
+# ⚠️ 이 파일은 **자동 생성**됩니다. 손으로 고치지 마세요.
+#    법정동은 신설·폐지·통합이 일어나므로, 자료를 갱신한 뒤 다시 생성하세요:
 #      python scripts/load_regions.py --file 법정동코드_전체자료.txt
-#   3) 이 파일 생성
 #      python scripts/build_region_config.py
 #
-# 생성되면 status 가 generated 로 바뀌고 sigungu 목록(서울 25 + 인천 10 + 경기 31
-# 규모)이 채워집니다. 실제 개수는 생성 시점의 공식 자료를 따릅니다.
+# 생성일: 2026-07-25
 
-version: "unfilled"
-status: unfilled
+version: "2026-07-25"
+status: generated
 
 source: "행정안전부 행정표준코드관리시스템 — 법정동코드 전체자료"
 source_url: "https://www.code.go.kr/stdcode/regCodeL.do"
-as_of: null
+as_of: "2026-07-25"
 
-# 시도 코드는 체계상 고정값입니다 (10자리 = 시도2 + 시군구3 + 읍면동3 + 리2).
+# 10자리 = 시도2 + 시군구3 + 읍면동3 + 리2
 sido:
   "11": 서울특별시
   "41": 경기도
   "28": 인천광역시
 
 # 5자리 시군구 코드 = 국토교통부 실거래가 API 의 LAWD_CD 파라미터.
-# build_region_config.py 가 채웁니다.
-sigungu: []
+# 총 91건.
+sigungu:
+  - { code: "11110", sido: 서울특별시, name: 종로구 }
+  - { code: "11140", sido: 서울특별시, name: 중구 }
+  - { code: "11170", sido: 서울특별시, name: 용산구 }
+  - { code: "11200", sido: 서울특별시, name: 성동구 }
+  - { code: "11215", sido: 서울특별시, name: 광진구 }
+  - { code: "11230", sido: 서울특별시, name: 동대문구 }
+  - { code: "11260", sido: 서울특별시, name: 중랑구 }
+  - { code: "11290", sido: 서울특별시, name: 성북구 }
+  - { code: "11305", sido: 서울특별시, name: 강북구 }
+  - { code: "11320", sido: 서울특별시, name: 도봉구 }
+  - { code: "11350", sido: 서울특별시, name: 노원구 }
+  - { code: "11380", sido: 서울특별시, name: 은평구 }
+  - { code: "11410", sido: 서울특별시, name: 서대문구 }
+  - { code: "11440", sido: 서울특별시, name: 마포구 }
+  - { code: "11470", sido: 서울특별시, name: 양천구 }
+  - { code: "11500", sido: 서울특별시, name: 강서구 }
+  - { code: "11530", sido: 서울특별시, name: 구로구 }
+  - { code: "11545", sido: 서울특별시, name: 금천구 }
+  - { code: "11560", sido: 서울특별시, name: 영등포구 }
+  - { code: "11590", sido: 서울특별시, name: 동작구 }
+  - { code: "11620", sido: 서울특별시, name: 관악구 }
+  - { code: "11650", sido: 서울특별시, name: 서초구 }
+  - { code: "11680", sido: 서울특별시, name: 강남구 }
+  - { code: "11710", sido: 서울특별시, name: 송파구 }
+  - { code: "11740", sido: 서울특별시, name: 강동구 }
+  - { code: "28125", sido: 인천광역시, name: 제물포구 }
+  - { code: "28155", sido: 인천광역시, name: 영종구 }
+  - { code: "28177", sido: 인천광역시, name: 미추홀구 }
+  - { code: "28185", sido: 인천광역시, name: 연수구 }
+  - { code: "28200", sido: 인천광역시, name: 남동구 }
+  - { code: "28237", sido: 인천광역시, name: 부평구 }
+  - { code: "28245", sido: 인천광역시, name: 계양구 }
+  - { code: "28275", sido: 인천광역시, name: 서해구 }
+  - { code: "28290", sido: 인천광역시, name: 검단구 }
+  - { code: "28710", sido: 인천광역시, name: 강화군 }
+  - { code: "28720", sido: 인천광역시, name: 옹진군 }
+  - { code: "41110", sido: 경기도, name: 수원시 }
+  - { code: "41111", sido: 경기도, name: 수원시 장안구 }
+  - { code: "41113", sido: 경기도, name: 수원시 권선구 }
+  - { code: "41115", sido: 경기도, name: 수원시 팔달구 }
+  - { code: "41117", sido: 경기도, name: 수원시 영통구 }
+  - { code: "41130", sido: 경기도, name: 성남시 }
+  - { code: "41131", sido: 경기도, name: 성남시 수정구 }
+  - { code: "41133", sido: 경기도, name: 성남시 중원구 }
+  - { code: "41135", sido: 경기도, name: 성남시 분당구 }
+  - { code: "41150", sido: 경기도, name: 의정부시 }
+  - { code: "41170", sido: 경기도, name: 안양시 }
+  - { code: "41171", sido: 경기도, name: 안양시 만안구 }
+  - { code: "41173", sido: 경기도, name: 안양시 동안구 }
+  - { code: "41190", sido: 경기도, name: 부천시 }
+  - { code: "41192", sido: 경기도, name: 부천시 원미구 }
+  - { code: "41194", sido: 경기도, name: 부천시 소사구 }
+  - { code: "41196", sido: 경기도, name: 부천시 오정구 }
+  - { code: "41210", sido: 경기도, name: 광명시 }
+  - { code: "41220", sido: 경기도, name: 평택시 }
+  - { code: "41250", sido: 경기도, name: 동두천시 }
+  - { code: "41270", sido: 경기도, name: 안산시 }
+  - { code: "41271", sido: 경기도, name: 안산시 상록구 }
+  - { code: "41273", sido: 경기도, name: 안산시 단원구 }
+  - { code: "41280", sido: 경기도, name: 고양시 }
+  - { code: "41281", sido: 경기도, name: 고양시 덕양구 }
+  - { code: "41285", sido: 경기도, name: 고양시 일산동구 }
+  - { code: "41287", sido: 경기도, name: 고양시 일산서구 }
+  - { code: "41290", sido: 경기도, name: 과천시 }
+  - { code: "41310", sido: 경기도, name: 구리시 }
+  - { code: "41360", sido: 경기도, name: 남양주시 }
+  - { code: "41370", sido: 경기도, name: 오산시 }
+  - { code: "41390", sido: 경기도, name: 시흥시 }
+  - { code: "41410", sido: 경기도, name: 군포시 }
+  - { code: "41430", sido: 경기도, name: 의왕시 }
+  - { code: "41450", sido: 경기도, name: 하남시 }
+  - { code: "41460", sido: 경기도, name: 용인시 }
+  - { code: "41461", sido: 경기도, name: 용인시 처인구 }
+  - { code: "41463", sido: 경기도, name: 용인시 기흥구 }
+  - { code: "41465", sido: 경기도, name: 용인시 수지구 }
+  - { code: "41480", sido: 경기도, name: 파주시 }
+  - { code: "41500", sido: 경기도, name: 이천시 }
+  - { code: "41550", sido: 경기도, name: 안성시 }
+  - { code: "41570", sido: 경기도, name: 김포시 }
+  - { code: "41590", sido: 경기도, name: 화성시 }
+  - { code: "41591", sido: 경기도, name: 화성시 만세구 }
+  - { code: "41593", sido: 경기도, name: 화성시 효행구 }
+  - { code: "41595", sido: 경기도, name: 화성시 병점구 }
+  - { code: "41597", sido: 경기도, name: 화성시 동탄구 }
+  - { code: "41610", sido: 경기도, name: 광주시 }
+  - { code: "41630", sido: 경기도, name: 양주시 }
+  - { code: "41650", sido: 경기도, name: 포천시 }
+  - { code: "41670", sido: 경기도, name: 여주시 }
+  - { code: "41800", sido: 경기도, name: 연천군 }
+  - { code: "41820", sido: 경기도, name: 가평군 }
+  - { code: "41830", sido: 경기도, name: 양평군 }

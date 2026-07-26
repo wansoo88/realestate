@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 
 from app.api.routes import router
 from app.core.config import get_settings
+from app.core.masking import install_log_masking
 from app.core.security import HashCapacityError, mask_sensitive
 
 logger = logging.getLogger("app")
@@ -21,6 +22,11 @@ SENSITIVE_PATHS = ("/api/v1/me/profile", "/api/v1/affordability", "/api/v1/auth"
 
 def create_app(*, repo=None) -> FastAPI:
     settings = get_settings()
+
+    # 로그로 나가는 문자열에서 비밀을 지운다(SR17-3). 이 프로세스에서 가장 위험한 경로는
+    # 아래 `logger.exception` 이다 — SQLAlchemy 예외는 접속 DSN(비밀번호 포함)을,
+    # 외부 API 예외는 요청 URL(인증키 포함)을 메시지에 그대로 담는다.
+    install_log_masking()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):

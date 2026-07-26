@@ -33,6 +33,8 @@ from app.domain.affordability.engine import compute_affordability
 from app.domain.affordability.models import Borrower, PropertyFacts
 from app.domain.listings.dedup import AREA_TOLERANCE_M2, group_duplicates
 from app.domain.rules.loader import load_rules
+from app.domain.valuation.models import MIN_SAMPLE, PERIOD_LADDER, TradeRow
+from app.domain.valuation.stats import eligible_trades
 
 logger = logging.getLogger("app.agents.recommend")
 
@@ -40,6 +42,9 @@ logger = logging.getLogger("app.agents.recommend")
 CANDIDATE_COMPLEX_LIMIT = 50
 #: 조립된 Candidate 총량 상한(단지 × 면적그룹이 폭증하지 않게).
 MAX_CANDIDATES = 200
+#: 호가가 없는 단지에서 실거래로 세울 면적대 수(거래 많은 순).
+#: 한 단지가 후보 목록을 독식하지 않게 막는다.
+TRADE_AREA_GROUPS_PER_COMPLEX = 3
 
 #: 자산 금액 필드 ↔ 암호문 컬럼
 _AMOUNT_FIELDS = (
@@ -91,9 +96,13 @@ def _analyze(repo: Any, settings: Any, user_id: int, criteria: dict[str, Any],
         avoid=avoid, forbidden_amounts=forbidden,
     )
     result = run_mvp_pipeline(ctx, llm=llm)
-    logger.info("추천 완료 user=%s 후보=%d 추천=%d",
-                user_id, len(candidates), len(result["items"]))
-    return "done", result["items"]
+    items = result["items"]
+    trade_basis = sum(1 for it in items if it.get("price_basis") == "trade")
+    logger.info(
+        "추천 완료 user=%s 후보=%d 추천=%d (실거래기준 %d · 호가기준 %d) 제외=%d",
+        user_id, len(candidates), len(items), trade_basis, len(items) - trade_basis,
+        len(result.get("excluded") or []))
+    return "done", items
 
 
 def _borrower_from_profile(profile: Any, user_id: int, key: bytes) -> tuple[Borrower, list[int]]:
@@ -120,12 +129,67 @@ def _borrower_from_profile(profile: Any, user_id: int, key: bytes) -> tuple[Borr
     return borrower, forbidden
 
 
+def _trade_area_groups(trades: list[TradeRow], *,
+                       limit: int = TRADE_AREA_GROUPS_PER_COMPLEX) -> list[float]:
+    """실거래를 전용면적으로 묶어 **후보로 세울 면적대**를 고른다(거래 많은 순).
+
+    왜 필요한가
+    -----------
+    호가가 있으면 "어떤 유닛을 살 것인가"를 매물이 정해 준다. 호가가 없으면 그걸
+    정해 주는 게 없다. 그래서 그 단지에서 **실제로 거래된 면적대**를 후보로 삼는다.
+    (없는 평형을 추천하지 않기 위해서다 — 거래가 없는 면적대는 가격도 말할 수 없다.)
+
+    표본이 `MIN_SAMPLE` 미만인 면적대는 애초에 세우지 않는다. 세워 봐야 적정가 밴드가
+    안 나와서 "가격 근거 없음"으로 제외될 뿐이고, 그만큼 상한(MAX_CANDIDATES)을 낭비한다.
+    기간은 밴드가 마지막으로 시도하는 창(PERIOD_LADDER 최대)과 맞춘다.
+
+    면적은 `AREA_TOLERANCE_M2` 안에서 한 덩어리로 본다. 84.9 와 84.97 을 따로 세우면
+    같은 타입이 두 후보가 되고, 밴드는 어차피 오차 안의 거래를 함께 쓰므로 중복이다.
+    돌려주는 값은 **실거래에 실제로 있던 면적**이다(반올림한 대표값이 아니다) —
+    표시 면적을 우리가 만들어내지 않기 위해서다.
+    """
+    recent = eligible_trades(trades, months=PERIOD_LADDER[-1])
+    counts: dict[float, int] = {}
+    for t in recent:
+        if t.area_m2 <= 0:
+            continue
+        counts[t.area_m2] = counts.get(t.area_m2, 0) + 1
+
+    # 거래 많은 순 → 같은 건수면 면적 오름차순(결정론적).
+    ranked = sorted(counts, key=lambda a: (-counts[a], a))
+
+    chosen: list[float] = []
+    for area in ranked:
+        # 오차 안의 거래를 합쳐도 표본이 안 되면 밴드가 안 나온다.
+        nearby = sum(n for a, n in counts.items() if abs(a - area) <= AREA_TOLERANCE_M2)
+        if nearby < MIN_SAMPLE:
+            continue
+        if any(abs(area - picked) <= AREA_TOLERANCE_M2 for picked in chosen):
+            continue                          # 이미 고른 면적대와 같은 덩어리
+        chosen.append(area)
+        if len(chosen) >= limit:
+            break
+    return chosen
+
+
 def _assemble_candidates(repo: Any, criteria: dict[str, Any],
                          budget: int | None) -> list[Candidate]:
     """repo 조회 결과를 orchestrator 의 Candidate 로 조립.
 
     후보/매물/실거래 조회 메서드가 없으면(PostGIS 구현 대기) **빈 리스트** —
     지어내지 않고, 크래시하지도 않는다.
+
+    ⚠️ 호가 없는 단지도 후보다 (CHARTER G4)
+    ----------------------------------------
+    예전에는 `if not listings: continue` 로 호가 없는 단지를 건너뛰었다. 그런데
+    공공 오픈API 에는 호가가 없어서 포털 수집이 없으면 `listing` 테이블이 **통째로 빈다**
+    → 후보가 구조적으로 항상 0건. "포털 수집이 막혀도 공공API 만으로 서비스가 성립해야
+    한다"(G4)와 정면 충돌이었다.
+
+    지금은 두 경로가 **둘 다 1급 시민**이다:
+      · 호가 있음 → 매물 그룹 단위 후보 (price_basis=listing)
+      · 호가 없음 → 실거래 면적대 단위 후보 (price_basis=trade, group=None)
+    가짜 대표 호가를 만들어 끼우지 않는다 — 그러면 하류가 그걸 호가로 믿는다.
     """
     query = getattr(repo, "recommendation_candidates", None)
     listings_of = getattr(repo, "listings_for_complex", None)
@@ -144,31 +208,70 @@ def _assemble_candidates(repo: Any, criteria: dict[str, Any],
                       limit=CANDIDATE_COMPLEX_LIMIT)
 
     candidates: list[Candidate] = []
+    # 깔때기: 어디서 후보가 사라지는지 로그로 남긴다("그냥 0건" 보고를 막는다).
+    funnel = {"complexes": len(complexes), "with_listings": 0, "trade_only": 0,
+              "no_price_evidence": 0, "listing_candidates": 0, "trade_candidates": 0}
+
     for c in complexes:
         listings = listings_of(c.id) or []
-        if not listings:
-            continue                          # 호가가 없으면 매수 후보로 세울 수 없다
         trades = (trades_of(c.id) if trades_of else []) or []
         location = location_of(c.id) if location_of else None
 
-        # 같은 물건(중복)을 접고, 서로 다른 유닛(면적·층·동)은 각각 후보로 둔다.
-        for grp in group_duplicates(listings):
-            area = grp.representative.area_m2
-            candidates.append(Candidate(
-                complex_id=c.id,
-                complex_name=c.name,
-                unit_type_id=None,            # 실거래엔 unit_type 매핑이 없다 — 면적으로 묶는다
-                area_m2=area,
-                group=grp,
-                trades=[t for t in trades if abs(t.area_m2 - area) <= AREA_TOLERANCE_M2],
-                total_households=c.total_households,
-                listings=[l for l in listings if abs(l.area_m2 - area) <= AREA_TOLERANCE_M2],
-                location=location,
-            ))
+        if listings:
+            funnel["with_listings"] += 1
+            # 같은 물건(중복)을 접고, 서로 다른 유닛(면적·층·동)은 각각 후보로 둔다.
+            for grp in group_duplicates(listings):
+                area = grp.representative.area_m2
+                candidates.append(_build(c, area, trades, listings, location, group=grp))
+                funnel["listing_candidates"] += 1
+                if len(candidates) >= MAX_CANDIDATES:
+                    logger.info("후보 상한 %d 도달 — 이후 단지는 생략", MAX_CANDIDATES)
+                    _log_funnel(funnel, len(candidates))
+                    return candidates
+            continue
+
+        # 호가 0건 — 실거래로 후보를 세운다(G4).
+        areas = _trade_area_groups(trades)
+        if not areas:
+            funnel["no_price_evidence"] += 1
+            continue
+        funnel["trade_only"] += 1
+        for area in areas:
+            candidates.append(_build(c, area, trades, [], location, group=None))
+            funnel["trade_candidates"] += 1
             if len(candidates) >= MAX_CANDIDATES:
                 logger.info("후보 상한 %d 도달 — 이후 단지는 생략", MAX_CANDIDATES)
+                _log_funnel(funnel, len(candidates))
                 return candidates
+
+    _log_funnel(funnel, len(candidates))
     return candidates
+
+
+def _build(c: Any, area: float, trades: list[Any], listings: list[Any],
+           location: Any, *, group: Any) -> Candidate:
+    """면적대 하나를 Candidate 로. 실거래·호가는 그 면적 오차 안의 것만 붙인다."""
+    return Candidate(
+        complex_id=c.id,
+        complex_name=c.name,
+        unit_type_id=None,                # 실거래엔 unit_type 매핑이 없다 — 면적으로 묶는다
+        area_m2=area,
+        group=group,
+        trades=[t for t in trades if abs(t.area_m2 - area) <= AREA_TOLERANCE_M2],
+        total_households=c.total_households,
+        listings=[li for li in listings if abs(li.area_m2 - area) <= AREA_TOLERANCE_M2],
+        location=location,
+    )
+
+
+def _log_funnel(funnel: dict[str, int], total: int) -> None:
+    """후보 깔때기를 한 줄로 남긴다. 0건일 때 **왜 0건인지** 말할 수 있어야 한다."""
+    logger.info(
+        "후보 조립: 단지 %d (호가보유 %d · 실거래만 %d · 가격근거없음 %d) "
+        "→ 후보 %d (호가기준 %d · 실거래기준 %d)",
+        funnel["complexes"], funnel["with_listings"], funnel["trade_only"],
+        funnel["no_price_evidence"], total,
+        funnel["listing_candidates"], funnel["trade_candidates"])
 
 
 def _persist(repo: Any, job_id: str, user_id: int, status: str,

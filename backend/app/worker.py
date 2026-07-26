@@ -15,7 +15,17 @@ import argparse
 import logging
 import sys
 
+from app.core.masking import install_log_masking
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+# ⚠️ httpx/httpcore 는 INFO 에서 **요청 URL 을 통째로** 찍는다. 공공데이터포털은 인증키를
+#    쿼리스트링(`serviceKey=...`)으로 받으므로, 이걸 켠 채 수집을 돌리면 컨테이너 로그에
+#    API 키가 평문으로 남는다(security.md §6 민감정보 로그 금지). 반드시 낮춰 둔다.
+for _noisy in ("httpx", "httpcore", "urllib3"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+# 레벨 억제는 **보조** 방어다. 라이브러리 하나가 WARNING 으로 URL 을 찍거나, 예외
+# 메시지가 로그로 흘러들면 레벨로는 못 막는다. 그래서 여기서도 마스킹을 설치한다(SR17-3).
+install_log_masking()
 logger = logging.getLogger("worker")
 
 QUEUES = ("analyze", "ingest")

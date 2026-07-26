@@ -264,11 +264,24 @@ X-Requested-With: XMLHttpRequest        ← 필수
 { "status": "done",
   "criteria_snapshot": { ... },          // 재현성: 어떤 조건으로 돌렸는지 동결
   "items": [
-    { "rank": 1, "total_score": 82.4,
+    { "rank": 1, "total_score": 82.4,    // 점수 근거가 하나도 없으면 null (0 아님)
+      "score_basis": "agent_scores",     // null 이면 total_score 도 null
       "complex": { "id": 1024, "name": "○○아파트" },
       "unit_type": { "area_m2": 84.97, "type_name": "84A" },
       "building": { "id": 88, "name": "101동", "confidence": 0.6,
-                    "basis": "listing_reported" },
+                    "basis": "listing_reported" },   // 호가 없으면 null
+
+      // --- 가격 근거 (price_basis) ---------------------------------------
+      "price_basis": "listing",          // "listing" | "trade"
+      "ask_price_krw": 1480000000,       // 호가. price_basis="trade" 면 **null**
+      "est_price_krw": 1480000000,       // 판단·예산 비교에 실제로 쓴 기준가
+      "price_estimated": false,          // true 면 est_price_krw 가 추정치
+      "price_note": null,                // trade 기준일 때만 문구가 들어온다
+      "ask_gap_pct": 5.7,                // 호가 vs 적정가 중위. trade 면 **null**
+      "price_band": { "p25_krw": 1380000000, "median_krw": 1400000000,
+                      "p75_krw": 1450000000, "sample_size": 37,
+                      "period_months": 6, "expanded": false,
+                      "source": "국토교통부 실거래가" },
       "dong_valuation": {                    // F4 동별 실측(erd §0 정정)
         "available": true, "method": "실측(aptDong)", "basis": "trade_measured",
         "confidence": 0.85, "coverage_pct": 87.0, "period_months": 6,
@@ -279,7 +292,6 @@ X-Requested-With: XMLHttpRequest        ← 필수
       },
       // 동 정보/표본 부족 시: { "available": false, "method": "동정보없음"|"동표본부족",
       //                       "confidence": 0.0, "reason": "...", "note": "좌표추정 폴백" }
-      "est_price_krw": 1395000000,
       "timing_signal": "buy",
       "summary": "예산 8.5억 내, 전세가율 하락 구간 진입 전 매수 유리.",
       "findings": [
@@ -305,6 +317,44 @@ X-Requested-With: XMLHttpRequest        ← 필수
 2. 모든 finding에 `evidence` + `confidence`
 3. `dong_valuation.basis`/`confidence`로 **동별이 실측(trade_measured)인지 추정(listing_reported)인지 구조적으로 구분**. `building`은 특정 매물의 동 표기(호가 기준), `dong_valuation`은 단지 내 동별 실거래 편차(F4).
 4. `criteria_snapshot`으로 재현성 확보
+5. `price_basis`로 **호가인지 실거래 추정인지 구조적으로 구분**(아래 §5.1)
+
+#### 5.1 `price_basis` — 호가와 실거래는 같은 숫자가 아니다 (2026-07-26 추가)
+
+> **왜 생겼나.** 초안은 후보에 **대표 호가가 반드시 있다**고 가정했다. 그런데 공공 오픈API에는
+> 호가가 없어 포털 수집이 없으면 `listing` 테이블이 통째로 빈다(실측: 단지 6,538 · 실거래 120,138 ·
+> **호가 0**). 그 결과 추천이 **구조적으로 항상 0건**이 되어 CHARTER **G4**(포털 수집이 막혀도
+> 공공API만으로 서비스가 성립해야 한다)와 정면 충돌했다. 이제 실거래만으로도 후보를 세우되,
+> **어느 쪽 근거인지를 응답에 명시**한다.
+
+| 값 | 뜻 | 사용자에게 보여야 할 것 |
+|---|---|---|
+| `listing` | "지금 이 값에 살 수 있다" — 실제 매도 호가 | 호가 · 적정가 대비 갭 |
+| `trade` | "최근 이 정도에 거래됐다" — **지금 살 수 있는 물건은 없음** | 적정가 밴드 · 추정 표기 |
+
+| 필드 | `listing` | `trade` |
+|---|---|---|
+| `ask_price_krw` | 호가(정수) | **`null`** — 없는 값을 실거래로 채우지 않는다 |
+| `est_price_krw` | `ask_price_krw`와 동일 | 최근 실거래 중위(**추정**) |
+| `price_estimated` | `false` | `true` |
+| `price_note` | `null` | "현재 등록된 매물이 없습니다 — 최근 실거래 기준 추정가입니다…" |
+| `ask_gap_pct` | 갭(%) | **`null`** — 비교 대상이 없으므로 계산하지 않는다 |
+| `price_band` | 참고용 | **주 근거** (p25~p75 · 표본 · 기간) |
+| `building` | 호가 표기 동(confidence 0.6) | `null` |
+| `findings[valuation-trader].verdict` | "적정가 상단/하단/범위" | "현재 매물 없음 — 최근 실거래 기준" |
+| `findings[listing-researcher]` | 신뢰도 판정 | "판단 보류" + `missing` |
+
+**프론트 계약 (반드시 지킬 것)**
+- `price_basis === "trade"` 면 가격 옆에 **추정 표기**를 붙이고 "즉시 매수 가능"으로 읽히는 UI를 쓰지 않는다.
+  UI 컨셉 "확신의 농도" 상 `trade` 는 `listing` 보다 **약한 시각적 강도**로 표시한다.
+- `ask_price_krw` · `ask_gap_pct` 는 `null` 일 수 있다. `est_price_krw` 로 **대체해 표시하면 안 된다**
+  (그 순간 실거래 중위가 호가로 둔갑한다).
+- `total_score` 는 `null` 일 수 있다(점수를 매길 근거가 없을 때). **0으로 렌더링하지 말 것** —
+  `0`은 "나쁘다", `null`은 "모른다"다. `score_basis` 로 구분한다.
+- `dong_valuation`(F4)은 실거래 기반이라 **`price_basis` 와 무관하게** 동작한다.
+
+**DB 매핑 주의** — `recommendation_item.est_price_krw` 컬럼은 기준가만 담는다.
+호가인지 추정인지는 **`payload.price_basis` 가 정본**이다. 컬럼만 보고 호가로 읽으면 안 된다.
 
 ### `GET /recommendations/{job_id}/stream` — SSE
 ```

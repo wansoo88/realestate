@@ -295,6 +295,30 @@ def test_동별은_면적당가격으로_구성편차를_보정한다():
     assert dongs["105"].ratio == pytest.approx(1.0, abs=0.01)
 
 
+def test_동실측은_밴드기간이_아니라_자체창을_쓴다():
+    """★실데이터 회귀: aptDong 은 **등기 완료 후에만** 채워진다(등기有 86.3% / 無 2.0%).
+
+    그래서 최근 6개월 창은 동 정보가 거의 없고, 거래가 많은 단지일수록 적정가 밴드가
+    6개월에서 멈춘다 — 밴드 기간을 그대로 쓰면 **가장 불리한 창**을 골라 실측이 실패한다
+    (송파 상위 8단지 실측: 6개월 4/8 → 24개월 8/8). dong_effect 는 자체 창을 써야 한다.
+    """
+    # 최근 6개월: 등기 전이라 동 없음 / 그 이전: 등기 완료라 동 있음
+    recent = [t(d, 15.0) for d in (10, 40, 70, 100, 130)]            # 동 결측
+    older = ([t(400 + 30 * i, 16.0, dong="101") for i in range(3)]
+             + [t(500 + 30 * i, 14.0, dong="105") for i in range(3)])
+    trades = recent + older
+
+    # 밴드 기간(6개월)을 넘기면 — 최근 거래만 잡혀 동 정보가 0
+    narrow = dong_effect(trades, area_m2=84.97, months=6, as_of=TODAY)
+    assert narrow.available is False
+    assert narrow.method == "동정보없음"
+
+    # 기본(자체 창 24개월)이면 — 등기된 과거 거래가 들어와 실측된다
+    wide = dong_effect(trades, area_m2=84.97, as_of=TODAY)
+    assert wide.available is True
+    assert {s.dong for s in wide.dongs} == {"101", "105"}
+
+
 def test_동_실측_evidence는_basis가_trade_measured():
     trades = [t(d, 16.0, dong="101") for d in (10, 20, 30)] + \
              [t(d, 14.0, dong="105") for d in (12, 22, 32)]

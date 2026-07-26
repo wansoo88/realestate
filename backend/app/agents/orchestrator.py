@@ -50,6 +50,26 @@ DISCLAIMER = ("투자 권유가 아니며 개인 판단을 돕는 참고 자료�
 #: 실거래 신고 지연 — 모든 시세 판단에 붙는 상수 리스크
 DELAY_RISK = Risk("medium", "실거래는 신고까지 최대 30일이 걸려 최근 거래가 반영되지 않았을 수 있습니다.")
 
+# --- 가격 근거 (price_basis) ------------------------------------------------
+#
+# 이 제품에서 **호가와 실거래는 같은 숫자가 아니다.**
+#   listing = "지금 이 값에 살 수 있다"  (매도인이 부른 값 · 지금 존재하는 물건)
+#   trade   = "최근 이 정도에 거래됐다"  (이미 끝난 거래 · 지금 살 수 있는 물건은 없음)
+#
+# 공공 API 에는 호가가 없다. 포털 수집이 막히면 `listing` 테이블이 통째로 비고,
+# 호가를 요구하는 설계는 후보를 **구조적으로 0건**으로 만든다(CHARTER G4 위반).
+# 그래서 실거래만으로도 후보를 세우되, **어느 쪽 근거인지 응답에 명시**한다(G2).
+# 실거래 중위가를 호가처럼 위장하지 않는다 — 위장하는 순간 하류(프론트·리포트)가
+# "지금 이 값에 살 수 있다"로 읽는다.
+PRICE_BASIS_LISTING = "listing"
+PRICE_BASIS_TRADE = "trade"
+
+#: 실거래 기준 후보에 붙는 표준 문구. UI 가 그대로 노출해도 되도록 완결형으로 둔다.
+TRADE_BASIS_NOTE = ("현재 등록된 매물이 없습니다 — 최근 실거래 기준 추정가입니다. "
+                    "실제 매수 가능 가격은 다를 수 있습니다.")
+#: 실거래 기준 후보의 판정 문구(호가 갭 판정을 대체한다).
+TRADE_BASIS_VERDICT = "현재 매물 없음 — 최근 실거래 기준"
+
 
 @dataclass
 class Candidate:
@@ -57,13 +77,51 @@ class Candidate:
     complex_name: str
     unit_type_id: int | None
     area_m2: float
-    group: ListingGroup
+    #: 대표 호가 그룹. **None 일 수 있다(1급 시민).**
+    #: 공공 API 에는 호가가 없으므로 호가 0건인 단지도 실거래 기준으로 후보가 된다.
+    #: ⚠️ 여기에 가짜 대표 호가를 만들어 끼우지 말 것 — 하류가 그걸 진짜 호가로 믿는다.
+    group: ListingGroup | None = None
     trades: list[TradeRow] = field(default_factory=list)
     total_households: int | None = None
     listings: list[ListingRow] = field(default_factory=list)
     #: 입지 사실(학군·교통·인프라·유해요소). 리포지토리가 공간쿼리로 채워 넘긴다.
     #: 없으면 location-analyst 는 판단 보류를 낸다(지어내지 않는다).
     location: LocationFacts | None = None
+
+    @property
+    def price_basis(self) -> str:
+        """이 후보의 가격 근거가 호가인가 실거래인가."""
+        return PRICE_BASIS_LISTING if self.group is not None else PRICE_BASIS_TRADE
+
+    @property
+    def ask_price_krw(self) -> int | None:
+        """대표 호가. 호가가 없으면 **None** — 실거래 중위로 채우지 않는다."""
+        return self.group.representative.ask_price_krw if self.group is not None else None
+
+    @property
+    def target_floor(self) -> int | None:
+        """층 보정 대상 층. 호가가 없으면 대상 층 자체가 없다(보정하지 않는다)."""
+        return self.group.representative.floor if self.group is not None else None
+
+
+def reference_band(candidate: Candidate, as_of: dt.date):
+    """이 후보의 적정가 밴드. 호가가 있으면 그 층으로 보정한다.
+
+    호가가 없으면 보정할 대상 층이 없으므로 단지·면적 기준 밴드를 그대로 쓴다.
+    """
+    return fair_price_band(candidate.trades, area_m2=candidate.area_m2, as_of=as_of,
+                           target_floor=candidate.target_floor)
+
+
+def reference_price_krw(candidate: Candidate, band: Any) -> int | None:
+    """예산 판정·표시에 쓸 **기준가**와 그 근거를 정한다.
+
+    호가가 있으면 호가(사실), 없으면 실거래 중위(추정)다. 둘 다 없으면 **None** —
+    가격 근거가 없는 후보는 예산을 따질 수도, 추천할 수도 없다(지어내지 않는다).
+    """
+    if candidate.group is not None:
+        return candidate.ask_price_krw
+    return band.median_krw if band.available else None
 
 
 @dataclass
@@ -119,6 +177,13 @@ def finance_finding(result: AffordabilityResult) -> Finding:
 
 def listing_finding(candidate: Candidate, median_krw: int | None,
                     as_of: dt.date) -> Finding:
+    if candidate.group is None:
+        # 평가할 매물 자체가 없다. "정상 매물"도 "허위 의심"도 아니다 —
+        # 공공 API 에는 호가가 없으므로 이건 **정상적인 데이터 없음**이다(G4).
+        return insufficient(
+            "listing-researcher",
+            ["현재 등록된 호가 매물 없음 — 공공 오픈API 에는 호가가 포함되지 않습니다"])
+
     score, signals = trust_score(candidate.group,
                                  median_price_krw=median_krw, as_of=as_of)
     rep = candidate.group.representative
@@ -147,19 +212,28 @@ def listing_finding(candidate: Candidate, median_krw: int | None,
 # [3] valuation-trader — 규칙 계산 + (선택) LLM 설명
 # ---------------------------------------------------------------------------
 
-def valuation_finding(candidate: Candidate, as_of: dt.date) -> Finding:
-    band = fair_price_band(candidate.trades, area_m2=candidate.area_m2,
-                           as_of=as_of,
-                           target_floor=candidate.group.representative.floor)
+def valuation_finding(candidate: Candidate, as_of: dt.date, *,
+                      band: Any | None = None) -> Finding:
+    """시세 판정. **호가 유무에 따라 판정 축이 다르다.**
+
+    호가 있음 → 호가 갭(ask_gap)으로 "적정가 상단/하단"을 판정한다.
+    호가 없음 → 비교할 호가가 없다. 갭을 계산하지 않고(None) **적정가 밴드 자체**를
+                근거로 제시한다. 없는 숫자를 만들어 내면 그 순간 G2 위반이다.
+    """
+    band = reference_band(candidate, as_of) if band is None else band
     if not band.available:
         return insufficient("valuation-trader", [band.reason or "실거래 표본 부족"])
 
-    ask = candidate.group.representative.ask_price_krw
-    gap = ask_gap_pct(ask, band)
+    ask = candidate.ask_price_krw
+    # ⚠️ 호가가 없으면 갭은 **None** 이다. 실거래 중위를 호가 자리에 넣어 0% 를 만들면
+    #    "적정가 범위"라는 근거 없는 판정이 생긴다(비교 대상이 자기 자신이므로).
+    gap = ask_gap_pct(ask, band) if ask is not None else None
     liq = liquidity(candidate.trades, candidate.listings,
                     candidate.total_households, as_of=as_of)
 
-    if gap is None:
+    if ask is None:
+        verdict = TRADE_BASIS_VERDICT
+    elif gap is None:
         verdict = "판단 보류"
     elif gap <= -10:
         verdict = "적정가 하단 — 급매 가능"
@@ -168,9 +242,13 @@ def valuation_finding(candidate: Candidate, as_of: dt.date) -> Finding:
     else:
         verdict = "적정가 범위"
 
-    # F4: 동(棟)별 편차를 실거래 aptDong 으로 실측한다(같은 기간 창을 쓴다).
-    dong = dong_effect(candidate.trades, area_m2=candidate.area_m2,
-                       months=band.period_months, as_of=as_of)
+    # F4: 동(棟)별 편차를 실거래 aptDong 으로 실측한다.
+    # ⚠️ 실거래 기반이라 **호가 유무와 무관하게** 동작한다. 호가 없는 후보에서도 살아 있어야 한다.
+    # ⚠️ 밴드 기간(band.period_months)을 넘기지 않는다 — aptDong 은 등기 후에만 채워져서
+    #    최근 6개월 창에서는 동 정보가 33~58% 로 떨어지고, 거래가 많은 단지일수록 밴드가
+    #    6개월에 멈춰 실측이 실패한다(실데이터 검증: 6개월 4/8 → 24개월 8/8).
+    #    dong_effect 는 자체 기본 창(DONG_PERIOD_MONTHS)을 쓴다.
+    dong = dong_effect(candidate.trades, area_m2=candidate.area_m2, as_of=as_of)
 
     risks = [DELAY_RISK]
     if band.expanded:
@@ -179,13 +257,29 @@ def valuation_finding(candidate: Candidate, as_of: dt.date) -> Finding:
     if liq.grade == "나쁨":
         risks.append(Risk("medium", "거래 회전율이 낮아 매도에 시간이 걸릴 수 있습니다."))
 
+    if ask is None:
+        # 살 수 있는 물건이 확인되지 않았다는 사실 자체가 리스크다. 숨기지 않는다.
+        risks.append(Risk("medium",
+                          "현재 매수 가능한 매물이 확인되지 않았습니다. "
+                          "아래 가격은 호가가 아니라 최근 실거래 기준 추정입니다."))
+
     # 점수: 갭이 작을수록 좋다(0% 기준). ±20% 를 0점 경계로 본다.
+    # ⚠️ 호가가 없으면 **점수를 매기지 않는다(None)**. 매길 축(호가 vs 적정가)이 없다.
+    #    0 점을 주면 "나쁘다"로 읽히고, 임의 점수를 주면 근거 없는 서열이 생긴다.
     score = max(0.0, min(100.0, 100.0 - abs(gap) * 5)) if gap is not None else None
 
-    rationale = (
-        f"동일 타입 {band.sample_size}건 중위 {band.median_krw:,}원 대비 "
-        f"호가 {ask:,}원은 {gap:+.1f}% 입니다. 환금성은 {liq.grade}."
-    )
+    if ask is not None:
+        rationale = (
+            f"동일 타입 {band.sample_size}건 중위 {band.median_krw:,}원 대비 "
+            f"호가 {ask:,}원은 {gap:+.1f}% 입니다. 환금성은 {liq.grade}."
+        )
+    else:
+        rationale = (
+            f"{TRADE_BASIS_NOTE} 동일 타입 최근 {band.period_months}개월 실거래 "
+            f"{band.sample_size}건 기준 적정가 밴드는 "
+            f"{band.p25_krw:,}~{band.p75_krw:,}원(중위 {band.median_krw:,}원)입니다. "
+            f"비교할 호가가 없어 호가 갭은 계산하지 않았습니다. 환금성은 {liq.grade}."
+        )
     evidence = band.to_evidence(as_of=as_of) and [
         Evidence(claim=f"중위 실거래가 {band.median_krw:,}원",
                  source="국토교통부 실거래가",
@@ -211,6 +305,26 @@ def valuation_finding(candidate: Candidate, as_of: dt.date) -> Finding:
         score=score,
         confidence=0.85,
     ))
+
+
+def _price_band_dict(band: Any) -> dict[str, Any] | None:
+    """적정가 밴드를 추천 아이템 형태로 직렬화.
+
+    호가가 없는 후보에게는 **이 밴드가 유일한 가격 근거**다. 갭 숫자를 지어내는 대신
+    밴드 자체(p25~p75·표본·기간·확장 여부)를 그대로 보여 준다 — 근거의 강도를
+    사용자가 직접 볼 수 있게("확신의 농도").
+    """
+    if band is None or not band.available:
+        return None
+    return {
+        "p25_krw": band.p25_krw,
+        "median_krw": band.median_krw,
+        "p75_krw": band.p75_krw,
+        "sample_size": band.sample_size,
+        "period_months": band.period_months,
+        "expanded": band.expanded,
+        "source": "국토교통부 실거래가",
+    }
 
 
 def _dong_valuation_dict(d: DongValuation | None) -> dict[str, Any] | None:
@@ -428,13 +542,35 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
     excluded: list[dict[str, Any]] = []
 
     for cand in ctx.candidates:
-        rep = cand.group.representative
+        rep = cand.group.representative if cand.group is not None else None
+        basis = cand.price_basis
 
-        # 하드 제외 ① — 아무리 점수가 높아도 못 사는 집은 추천이 아니다.
-        if budget and rep.ask_price_krw > budget:
+        # 가격 근거를 먼저 확정한다. 호가가 있으면 호가(사실), 없으면 실거래 중위(추정).
+        # 밴드는 여기서 한 번만 계산해 valuation 에 넘긴다(같은 숫자를 두 번 만들지 않는다).
+        band = reference_band(cand, ctx.as_of)
+        price = reference_price_krw(cand, band)
+
+        # 하드 제외 ⓪ — 가격 근거가 아예 없다(호가 없음 + 실거래 표본 부족).
+        # 예산을 따질 수도, 적정가를 말할 수도 없다. 지어내지 않고 사유를 남긴다.
+        if price is None:
             excluded.append({
                 "complex_id": cand.complex_id,
-                "reason": f"예산 초과 (호가 {rep.ask_price_krw:,}원 > 한도 {budget:,}원)",
+                "price_basis": basis,
+                "reason": ("가격 근거 없음 — 활성 호가가 없고 "
+                           + (band.reason or "실거래 표본 부족")),
+            })
+            continue
+
+        # 하드 제외 ① — 아무리 점수가 높아도 못 사는 집은 추천이 아니다.
+        # ⚠️ 실거래 기준이면 비교값이 **추정치**다. 사유 문구에 그 사실을 남긴다.
+        if budget and price > budget:
+            label = (f"호가 {price:,}원" if basis == PRICE_BASIS_LISTING
+                     else f"최근 실거래 중위 {price:,}원(추정)")
+            excluded.append({
+                "complex_id": cand.complex_id,
+                "price_basis": basis,
+                "price_estimated": basis != PRICE_BASIS_LISTING,
+                "reason": f"예산 초과 ({label} > 한도 {budget:,}원)",
             })
             continue
 
@@ -444,18 +580,18 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
         if loc_assess is not None and loc_assess.excluded:
             excluded.append({
                 "complex_id": cand.complex_id,
+                "price_basis": basis,
                 "reason": "; ".join(loc_assess.exclusion_reasons),
             })
             continue
 
-        valuation = valuation_finding(cand, ctx.as_of)
-        median = None
+        valuation = valuation_finding(cand, ctx.as_of, band=band)
+        median = band.median_krw if band.available else None
         dong_val = None
-        if valuation.evidence and valuation.evidence[0].data_rows:
-            band = fair_price_band(cand.trades, area_m2=cand.area_m2, as_of=ctx.as_of)
-            median = band.median_krw
-            dong_val = dong_effect(cand.trades, area_m2=cand.area_m2,
-                                   months=band.period_months, as_of=ctx.as_of)
+        if band.available:
+            # 밴드 기간이 아니라 dong_effect 자체 창을 쓴다(위 valuation_finding 주석 참조).
+            # 실거래 기반이라 **호가 유무와 무관하게** 계산된다(F4 회귀 금지).
+            dong_val = dong_effect(cand.trades, area_m2=cand.area_m2, as_of=ctx.as_of)
 
         location = (_assessment_to_finding(loc_assess) if loc_assess is not None
                     else insufficient("location-analyst",
@@ -467,21 +603,36 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
             location,
         ]
         scored = [f for f in findings if f.score is not None]
-        total = (sum(f.score * f.confidence for f in scored) /
-                 sum(f.confidence for f in scored)) if scored else 0.0
+        # 점수를 매길 근거가 하나도 없으면 **0 이 아니라 None** 이다.
+        # 0.0 은 "나쁘다"로 읽힌다 — "모른다"와 구분되지 않으면 그것도 환각이다(G2).
+        total = (round(sum(f.score * f.confidence for f in scored) /
+                       sum(f.confidence for f in scored), 1) if scored else None)
 
         summary = portfolio_summary(findings, llm, forbidden)
         items.append({
             "complex": {"id": cand.complex_id, "name": cand.complex_name},
             "unit_type": {"area_m2": cand.area_m2},
             # 특정 매물의 동은 호가 표기 기준(추정) — confidence 를 낮게 실어 보낸다.
+            # 호가가 없으면 특정 물건이 없으므로 building 도 없다(추정하지 않는다).
             "building": ({"id": rep.building_id, "confidence": 0.6,
-                          "basis": "listing_reported"} if rep.building_id else None),
+                          "basis": "listing_reported"}
+                         if rep is not None and rep.building_id else None),
             # F4 동별 가치 차이: aptDong 실거래 실측(basis=trade_measured, 높은 신뢰)
             # 이거나, 표본/동정보 부족 시 폴백을 명시한다. 없는 걸 지어내지 않는다.
             "dong_valuation": _dong_valuation_dict(dong_val),
-            "ask_price_krw": rep.ask_price_krw,
-            "total_score": round(total, 1),
+            # --- 가격 계약 (프론트가 반드시 구분해 표시해야 하는 부분) --------
+            # price_basis="listing" → est_price_krw == ask_price_krw (지금 살 수 있는 값)
+            # price_basis="trade"   → ask_price_krw is None, est_price_krw 는 **추정치**
+            "price_basis": basis,
+            "ask_price_krw": cand.ask_price_krw,     # 호가 없으면 None (위장 금지)
+            "est_price_krw": price,                  # 판단·예산 비교에 실제로 쓴 값
+            "price_estimated": basis != PRICE_BASIS_LISTING,
+            "price_note": (None if basis == PRICE_BASIS_LISTING else TRADE_BASIS_NOTE),
+            "ask_gap_pct": (ask_gap_pct(cand.ask_price_krw, band)
+                            if cand.ask_price_krw is not None and band.available else None),
+            "price_band": _price_band_dict(band),
+            "total_score": total,
+            "score_basis": ("agent_scores" if scored else None),
             # MVP 에는 타이밍 분석가가 없다. 없는 기능을 있는 척하지 않는다.
             "timing_signal": "unknown",
             "headline": summary["headline"],
@@ -491,14 +642,30 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
             "findings": [f.to_dict() for f in findings],
         })
 
-    items.sort(key=lambda x: x["total_score"], reverse=True)
+    # 점수가 있는 후보가 먼저. 점수 없는 후보끼리는 **근거 표본이 많은 순**으로 둔다
+    # (임의 순서로 잘라내면 top_n 이 사실상 DB 정렬 순서가 된다 — 그건 근거가 아니다).
+    items.sort(key=lambda x: (
+        x["total_score"] is not None,
+        x["total_score"] if x["total_score"] is not None else 0.0,
+        (x["price_band"] or {}).get("sample_size", 0),
+    ), reverse=True)
     for rank, item in enumerate(items[:top_n], start=1):
         item["rank"] = rank
+
+    notes = ["타이밍 분석(market-timing-analyst)은 2차 기능입니다.",
+             "입지 분석은 데이터 수집 후 제공됩니다."]
+    if any(it["price_basis"] == PRICE_BASIS_TRADE for it in items[:top_n]):
+        notes.append(
+            "일부 후보는 현재 등록된 매물이 없어 최근 실거래 기준으로 세운 추정입니다"
+            "(price_basis=trade). 호가와 달라 즉시 매수 가능한 가격이 아닙니다.")
+    if any(it["total_score"] is None for it in items[:top_n]):
+        notes.append(
+            "점수를 매길 근거(호가 갭·입지 실측)가 없어 total_score 가 비어 있는 후보가 "
+            "있습니다. 이 후보들은 실거래 표본이 많은 순으로 나열됩니다.")
 
     return {
         "items": items[:top_n],
         "excluded": excluded,
-        "notes": ["타이밍 분석(market-timing-analyst)은 2차 기능입니다.",
-                  "입지 분석은 데이터 수집 후 제공됩니다."],
+        "notes": notes,
         "disclaimer": DISCLAIMER,
     }

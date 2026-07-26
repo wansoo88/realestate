@@ -1,0 +1,506 @@
+# region_code_verification.yaml — 시군구 코드 실호출 검증 결과 (자동 생성)
+#
+# 국토부 실거래가 API 를 코드마다 실제로 호출해 응답 건수를 센 기록이다.
+# 0건은 두 가지 뜻이 될 수 있어(죽은 코드 / 진짜 무거래) 반드시 사유를 함께 남긴다.
+#   has_data     : 데이터 확인 — 수집 대상
+#   parent_of_gu : 일반구가 있는 시의 부모 코드 — 구 코드로 수집하므로 정상 0건
+#   no_data      : 0건인데 사유 불명 — **사람이 확인해야 한다**
+#   error        : API 오류 — 재검증 필요
+#
+# 생성: 2026-07-25 · 검증 월: 202604, 202605, 202606
+
+version: "2026-07-25"
+status: verified
+endpoint: "https://apis.data.go.kr/1613000/RTMSDataSvcAptTrade/getRTMSDataSvcAptTrade"
+months: ["202604", "202605", "202606"]
+
+summary:
+  total: 94
+  has_data: 82
+  parent_of_gu: 8
+  no_data: 4
+  error: 0
+
+codes:
+  - code: "11110"
+    name: "서울특별시 종로구"
+    status: has_data
+    total: 209
+    by_month: {"202604": 89, "202605": 88, "202606": 32}
+  - code: "11140"
+    name: "서울특별시 중구"
+    status: has_data
+    total: 312
+    by_month: {"202604": 129, "202605": 124, "202606": 59}
+  - code: "11170"
+    name: "서울특별시 용산구"
+    status: has_data
+    total: 358
+    by_month: {"202604": 141, "202605": 156, "202606": 61}
+  - code: "11200"
+    name: "서울특별시 성동구"
+    status: has_data
+    total: 575
+    by_month: {"202604": 224, "202605": 223, "202606": 128}
+  - code: "11215"
+    name: "서울특별시 광진구"
+    status: has_data
+    total: 402
+    by_month: {"202604": 131, "202605": 200, "202606": 71}
+  - code: "11230"
+    name: "서울특별시 동대문구"
+    status: has_data
+    total: 970
+    by_month: {"202604": 387, "202605": 348, "202606": 235}
+  - code: "11260"
+    name: "서울특별시 중랑구"
+    status: has_data
+    total: 925
+    by_month: {"202604": 394, "202605": 318, "202606": 213}
+  - code: "11290"
+    name: "서울특별시 성북구"
+    status: has_data
+    total: 1313
+    by_month: {"202604": 499, "202605": 496, "202606": 318}
+  - code: "11305"
+    name: "서울특별시 강북구"
+    status: has_data
+    total: 504
+    by_month: {"202604": 205, "202605": 194, "202606": 105}
+  - code: "11320"
+    name: "서울특별시 도봉구"
+    status: has_data
+    total: 1021
+    by_month: {"202604": 400, "202605": 339, "202606": 282}
+  - code: "11350"
+    name: "서울특별시 노원구"
+    status: has_data
+    total: 2567
+    by_month: {"202604": 1000, "202605": 892, "202606": 675}
+  - code: "11380"
+    name: "서울특별시 은평구"
+    status: has_data
+    total: 992
+    by_month: {"202604": 350, "202605": 387, "202606": 255}
+  - code: "11410"
+    name: "서울특별시 서대문구"
+    status: has_data
+    total: 844
+    by_month: {"202604": 328, "202605": 305, "202606": 211}
+  - code: "11440"
+    name: "서울특별시 마포구"
+    status: has_data
+    total: 658
+    by_month: {"202604": 230, "202605": 277, "202606": 151}
+  - code: "11470"
+    name: "서울특별시 양천구"
+    status: has_data
+    total: 800
+    by_month: {"202604": 281, "202605": 304, "202606": 215}
+  - code: "11500"
+    name: "서울특별시 강서구"
+    status: has_data
+    total: 1572
+    by_month: {"202604": 617, "202605": 583, "202606": 372}
+  - code: "11530"
+    name: "서울특별시 구로구"
+    status: has_data
+    total: 1472
+    by_month: {"202604": 481, "202605": 696, "202606": 295}
+  - code: "11545"
+    name: "서울특별시 금천구"
+    status: has_data
+    total: 432
+    by_month: {"202604": 159, "202605": 170, "202606": 103}
+  - code: "11560"
+    name: "서울특별시 영등포구"
+    status: has_data
+    total: 973
+    by_month: {"202604": 400, "202605": 319, "202606": 254}
+  - code: "11590"
+    name: "서울특별시 동작구"
+    status: has_data
+    total: 820
+    by_month: {"202604": 316, "202605": 353, "202606": 151}
+  - code: "11620"
+    name: "서울특별시 관악구"
+    status: has_data
+    total: 845
+    by_month: {"202604": 304, "202605": 377, "202606": 164}
+  - code: "11650"
+    name: "서울특별시 서초구"
+    status: has_data
+    total: 867
+    by_month: {"202604": 306, "202605": 394, "202606": 167}
+  - code: "11680"
+    name: "서울특별시 강남구"
+    status: has_data
+    total: 1082
+    by_month: {"202604": 418, "202605": 453, "202606": 211}
+  - code: "11710"
+    name: "서울특별시 송파구"
+    status: has_data
+    total: 1483
+    by_month: {"202604": 621, "202605": 605, "202606": 257}
+  - code: "11740"
+    name: "서울특별시 강동구"
+    status: has_data
+    total: 1111
+    by_month: {"202604": 425, "202605": 484, "202606": 202}
+  - code: "28125"
+    name: "인천광역시 제물포구"
+    status: has_data
+    total: 218
+    by_month: {"202604": 84, "202605": 59, "202606": 75}
+  - code: "28155"
+    name: "인천광역시 영종구"
+    status: has_data
+    total: 371
+    by_month: {"202604": 137, "202605": 112, "202606": 122}
+  - code: "28177"
+    name: "인천광역시 미추홀구"
+    status: has_data
+    total: 852
+    by_month: {"202604": 314, "202605": 263, "202606": 275}
+  - code: "28185"
+    name: "인천광역시 연수구"
+    status: has_data
+    total: 1548
+    by_month: {"202604": 439, "202605": 558, "202606": 551}
+  - code: "28200"
+    name: "인천광역시 남동구"
+    status: has_data
+    total: 1140
+    by_month: {"202604": 406, "202605": 366, "202606": 368}
+  - code: "28237"
+    name: "인천광역시 부평구"
+    status: has_data
+    total: 1494
+    by_month: {"202604": 503, "202605": 556, "202606": 435}
+  - code: "28245"
+    name: "인천광역시 계양구"
+    status: has_data
+    total: 810
+    by_month: {"202604": 315, "202605": 256, "202606": 239}
+  - code: "28275"
+    name: "인천광역시 서해구"
+    status: has_data
+    total: 958
+    by_month: {"202604": 301, "202605": 352, "202606": 305}
+  - code: "28290"
+    name: "인천광역시 검단구"
+    status: has_data
+    total: 987
+    by_month: {"202604": 374, "202605": 320, "202606": 293}
+  - code: "28710"
+    name: "인천광역시 강화군"
+    status: has_data
+    total: 24
+    by_month: {"202604": 5, "202605": 9, "202606": 10}
+  - code: "28720"
+    name: "인천광역시 옹진군"
+    status: no_data
+    total: 0
+    by_month: {"202604": 0, "202605": 0, "202606": 0}
+    verdict: "검증 기간 0건. 같은 시도의 다른 코드 10/13개는 데이터 있음 → 신설/폐지 코드이거나 실제 무거래. 사람이 확인해야 한다."
+  - code: "41110"
+    name: "경기도 수원시"
+    status: parent_of_gu
+    total: 0
+    by_month: {"202604": 0, "202605": 0, "202606": 0}
+    verdict: "일반구가 있는 시 — LAWD_CD 는 구 단위를 쓴다(구 합계 5339건). 수집 대상에서 제외해도 손실 없음."
+  - code: "41111"
+    name: "경기도 수원시 장안구"
+    status: has_data
+    total: 983
+    by_month: {"202604": 341, "202605": 379, "202606": 263}
+  - code: "41113"
+    name: "경기도 수원시 권선구"
+    status: has_data
+    total: 1491
+    by_month: {"202604": 488, "202605": 447, "202606": 556}
+  - code: "41115"
+    name: "경기도 수원시 팔달구"
+    status: has_data
+    total: 861
+    by_month: {"202604": 322, "202605": 289, "202606": 250}
+  - code: "41117"
+    name: "경기도 수원시 영통구"
+    status: has_data
+    total: 2004
+    by_month: {"202604": 784, "202605": 705, "202606": 515}
+  - code: "41130"
+    name: "경기도 성남시"
+    status: parent_of_gu
+    total: 0
+    by_month: {"202604": 0, "202605": 0, "202606": 0}
+    verdict: "일반구가 있는 시 — LAWD_CD 는 구 단위를 쓴다(구 합계 2559건). 수집 대상에서 제외해도 손실 없음."
+  - code: "41131"
+    name: "경기도 성남시 수정구"
+    status: has_data
+    total: 496
+    by_month: {"202604": 191, "202605": 198, "202606": 107}
+  - code: "41133"
+    name: "경기도 성남시 중원구"
+    status: has_data
+    total: 569
+    by_month: {"202604": 185, "202605": 231, "202606": 153}
+  - code: "41135"
+    name: "경기도 성남시 분당구"
+    status: has_data
+    total: 1494
+    by_month: {"202604": 528, "202605": 522, "202606": 444}
+  - code: "41150"
+    name: "경기도 의정부시"
+    status: has_data
+    total: 1571
+    by_month: {"202604": 507, "202605": 559, "202606": 505}
+  - code: "41170"
+    name: "경기도 안양시"
+    status: parent_of_gu
+    total: 0
+    by_month: {"202604": 0, "202605": 0, "202606": 0}
+    verdict: "일반구가 있는 시 — LAWD_CD 는 구 단위를 쓴다(구 합계 2787건). 수집 대상에서 제외해도 손실 없음."
+  - code: "41171"
+    name: "경기도 안양시 만안구"
+    status: has_data
+    total: 893
+    by_month: {"202604": 304, "202605": 278, "202606": 311}
+  - code: "41173"
+    name: "경기도 안양시 동안구"
+    status: has_data
+    total: 1894
+    by_month: {"202604": 720, "202605": 696, "202606": 478}
+  - code: "41190"
+    name: "경기도 부천시"
+    status: parent_of_gu
+    total: 0
+    by_month: {"202604": 0, "202605": 0, "202606": 0}
+    verdict: "일반구가 있는 시 — LAWD_CD 는 구 단위를 쓴다(구 합계 2297건). 수집 대상에서 제외해도 손실 없음."
+  - code: "41192"
+    name: "경기도 부천시 원미구"
+    status: has_data
+    total: 1386
+    by_month: {"202604": 429, "202605": 491, "202606": 466}
+  - code: "41194"
+    name: "경기도 부천시 소사구"
+    status: has_data
+    total: 735
+    by_month: {"202604": 230, "202605": 267, "202606": 238}
+  - code: "41196"
+    name: "경기도 부천시 오정구"
+    status: has_data
+    total: 176
+    by_month: {"202604": 68, "202605": 51, "202606": 57}
+  - code: "41210"
+    name: "경기도 광명시"
+    status: has_data
+    total: 1082
+    by_month: {"202604": 430, "202605": 414, "202606": 238}
+  - code: "41220"
+    name: "경기도 평택시"
+    status: has_data
+    total: 2205
+    by_month: {"202604": 778, "202605": 676, "202606": 751}
+  - code: "41250"
+    name: "경기도 동두천시"
+    status: has_data
+    total: 260
+    by_month: {"202604": 84, "202605": 79, "202606": 97}
+  - code: "41270"
+    name: "경기도 안산시"
+    status: parent_of_gu
+    total: 0
+    by_month: {"202604": 0, "202605": 0, "202606": 0}
+    verdict: "일반구가 있는 시 — LAWD_CD 는 구 단위를 쓴다(구 합계 1342건). 수집 대상에서 제외해도 손실 없음."
+  - code: "41271"
+    name: "경기도 안산시 상록구"
+    status: has_data
+    total: 489
+    by_month: {"202604": 193, "202605": 152, "202606": 144}
+  - code: "41273"
+    name: "경기도 안산시 단원구"
+    status: has_data
+    total: 853
+    by_month: {"202604": 280, "202605": 319, "202606": 254}
+  - code: "41280"
+    name: "경기도 고양시"
+    status: parent_of_gu
+    total: 0
+    by_month: {"202604": 0, "202605": 0, "202606": 0}
+    verdict: "일반구가 있는 시 — LAWD_CD 는 구 단위를 쓴다(구 합계 3184건). 수집 대상에서 제외해도 손실 없음."
+  - code: "41281"
+    name: "경기도 고양시 덕양구"
+    status: has_data
+    total: 1615
+    by_month: {"202604": 491, "202605": 583, "202606": 541}
+  - code: "41285"
+    name: "경기도 고양시 일산동구"
+    status: has_data
+    total: 633
+    by_month: {"202604": 196, "202605": 220, "202606": 217}
+  - code: "41287"
+    name: "경기도 고양시 일산서구"
+    status: has_data
+    total: 936
+    by_month: {"202604": 304, "202605": 323, "202606": 309}
+  - code: "41290"
+    name: "경기도 과천시"
+    status: has_data
+    total: 119
+    by_month: {"202604": 49, "202605": 46, "202606": 24}
+  - code: "41310"
+    name: "경기도 구리시"
+    status: has_data
+    total: 1112
+    by_month: {"202604": 370, "202605": 319, "202606": 423}
+  - code: "41360"
+    name: "경기도 남양주시"
+    status: has_data
+    total: 2754
+    by_month: {"202604": 798, "202605": 956, "202606": 1000}
+  - code: "41370"
+    name: "경기도 오산시"
+    status: has_data
+    total: 852
+    by_month: {"202604": 272, "202605": 272, "202606": 308}
+  - code: "41390"
+    name: "경기도 시흥시"
+    status: has_data
+    total: 1721
+    by_month: {"202604": 601, "202605": 581, "202606": 539}
+  - code: "41410"
+    name: "경기도 군포시"
+    status: has_data
+    total: 1278
+    by_month: {"202604": 396, "202605": 418, "202606": 464}
+  - code: "41430"
+    name: "경기도 의왕시"
+    status: has_data
+    total: 770
+    by_month: {"202604": 319, "202605": 275, "202606": 176}
+  - code: "41450"
+    name: "경기도 하남시"
+    status: has_data
+    total: 994
+    by_month: {"202604": 332, "202605": 363, "202606": 299}
+  - code: "41460"
+    name: "경기도 용인시"
+    status: parent_of_gu
+    total: 0
+    by_month: {"202604": 0, "202605": 0, "202606": 0}
+    verdict: "일반구가 있는 시 — LAWD_CD 는 구 단위를 쓴다(구 합계 5150건). 수집 대상에서 제외해도 손실 없음."
+  - code: "41461"
+    name: "경기도 용인시 처인구"
+    status: has_data
+    total: 664
+    by_month: {"202604": 213, "202605": 227, "202606": 224}
+  - code: "41463"
+    name: "경기도 용인시 기흥구"
+    status: has_data
+    total: 2541
+    by_month: {"202604": 770, "202605": 771, "202606": 1000}
+  - code: "41465"
+    name: "경기도 용인시 수지구"
+    status: has_data
+    total: 1945
+    by_month: {"202604": 699, "202605": 685, "202606": 561}
+  - code: "41480"
+    name: "경기도 파주시"
+    status: has_data
+    total: 1288
+    by_month: {"202604": 434, "202605": 437, "202606": 417}
+  - code: "41500"
+    name: "경기도 이천시"
+    status: has_data
+    total: 564
+    by_month: {"202604": 182, "202605": 208, "202606": 174}
+  - code: "41550"
+    name: "경기도 안성시"
+    status: has_data
+    total: 551
+    by_month: {"202604": 196, "202605": 185, "202606": 170}
+  - code: "41570"
+    name: "경기도 김포시"
+    status: has_data
+    total: 1362
+    by_month: {"202604": 488, "202605": 431, "202606": 443}
+  - code: "41590"
+    name: "경기도 화성시"
+    status: parent_of_gu
+    total: 0
+    by_month: {"202604": 0, "202605": 0, "202606": 0}
+    verdict: "일반구가 있는 시 — LAWD_CD 는 구 단위를 쓴다(구 합계 4825건). 수집 대상에서 제외해도 손실 없음."
+  - code: "41591"
+    name: "경기도 화성시 만세구"
+    status: has_data
+    total: 366
+    by_month: {"202604": 129, "202605": 115, "202606": 122}
+  - code: "41593"
+    name: "경기도 화성시 효행구"
+    status: has_data
+    total: 491
+    by_month: {"202604": 183, "202605": 148, "202606": 160}
+  - code: "41595"
+    name: "경기도 화성시 병점구"
+    status: has_data
+    total: 968
+    by_month: {"202604": 257, "202605": 292, "202606": 419}
+  - code: "41597"
+    name: "경기도 화성시 동탄구"
+    status: has_data
+    total: 3000
+    by_month: {"202604": 1000, "202605": 1000, "202606": 1000}
+  - code: "41610"
+    name: "경기도 광주시"
+    status: has_data
+    total: 1010
+    by_month: {"202604": 291, "202605": 337, "202606": 382}
+  - code: "41630"
+    name: "경기도 양주시"
+    status: has_data
+    total: 868
+    by_month: {"202604": 311, "202605": 291, "202606": 266}
+  - code: "41650"
+    name: "경기도 포천시"
+    status: has_data
+    total: 212
+    by_month: {"202604": 73, "202605": 68, "202606": 71}
+  - code: "41670"
+    name: "경기도 여주시"
+    status: has_data
+    total: 223
+    by_month: {"202604": 76, "202605": 84, "202606": 63}
+  - code: "41800"
+    name: "경기도 연천군"
+    status: has_data
+    total: 57
+    by_month: {"202604": 21, "202605": 17, "202606": 19}
+  - code: "41820"
+    name: "경기도 가평군"
+    status: has_data
+    total: 66
+    by_month: {"202604": 24, "202605": 16, "202606": 26}
+  - code: "41830"
+    name: "경기도 양평군"
+    status: has_data
+    total: 177
+    by_month: {"202604": 71, "202605": 56, "202606": 50}
+  - code: "28110"
+    name: "인천광역시 (추가 검증)"
+    status: no_data
+    total: 0
+    by_month: {"202604": 0, "202605": 0, "202606": 0}
+    verdict: "검증 기간 0건. 같은 시도의 다른 코드 10/13개는 데이터 있음 → 신설/폐지 코드이거나 실제 무거래. 사람이 확인해야 한다."
+  - code: "28140"
+    name: "인천광역시 (추가 검증)"
+    status: no_data
+    total: 0
+    by_month: {"202604": 0, "202605": 0, "202606": 0}
+    verdict: "검증 기간 0건. 같은 시도의 다른 코드 10/13개는 데이터 있음 → 신설/폐지 코드이거나 실제 무거래. 사람이 확인해야 한다."
+  - code: "28260"
+    name: "인천광역시 (추가 검증)"
+    status: no_data
+    total: 0
+    by_month: {"202604": 0, "202605": 0, "202606": 0}
+    verdict: "검증 기간 0건. 같은 시도의 다른 코드 10/13개는 데이터 있음 → 신설/폐지 코드이거나 실제 무거래. 사람이 확인해야 한다."
