@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import datetime as dt
+import re
 from typing import Any
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
+
+from app.repositories.base import BBox, BBoxError
 
 
 class RegisterIn(BaseModel):
@@ -73,9 +76,18 @@ class AffordabilityIn(BaseModel):
     purpose: str = Field(default="live", pattern="^(live|invest)$")
     area_m2: float = Field(default=84.0, gt=0, le=1000)
     is_regulated_area: bool = False
+    #: 대출 금리 가정. **소수**다(0.04 = 연 4%). 응답 `plan.terms.annual_rate_pct` 는
+    #: 퍼센트(4.0)로 나간다 — 단위가 다르므로 필드명을 다르게 뒀다.
+    #: 사용자가 덮을 수 있게 열어 둔 이유: 금리 1%p 차이가 30년 총이자를 30% 넘게 바꾼다.
+    #: 우리가 정한 4%를 유일한 진실처럼 보여주면 그 자체가 근거 없는 단정이 된다(G2).
     annual_rate: float = Field(default=0.04, ge=0, le=0.3)
     years: int = Field(default=30, ge=1, le=50)
     apply_dti: bool = False
+    #: 희망 매매가(원). 주면 응답에 `plan`(필요 대출·부족액·월 원리금)이 붙는다.
+    #: 안 주면 응답은 예전과 완전히 동일하다 — 기존 클라이언트는 영향받지 않는다.
+    #: 상한 1,000억: 슬라이더 오조작이나 단위 실수(만원↔원)를 **조용히 계산하지 않고**
+    #: 422 로 되돌린다. 0·음수도 422다(가격 없는 계획은 계획이 아니다).
+    target_price_krw: int | None = Field(default=None, gt=0, le=100_000_000_000)
 
 
 # ---------------------------------------------------------------------------
@@ -112,9 +124,57 @@ class RejectIn(BaseModel):
     reason: str | None = Field(default=None, max_length=500)
 
 
+#: 법정동코드는 숫자만이다 — 시도(2) · 시군구(5) · 읍면동(8) · 리 포함(10).
+#: **왜 정규식으로 막나 (SR21-4)**: 접두 매칭에 `%`·`_` 가 섞이면 SQL `LIKE` 가
+#: 에러 없이 전 지역을 매칭해 "강남만 보기"가 조용히 "전국"이 된다. 인젝션은 아니지만
+#: 실패가 실패로 보이지 않아서 더 나쁘다 — 그래서 **거절**한다(조용히 지우지 않는다).
+_REGION_CODE_RE = re.compile(r"^\d{2,10}$")
+
+
 class RecommendationIn(BaseModel):
     region_codes: list[str] = Field(default_factory=list, max_length=50)
+    #: "이 주변에서 검색" — 지도에서 보고 있는 범위 (REC-5).
+    #: 형식은 `/map/complexes` 의 `bbox` 와 **같다**: `minLon,minLat,maxLon,maxLat`.
+    #: 형식이 갈라지면 프론트가 같은 값을 두 번 다르게 만들어야 하고, 그러면
+    #: 지도에 보이는 범위와 추천 대상이 언젠가 조용히 어긋난다.
+    #:
+    #: `region_codes` 와 **둘 다 오면 교집합**이다(지역도 고르고 "이 주변"도 눌렀다면
+    #: 둘 다 만족하는 게 자연스럽다). 둘 다 없으면 기존대로 전체.
+    bbox: str | None = Field(
+        default=None, max_length=100,
+        description="minLon,minLat,maxLon,maxLat (WGS84). /map/complexes 와 같은 형식")
     purpose: str = Field(default="live", pattern="^(live|invest)$")
     budget_override_krw: int | None = Field(default=None, ge=0)
     agents: list[str] | None = None
     top_n: int = Field(default=10, ge=1, le=50)
+
+    @field_validator("region_codes")
+    @classmethod
+    def _check_region_codes(cls, value: list[str]) -> list[str]:
+        out: list[str] = []
+        for raw in value:
+            code = str(raw).strip()
+            if not _REGION_CODE_RE.match(code):
+                raise ValueError(
+                    f"region_codes 는 숫자 2~10자리 법정동코드여야 합니다: {code!r}")
+            out.append(code)
+        return out
+
+    @field_validator("bbox")
+    @classmethod
+    def _check_bbox(cls, value: str | None) -> str | None:
+        """형식·좌표범위·면적 상한을 여기서 막는다 → 위반이면 **422**.
+
+        파싱 결과를 버리고 원문을 그대로 둔다: `criteria_snapshot` 은 재현성 근거라
+        **사용자가 보낸 값 그대로** 남아야 한다(러너가 같은 파서로 다시 읽는다).
+        """
+        if value is None:
+            return None
+        text = value.strip()
+        if not text:
+            return None                     # 빈 문자열은 "안 보냄"과 같게 취급한다
+        try:
+            BBox.parse(text)
+        except BBoxError as exc:
+            raise ValueError(str(exc)) from exc
+        return text

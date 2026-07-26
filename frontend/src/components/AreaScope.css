@@ -1,0 +1,94 @@
+/* 이 주변 — 분석 지역(RegionPicker) 바로 위. 같은 카드 문법을 쓰되 자리로 순서를 말한다
+   (빠른 길이 먼저, 정밀한 길이 다음). */
+.scope {
+  margin: 0 0 var(--sp-2);
+  padding: var(--sp-3);
+  border-radius: var(--r-card);
+  background: var(--badge-bg);
+}
+
+.scope__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+
+.scope__title {
+  margin: 0;
+  font-size: var(--fs-footnote);
+  font-weight: 600;
+}
+
+.scope__catch {
+  min-height: var(--touch-min);
+  padding: 0 var(--sp-2);
+  color: var(--accent);
+  font-size: var(--fs-caption);
+  font-weight: 600;
+  text-align: right;
+}
+
+.scope__catch:disabled {
+  color: var(--text-estimated);
+  cursor: default;
+}
+
+.scope__hint,
+.scope__detail,
+.scope__note,
+.scope__why {
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-caption);
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+.scope__why {
+  color: var(--text-estimated);
+}
+
+.scope__note--weak {
+  color: var(--text-estimated);
+}
+
+.scope__chips {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin: var(--sp-2) 0 0;
+  padding: 0;
+}
+
+/* 칩 전체가 해제 버튼(RegionPicker 와 같은 시각 언어) */
+.scope__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 34px;
+  padding: 0 var(--sp-3);
+  border-radius: var(--r-pill);
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: var(--fs-caption);
+  font-weight: 600;
+}
+
+/* 낡은 범위 — 색으로도 "지금 화면과 다르다"를 말한다(문구가 단일 근거가 되지 않게) */
+.scope__chip--stale {
+  background: var(--warn);
+  color: #000;
+}
+
+.scope__chip-x {
+  font-size: var(--fs-footnote);
+  opacity: 0.8;
+}
+
+.scope__stale {
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-caption);
+  line-height: 1.6;
+  color: var(--warn-text);
+}

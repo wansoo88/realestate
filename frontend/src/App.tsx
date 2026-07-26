@@ -17,10 +17,10 @@
  * DOM 은 한 벌이고 배치만 CSS 가 바꾼다 — 화면 크기별로 컴포넌트를 두 번 렌더하면
  * 접근성 이름이 중복되고 상태가 갈라진다.
  */
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { logout, type Preferences, type Profile } from "./api/client";
 import { AdminScreen } from "./components/AdminScreen";
-import { AffordabilityPanel } from "./components/AffordabilityPanel";
+import { AffordabilityPanel, type PlanBasis } from "./components/AffordabilityPanel";
 import { AuthForm } from "./components/AuthForm";
 import { BottomSheet, type SnapPoint } from "./components/BottomSheet";
 import { ComplexCard } from "./components/ComplexCard";
@@ -29,15 +29,17 @@ import { FilterRail } from "./components/FilterRail";
 import { MapView } from "./components/MapView";
 import { RecommendPanel } from "./components/RecommendPanel";
 import { useAdminUsers } from "./hooks/useAdminUsers";
-import { useAffordability, type Purpose } from "./hooks/useAffordability";
+import { useAffordability, type AffordabilityState, type Purpose } from "./hooks/useAffordability";
 import { useAuth } from "./hooks/useAuth";
 import { useMapArea } from "./hooks/useMapArea";
 import { useProfile } from "./hooks/useProfile";
 import { useRecommendation } from "./hooks/useRecommendation";
+import { readTargetPrice } from "./lib/affordability";
 import { SORT_OPTIONS, isSortKey, sortComplexes, type SortKey } from "./lib/complexSort";
 import { formatKrwShort } from "./lib/format";
 import { filterChips, type MapFilterState } from "./lib/mapFilters";
 import { NOTICE_NOT_ADVICE, NOTICE_TRADE_DELAY } from "./lib/notices";
+import { appliedScope, scopeFields, type SearchScope } from "./lib/searchScope";
 import "./App.css";
 
 type Tab = "map" | "money" | "advice";
@@ -48,14 +50,37 @@ const TABS: Array<{ id: Tab; label: string }> = [
   { id: "advice", label: "AI 추천" },
 ];
 
+/** 실거주 기준 고정. 투자 목적(`invest`)은 세율·한도가 달라 별도 화면이 필요하다(2차). */
+const PURPOSE: Purpose = "live";
+
 interface HomeProps {
   preferences: Preferences;
   onEditConditions: () => void;
   /** 관리자 전용 진입점. 관리자가 아니면 **null** 이라 DOM 에 존재하지 않는다. */
   adminEntry?: React.ReactNode;
+  /**
+   * 실구매 가능 금액 + 자금계획. **Authenticated 가 들고 있다** —
+   * 조건 화면(희망가 슬라이더 범위)과 지도 화면(자금계획)이 같은 한도를 봐야 하는데,
+   * 두 화면은 서로 형제라 여기서 계산하면 조건 화면이 한도를 알 수 없다.
+   */
+  afford: AffordabilityState;
+  /** 조건에 저장된 희망 매매가(원). null = 정하지 않음 — **0 과 다르다**. */
+  targetPriceKrw: number | null;
+  /**
+   * 지금 고른 단지의 가격을 위로 올린다(자금계획의 what-if 기준).
+   * 숫자만 올리는 이유: 훅의 의존성이 객체 정체성이면 지도 재조회마다 요청이 새로 나간다.
+   */
+  onPlanTargetChange: (krw: number | null) => void;
 }
 
-export function Home({ preferences, onEditConditions, adminEntry }: HomeProps) {
+export function Home({
+  preferences,
+  onEditConditions,
+  adminEntry,
+  afford,
+  targetPriceKrw,
+  onPlanTargetChange,
+}: HomeProps) {
   const [tab, setTab] = useState<Tab>("map");
   const [snap, setSnap] = useState<SnapPoint>("peek");
   const [selected, setSelected] = useState<number | null>(null);
@@ -64,18 +89,31 @@ export function Home({ preferences, onEditConditions, adminEntry }: HomeProps) {
   const [sort, setSort] = useState<SortKey>("default");
   /** AI 추천을 돌릴 시군구(5자리). 빈 배열 = 수도권 전체 — 그 사실은 RegionPicker 가 화면에 적는다. */
   const [regionCodes, setRegionCodes] = useState<string[]>([]);
-  const [purpose] = useState<Purpose>("live");
+  /**
+   * "이 주변" — 사용자가 버튼을 누른 **그 순간의** 지도 범위를 고정해 둔다.
+   * 실행 시점에 다시 읽지 않는 이유는 AreaScope 주석 참고(조용히 바뀌는 조건 금지).
+   */
+  const [areaBbox, setAreaBbox] = useState<string | null>(null);
+  /** 이번 분석이 실제로 돌아간 범위. 결과가 나온 뒤 조건을 바꿔도 결과 옆 표기는 남아야 한다. */
+  const [appliedScopeState, setAppliedScope] = useState<SearchScope | null>(null);
 
   // 필터 스위치 — 기본은 켜짐. 끌 수 있어야 "왜 안 보이지?"에 사용자가 스스로 답한다.
   const [budgetApplied, setBudgetApplied] = useState(true);
   const [preferApplied, setPreferApplied] = useState(true);
 
-  const afford = useAffordability(true, purpose);
   const budgetKrw = afford.data?.max_purchase_krw ?? null;
 
   const filters: MapFilterState = useMemo(
-    () => ({ budgetKrw, budgetApplied, prefer: preferences.prefer ?? null, preferApplied }),
-    [budgetKrw, budgetApplied, preferences.prefer, preferApplied],
+    () => ({
+      budgetKrw,
+      budgetApplied,
+      // 희망가를 정했으면 지도 상한도 그 값이다 — 추천(budget_override_krw)과 같은 숫자를
+      // 써야 "추천에는 뜨는데 지도엔 없는 단지"가 생기지 않는다(lib/mapFilters 주석).
+      targetPriceKrw,
+      prefer: preferences.prefer ?? null,
+      preferApplied,
+    }),
+    [budgetKrw, budgetApplied, targetPriceKrw, preferences.prefer, preferApplied],
   );
 
   const map = useMapArea(filters);
@@ -118,16 +156,67 @@ export function Home({ preferences, onEditConditions, adminEntry }: HomeProps) {
 
   const startRecommendation = useCallback(() => {
     // 예산은 서버가 /affordability 로 다시 계산한다 — 화면이 계산한 값을 보내면 진실이 두 개가 된다.
+    // **다만 희망 매매가는 사용자가 정한 입력**이라 그대로 실어 보낸다(budget_override_krw).
+    // 이게 없으면 슬라이더는 "저장만 되고 아무 데도 안 쓰이는 값"이 된다(PREF-1).
     // 지역은 **사용자가 고른 것을 그대로** 보낸다. 빈 배열이면 서버가 전체에서 찾는다
     // (예전엔 아예 보내지 않아 항상 수도권 전체였고, 그래서 추천이 엉뚱하게 느껴졌다).
-    void rec.start({ purpose, top_n: 10, region_codes: regionCodes });
-  }, [purpose, rec, regionCodes]);
+    // "이 주변"(bbox)이 함께 있으면 서버가 **교집합**으로 좁힌다(api-spec).
+    const scope: SearchScope = { regionCodes, bbox: areaBbox };
+    // 화면에 적는 범위는 **실제로 보낸 것**과 같아야 한다 — 그래서 같은 함수로 되돌려 만든다.
+    setAppliedScope(appliedScope(scope));
+    void rec.start({
+      purpose: PURPOSE,
+      top_n: 10,
+      budget_override_krw: targetPriceKrw,
+      ...scopeFields(scope),
+    });
+  }, [areaBbox, rec, regionCodes, targetPriceKrw]);
+
+  const clearArea = useCallback(() => setAreaBbox(null), []);
 
   const chips = filterChips(filters);
   const toggleChip = useCallback((id: "budget" | "area" | "built") => {
     if (id === "budget") setBudgetApplied((v) => !v);
     else setPreferApplied((v) => !v);
   }, []);
+
+  /* ── 단지 기준 자금계획 ─────────────────────────────────────────────────
+     지도·목록에서 고른 단지의 가격으로 "이 집을 사려면 뭐가 필요한가"를 계산한다.
+     그 값은 `recent_price_krw` = **최근 실거래 기반 추정치**지 호가가 아니다 —
+     `price_confidence` 를 그대로 물려 화면이 추정임을 말한다. */
+  const planComplex = useMemo(
+    () => map.items.find((c) => c.id === selected) ?? null,
+    [map.items, selected],
+  );
+  const planComplexPrice = planComplex?.recent_price_krw ?? null;
+
+  // 숫자만 위로 올린다. 지도를 다시 조회하면 같은 단지라도 객체가 새로 오는데,
+  // 객체를 올리면 가격이 그대로여도 요청이 한 번 더 나간다.
+  useEffect(() => {
+    onPlanTargetChange(planComplexPrice);
+    return () => onPlanTargetChange(null);
+  }, [planComplexPrice, onPlanTargetChange]);
+
+  const planBasis: PlanBasis | null =
+    planComplex && planComplexPrice !== null
+      ? {
+          kind: "complex",
+          name: planComplex.name,
+          // `/map/complexes` 는 확정가를 주지 않는다 — `price_confidence` 는 `estimated`
+          // 아니면 `unknown` 뿐이다(api-spec §4). 둘 다 "지금 살 수 있는 호가"가 아니므로
+          // 추정으로 표기한다. 모르는 쪽을 확정으로 올리는 일은 하지 않는다.
+          estimated: true,
+          asOf: planComplex.price_as_of,
+        }
+      : targetPriceKrw !== null
+        ? { kind: "manual" }
+        : null;
+
+  /** 고른 단지에 시세 근거가 없으면 그 사실을 말한다(내 희망가 계획으로 조용히 되돌아가지 않게). */
+  const planComplexNoPrice =
+    planComplex && planComplexPrice === null ? planComplex.name : null;
+
+  const clearPlanComplex = useCallback(() => setSelected(null), []);
 
   const title =
     tab === "map"
@@ -234,6 +323,17 @@ export function Home({ preferences, onEditConditions, adminEntry }: HomeProps) {
                     // 전국 순위처럼 읽히지 않게 정렬 범위를 밝힌다
                     <p className="app__scope">지금 보이는 지도 범위 기준</p>
                   )}
+                  {/* 고른 단지의 자금계획으로 바로 건너뛴다 — 계산은 이미 돌고 있고,
+                      이 버튼은 그 결과가 어디 있는지 알려 주는 길이다. */}
+                  {planComplex && (
+                    <button
+                      type="button"
+                      className="app__planjump"
+                      onClick={() => setTab("money")}
+                    >
+                      {planComplex.name} 자금계획 보기
+                    </button>
+                  )}
                   {listItems.map((item) => (
                     <ComplexCard
                       key={item.id}
@@ -256,6 +356,10 @@ export function Home({ preferences, onEditConditions, adminEntry }: HomeProps) {
               error={afford.error}
               needsProfile={afford.needsProfile}
               onEditConditions={onEditConditions}
+              planBasis={planBasis}
+              noPriceComplexName={planComplexNoPrice}
+              onClearComplex={clearPlanComplex}
+              targetPriceKrw={targetPriceKrw}
             />
           )}
 
@@ -267,6 +371,12 @@ export function Home({ preferences, onEditConditions, adminEntry }: HomeProps) {
               budgetKrw={budgetKrw}
               regionCodes={regionCodes}
               onRegionsChange={setRegionCodes}
+              // 지도가 들고 있는 범위를 **그대로** 넘긴다(화면이 bbox 를 새로 계산하지 않는다).
+              currentBbox={map.bbox}
+              areaBbox={areaBbox}
+              onCaptureArea={setAreaBbox}
+              onClearArea={clearArea}
+              appliedScope={appliedScopeState}
               onStart={startRecommendation}
               onCancel={rec.cancel}
               onShowOnMap={showOnMap}
@@ -299,6 +409,31 @@ export function Authenticated() {
   const { status, profile, preferences, error, reload, save } = useProfile();
   const [editing, setEditing] = useState(false);
   const [adminOpen, setAdminOpen] = useState(false);
+
+  /**
+   * 희망 매매가 — **저장된 선호가 정본**이다(`prefer.target_price_krw`).
+   * 이 한 값이 세 곳으로 동시에 나간다:
+   *   ① `/affordability` 의 `target_price_krw` (자금계획)
+   *   ② `/recommendations` 의 `budget_override_krw` (AI 추천 예산)
+   *   ③ `/map/complexes` 의 `max_price_krw` (지도 상한)
+   * 셋 중 하나라도 빠지면 "화면에만 있는 조건"이 된다 — App.test 가 ①②를 고정한다.
+   */
+  const targetPriceKrw = readTargetPrice(preferences.prefer);
+
+  /** 지도에서 고른 단지의 가격(what-if). 있으면 자금계획은 이쪽을 기준으로 선다. */
+  const [complexTargetKrw, setComplexTargetKrw] = useState<number | null>(null);
+
+  /**
+   * 자산이 없으면 계산 자체가 성립하지 않으므로 요청하지 않는다(422 를 일부러 받지 않는다).
+   * 조건 화면(희망가 슬라이더 범위)도 이 결과의 `max_purchase_krw` 를 쓰기 때문에
+   * 훅이 여기 있어야 한다 — Home 안에 있으면 조건 화면이 한도를 볼 수 없다.
+   */
+  const afford = useAffordability(
+    status === "ready",
+    PURPOSE,
+    complexTargetKrw ?? targetPriceKrw,
+  );
+  const maxPurchaseKrw = afford.data?.max_purchase_krw ?? null;
 
   // 관리자인지는 **서버만 안다** — 이 훅이 /admin/users 를 한 번 물어보고,
   // 200 을 받았을 때에만 availability 가 "available" 이 된다(useAdminUsers 주석 참고).
@@ -372,6 +507,9 @@ export function Authenticated() {
           onSave={handleSave}
           // 최초 입력(프로필 없음)에는 취소가 없다 — 되돌아갈 화면이 아직 없다.
           onClose={status === "missing" ? undefined : () => setEditing(false)}
+          // 희망가 슬라이더의 범위 기준. 아직 계산 전이면 null 이고, 그때 화면은
+          // 한도를 그리지 않는다(모르는 값을 눈금으로 만들지 않는다).
+          maxPurchaseKrw={maxPurchaseKrw}
         />
       </>
     );
@@ -382,6 +520,9 @@ export function Authenticated() {
       preferences={preferences}
       onEditConditions={() => setEditing(true)}
       adminEntry={adminEntry}
+      afford={afford}
+      targetPriceKrw={targetPriceKrw}
+      onPlanTargetChange={setComplexTargetKrw}
     />
   );
 }

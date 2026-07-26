@@ -1,0 +1,76 @@
+/* 희망 매매가 — 값이 주인공, 슬라이더는 "한도 대비 어디쯤"을 보여주는 보조 눈금. */
+
+.target {
+  padding: var(--sp-3) 0;
+}
+
+.target__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+
+.target__label {
+  font-size: var(--fs-footnote);
+  color: var(--text-secondary);
+}
+
+.target__value {
+  font-size: var(--fs-price);
+  font-weight: 700;
+}
+
+.target__note {
+  margin: var(--sp-1) 0 var(--sp-3);
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.target__slider input[type="range"] {
+  width: 100%;
+  /* 엄지로 끄는 컨트롤이라 터치 타깃을 넉넉히(한 손 도달 범위 · 44px 규약) */
+  min-height: 44px;
+}
+
+.target__scale {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  margin-top: -2px;
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+}
+
+.target__limit {
+  /* 한도는 눈금 중 유일하게 "내 사실"이라 조금 더 선명하게 */
+  color: var(--text);
+  font-weight: 600;
+}
+
+.target__state {
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.target__state--over {
+  color: var(--warn-text);
+}
+
+.target__state--weak {
+  opacity: 0.85;
+}
+
+.target__clear {
+  margin-top: var(--sp-2);
+  min-height: 44px;
+  padding: 0 var(--sp-3);
+  border-radius: var(--r-btn);
+  border: 0.5px solid var(--hairline);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--fs-caption);
+}

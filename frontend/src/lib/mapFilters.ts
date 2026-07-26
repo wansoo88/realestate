@@ -12,13 +12,31 @@ import type { Preferences } from "../api/client";
 import { formatKrwShort } from "./format";
 
 export interface MapFilterState {
-  /** `/affordability` 로 계산한 실구매 가능 금액. 모르면 null. */
+  /** `/affordability` 로 계산한 **최대** 실구매 가능 금액. 모르면 null. */
   budgetKrw: number | null;
   /** 예산 필터를 켜 두었는가(사용자가 끌 수 있다). */
   budgetApplied: boolean;
+  /**
+   * 사용자가 정한 희망 매매가. 있으면 **이쪽이 지도 상한**이다.
+   *
+   * 왜 한도가 아니라 희망가를 쓰는가: 같은 희망가가 AI 추천에도
+   * `budget_override_krw` 로 나간다. 지도만 한도(8.5억) 기준이고 추천만 희망가(9억)
+   * 기준이면, 추천에는 뜨는데 지도에는 없는 단지가 생긴다 — 같은 화면이 두 가지
+   * 예산을 말하는 셈이다. 한도를 넘겨 잡았어도 그대로 쓴다(못 사는 집을 **보는 것**은
+   * 이 기능의 목적이고, 살 수 있는지는 자금계획이 숫자로 답한다).
+   */
+  targetPriceKrw?: number | null;
   prefer: Preferences["prefer"] | null;
   /** 선호(면적·연식) 필터를 켜 두었는가. */
   preferApplied: boolean;
+}
+
+/** 지도·추천이 함께 쓰는 실효 예산 상한. 희망가가 있으면 그것, 없으면 한도. */
+export function effectiveBudgetKrw(f: MapFilterState): number | null {
+  const target = positive(f.targetPriceKrw);
+  if (target !== undefined) return target;
+  const budget = positive(f.budgetKrw);
+  return budget ?? null;
 }
 
 export interface MapQuery {
@@ -40,8 +58,8 @@ export function buildMapQuery(bbox: string, zoom: number, f: MapFilterState): Ma
   const q: MapQuery = { bbox, zoom };
 
   if (f.budgetApplied) {
-    const budget = positive(f.budgetKrw);
-    if (budget !== undefined) q.max_price_krw = budget;
+    const budget = effectiveBudgetKrw(f);
+    if (budget !== null) q.max_price_krw = budget;
   }
 
   if (f.preferApplied && f.prefer) {
@@ -72,7 +90,16 @@ export interface FilterChip {
 export function filterChips(f: MapFilterState): FilterChip[] {
   const chips: FilterChip[] = [];
 
-  if (positive(f.budgetKrw) !== undefined) {
+  const target = positive(f.targetPriceKrw);
+  if (target !== undefined) {
+    // 희망가를 정했으면 칩도 그렇게 말해야 한다 — "내 예산"이라고 쓰면 사용자가 정한 값이
+    // 아니라 서버가 계산한 한도로 읽힌다(둘은 다른 숫자다).
+    chips.push({
+      id: "budget",
+      label: `희망가 ${formatKrwShort(target)} 이하`,
+      active: f.budgetApplied,
+    });
+  } else if (positive(f.budgetKrw) !== undefined) {
     chips.push({
       id: "budget",
       label: `내 예산 ${formatKrwShort(f.budgetKrw)} 기준`,

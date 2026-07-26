@@ -21,6 +21,7 @@ from fastapi import (
     status,
 )
 
+from app.agents.llm import build_llm
 from app.agents.recommend import run_recommendation_job
 from app.api import schemas
 from app.api.cookies import (
@@ -326,6 +327,9 @@ def affordability(body: schemas.AffordabilityIn, user: CurrentUser,
         prop=PropertyFacts(area_m2=body.area_m2,
                            is_regulated_area=body.is_regulated_area,
                            purpose=body.purpose),
+        # 희망 매매가를 주면 `plan` 이 붙는다(필요 대출·부족액·월 원리금).
+        # 단지를 클릭할 때마다 그 단지 가격으로 다시 호출하는 것이 정상 사용법이다.
+        target_price_krw=body.target_price_krw,
     )
     payload = result.to_api()
     payload["assumptions"].append("기존 대출 상환액 미입력 — 0으로 계산했습니다")
@@ -440,6 +444,11 @@ def create_recommendation(body: schemas.RecommendationIn, user: CurrentUser,
 
     배포 최소구성이 redis 없는 api+db 라 별도 워커/큐를 두지 않는다(개인용, 동시성 낮음).
     러너가 프로필 복호화·후보 조회·파이프라인·저장을 맡고, GET 으로 결과를 폴링한다.
+
+    ⚠️ **LLM 을 여기서 주입한다.** 예전에는 `llm=` 을 넘기지 않아 파이프라인이 항상
+    `None` 을 받았고, 그래서 "AI 추천"이 실제로는 언제나 규칙 기반 요약이었다.
+    키가 없으면 `build_llm` 이 `None` 을 돌려주고 동작은 그대로다 —
+    **다만 그 사실이 결과 `notes` 에 남는다**(조용히 규칙 기반으로 도는 상태를 없앤다).
     """
     job_id = "rec_" + secrets.token_urlsafe(16)
     criteria = body.model_dump()
@@ -451,6 +460,8 @@ def create_recommendation(body: schemas.RecommendationIn, user: CurrentUser,
     background_tasks.add_task(
         run_recommendation_job, repo=repo, settings=settings,
         job_id=job_id, user_id=user.id, criteria=criteria,
+        # 키가 없으면 None → 규칙 기반. 키 값은 로그·응답 어디에도 싣지 않는다.
+        llm=build_llm(settings),
     )
 
     response.headers["Location"] = f"/api/v1/recommendations/{job_id}"

@@ -16,9 +16,80 @@ from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, NamedTuple, Protocol, runtime_checkable
 
 from app.domain.location.models import BuildingLocationFact, LocationFacts
+
+# ---------------------------------------------------------------------------
+# 조회 범위 (지도 · 추천 공용)
+#
+# `/map/complexes` 와 `POST /recommendations` 가 **같은 형식**의 bbox 를 받는다.
+# 형식이 갈라지면 프론트가 "지도에서 보고 있는 범위"를 두 번 다르게 만들어야 하고,
+# 그 순간 지도에 보이는 것과 추천 대상이 조용히 어긋난다.
+# 그래서 파싱·검증을 **한 곳**에 둔다.
+# ---------------------------------------------------------------------------
+
+#: bbox 한 변의 최대 각도. 2도면 수도권 전체(약 1.5° × 1.2°)를 덮는다.
+#: 이보다 넓은 요청은 "이 주변"이 아니라 전국 스캔이고, 서버를 태운다.
+MAX_BBOX_DEGREES = 2.0
+
+
+class BBoxError(ValueError):
+    """bbox 문자열이 계약을 벗어났다. 호출부가 400/422 로 옮긴다."""
+
+
+class BBox(NamedTuple):
+    """지도 범위. `minLon,minLat,maxLon,maxLat` (WGS84 / EPSG:4326).
+
+    순서를 헷갈리기 쉬워(경도가 먼저다) 튜플이 아니라 이름 있는 필드로 든다 —
+    `lat/lon` 이 뒤집히면 조회는 **에러 없이 0건**을 돌려주고, 그건 "그 범위에
+    단지가 없다"와 구분되지 않는다(이 프로젝트가 가장 경계하는 조용한 실패).
+    """
+
+    min_lon: float
+    min_lat: float
+    max_lon: float
+    max_lat: float
+
+    @classmethod
+    def parse(cls, raw: str) -> BBox:
+        """`"126.9,37.5,127.1,37.6"` → BBox. 어긋나면 `BBoxError`."""
+        if not isinstance(raw, str):
+            raise BBoxError("bbox 는 minLon,minLat,maxLon,maxLat 형식의 문자열이어야 합니다")
+        parts = [p.strip() for p in raw.split(",")]
+        if len(parts) != 4:
+            raise BBoxError("bbox 는 minLon,minLat,maxLon,maxLat 형식이어야 합니다")
+        try:
+            values = [float(p) for p in parts]
+        except (TypeError, ValueError) as exc:
+            raise BBoxError("bbox 의 좌표는 숫자여야 합니다") from exc
+        # NaN/Inf 는 float() 를 통과한다. 비교 연산이 전부 False 라 아래 검증을
+        # 조용히 빠져나가고, SQL 에서는 빈 결과가 된다.
+        if any(v != v or v in (float("inf"), float("-inf")) for v in values):
+            raise BBoxError("bbox 의 좌표가 유효한 숫자가 아닙니다")
+
+        box = cls(*values)
+        if not (-180.0 <= box.min_lon <= 180.0 and -180.0 <= box.max_lon <= 180.0):
+            raise BBoxError("경도는 -180~180 범위여야 합니다")
+        if not (-90.0 <= box.min_lat <= 90.0 and -90.0 <= box.max_lat <= 90.0):
+            raise BBoxError("위도는 -90~90 범위여야 합니다")
+        if box.min_lon >= box.max_lon or box.min_lat >= box.max_lat:
+            raise BBoxError("bbox 범위가 올바르지 않습니다(min 은 max 보다 작아야 합니다)")
+        if box.width > MAX_BBOX_DEGREES or box.height > MAX_BBOX_DEGREES:
+            raise BBoxError("조회 범위가 너무 넓습니다")
+        return box
+
+    @property
+    def width(self) -> float:
+        return self.max_lon - self.min_lon
+
+    @property
+    def height(self) -> float:
+        return self.max_lat - self.min_lat
+
+    def as_text(self) -> str:
+        """받은 그대로 되돌려 주기 위한 정규 표기(로그·재현성 스냅샷용)."""
+        return f"{self.min_lon},{self.min_lat},{self.max_lon},{self.max_lat}"
 
 # --- 가입 승인 상태 (migrations/009) ---------------------------------------
 #: 기본값. 가입은 되지만 **로그인은 안 된다** — 관리자가 검토할 때까지.
@@ -88,8 +159,12 @@ class ProfileRecord:
 class ComplexSummary:
     id: int
     name: str
-    lon: float
-    lat: float
+    #: ⚠️ **None 일 수 있다.** 주소 지오코딩이 안 된 단지는 `complex.geom` 이 NULL 이고,
+    #: `recommendation_candidates`(지역 조회)는 그런 단지도 그대로 돌려준다 —
+    #: 좌표가 없다고 추천 대상에서 빼면 사용자는 그 단지를 영영 못 본다.
+    #: 반대로 `complexes_in_bbox`·bbox 추천은 공간 연산이라 **구조적으로 빠진다**.
+    lon: float | None
+    lat: float | None
     region_code: str
     built_year: int | None = None
     total_households: int | None = None
@@ -182,10 +257,23 @@ class RecommendationRepository(Protocol):
     그 침묵이 위험해서 Protocol 로 박아 둔다: 두 구현 모두 `isinstance` 로 검증한다.
     """
 
+    #: 후보 단지 조회.
+    #:
+    #: ⚠️ `region_codes` 와 `bbox` 가 **둘 다 오면 교집합**이다(AND). 사용자가 지역을
+    #:    고르고 "이 주변"까지 눌렀다면 둘 다 만족하는 단지를 원한 것이다.
+    #:    ⚠️ `bbox` 는 **좌표가 있는 단지만** 찾는다 — geom 이 NULL 이면 공간 연산이
+    #:       NULL 을 내고 자연히 빠진다. 호출부는 이 사실을 사용자에게 고지해야 한다
+    #:       (좌표 확보율이 100% 가 아니다 · `geocode_coverage`).
     def recommendation_candidates(
         self, *, region_codes: list[str], max_price_krw: int | None = None,
-        limit: int = 50,
+        limit: int = 50, bbox: BBox | None = None,
     ) -> list[ComplexSummary]: ...
+
+    #: 좌표 확보 현황 `(좌표 있는 단지 수, 전체 단지 수)`.
+    #: bbox 검색에서 **몇 개가 구조적으로 빠지는지**를 숫자로 말하기 위한 것이다.
+    #: 고정 문구("약 5%")로 적으면 수집이 진행돼도 영영 낡은 값이 남는다.
+    def geocode_coverage(
+        self, *, region_codes: list[str] | None = None) -> tuple[int, int]: ...
 
     #: 활성 호가. **중복 포함** — 대표건 선정은 러너의 group_duplicates 몫이다.
     def listings_for_complex(self, complex_id: int) -> list[Any]: ...

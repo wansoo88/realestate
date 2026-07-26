@@ -92,6 +92,43 @@ describe("useMapArea", () => {
     expect(spy).toHaveBeenCalledTimes(1);
   });
 
+  /**
+   * "이 주변에서 찾기"는 이 훅이 들고 있는 범위를 그대로 쓴다(화면이 다시 계산하지 않는다).
+   * 그래서 범위가 **밖에서 읽히고**, 조회 응답에 덮여 사라지지 않아야 한다.
+   */
+  describe("현재 지도 범위 노출", () => {
+    it("지도를 움직이기 전에는 범위가 없다(= 아직 준비 안 됨)", () => {
+      const { result } = renderHook(() => useMapArea(FILTERS));
+      expect(result.current.bbox).toBeNull();
+    });
+
+    it("디바운스를 기다리지 않고 즉시 반영된다(버튼이 늦게 켜지면 안 된다)", () => {
+      const { result } = renderHook(() => useMapArea(FILTERS));
+      act(() => result.current.onBoundsChange("1,2,3,4", 15));
+      expect(result.current.bbox).toBe("1,2,3,4");
+      expect(spy).not.toHaveBeenCalled(); // 조회는 여전히 디바운스된다
+    });
+
+    it("조회 응답이 도착해도 범위를 덮어 지우지 않는다", async () => {
+      const { result } = renderHook(() => useMapArea(FILTERS));
+      act(() => result.current.onBoundsChange("1,2,3,4", 15));
+      await tick(MAP_DEBOUNCE_MS);
+
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(result.current.bbox).toBe("1,2,3,4");
+      expect(result.current.level).toBe("complex"); // 응답도 정상 반영됐다
+    });
+
+    it("마지막으로 본 범위를 들고 있는다", async () => {
+      const { result } = renderHook(() => useMapArea(FILTERS));
+      act(() => {
+        result.current.onBoundsChange("1,2,3,4", 15);
+        result.current.onBoundsChange("5,6,7,8", 15);
+      });
+      expect(result.current.bbox).toBe("5,6,7,8");
+    });
+  });
+
   it("지도를 아직 안 움직였으면 조건이 바뀌어도 요청하지 않는다(bbox 없는 호출 금지)", async () => {
     const { rerender } = renderHook((f: MapFilterState) => useMapArea(f), {
       initialProps: FILTERS,

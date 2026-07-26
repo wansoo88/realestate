@@ -36,10 +36,21 @@ interface Props {
   onChange: (codes: string[]) => void;
   /** 분석 후보 조회 상한(서버 기본값). "전체에서 찾는다"는 말이 오해되지 않게 함께 적는다. */
   candidateLimit?: number;
+  /**
+   * "이 주변"(지도 범위)이 함께 걸려 있는가.
+   * ⚠️ 켜져 있는데 이 값을 안 받으면 아래 문구가 **"수도권 전체에서 찾습니다"라고 거짓말**을 한다.
+   */
+  areaScoped?: boolean;
   disabled?: boolean;
 }
 
-export function RegionPicker({ value, onChange, candidateLimit = 50, disabled }: Props) {
+export function RegionPicker({
+  value,
+  onChange,
+  candidateLimit = 50,
+  areaScoped = false,
+  disabled,
+}: Props) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [sido, setSido] = useState<Region["sido"] | "전체">("전체");
@@ -76,8 +87,9 @@ export function RegionPicker({ value, onChange, candidateLimit = 50, disabled }:
       {/* 지금 무엇으로 찾는지 — 선택이 없을 때도 **반드시** 말한다 */}
       {value.length === 0 ? (
         <p className="regions__scope">
-          수도권 전체에서 찾습니다. 후보는 조건에 맞는 단지 중 최대 {candidateLimit}개까지만
-          분석하므로, 지역을 좁히면 원하는 동네가 후보에 들어갈 가능성이 높아집니다.
+          {areaScoped
+            ? `시군구는 고르지 않았습니다 — 지금은 "이 주변"(지도 범위)으로만 찾습니다. 시군구를 고르면 두 조건을 모두 만족하는 단지만 남습니다(교집합).`
+            : `수도권 전체에서 찾습니다. 후보는 조건에 맞는 단지 중 최대 ${candidateLimit}개까지만 분석하므로, 지역을 좁히면 원하는 동네가 후보에 들어갈 가능성이 높아집니다.`}
         </p>
       ) : (
         <ul className="regions__chips" aria-label="선택한 지역">

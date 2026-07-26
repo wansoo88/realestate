@@ -46,6 +46,7 @@ from app.domain.location.models import (
 from app.domain.valuation.models import ListingRow, TradeRow
 from app.repositories.base import (
     STATUS_APPROVED,
+    BBox,
     ComplexSummary,
     JobRecord,
     LastAdminError,
@@ -703,7 +704,15 @@ class PostgisRepository:
     #: ⚠️ 호가(listing)로 **조인해 거르지 않는다.** 공공 오픈API 에는 호가가 없어
     #:    수집이 막히면 이 테이블이 통째로 비고, INNER JOIN 이면 후보가 구조적으로 0건이 된다
     #:    (CHARTER G4: 공공API 만으로도 서비스가 성립해야 한다). 매물 수는 **정렬 신호일 뿐**이다.
-    _CANDIDATES_SQL = text("""
+    #:
+    #: ⚠️ 지역 접두 매칭에 `LIKE rc || '%'` 를 쓰지 않는다 (SR21-4).
+    #:    `%` 나 `_` 가 섞인 코드가 들어오면 `LIKE` 는 **에러 없이 전 지역을 매칭**해서
+    #:    지역 선택이 조용히 무력화된다("강남만" 이 "전국"이 된다). 인젝션은 아니지만
+    #:    실패가 실패로 보이지 않는, 이 프로젝트가 가장 경계하는 종류의 사고다.
+    #:    `left(region_code, length(rc)) = rc` 는 와일드카드 개념 자체가 없어 구조적으로 막힌다
+    #:    (접두 매칭 의미는 동일하고, 이 조건은 원래 인덱스를 타지 않아 비용도 같다).
+    #:    API 계층의 형식 검증(422)은 그 앞의 1차 방어다 — 여기가 마지막 문이다.
+    _CANDIDATES_SQL_TEMPLATE = """
         SELECT c.id,
                c.name,
                ST_X(c.geom) AS lon,
@@ -744,11 +753,11 @@ class PostgisRepository:
               AND NOT tr2.is_cancelled
               AND tr2.contract_date >= current_date - CAST(:trade_window_days AS int)
         ) tc ON true
-        WHERE (
+        WHERE {bbox_clause}(
                 cardinality(CAST(:region_codes AS text[])) = 0
                 OR EXISTS (
                     SELECT 1 FROM unnest(CAST(:region_codes AS text[])) AS rc
-                    WHERE c.region_code LIKE rc || '%'
+                    WHERE left(c.region_code, length(rc)) = rc
                 )
               )
         -- ① 활성 매물이 있는 단지를 먼저 본다(지금 살 수 있는 물건이 있는 쪽).
@@ -764,11 +773,33 @@ class PostgisRepository:
                  COALESCE(tc.recent_trades, 0) DESC,
                  c.id
         LIMIT CAST(:limit AS int)
-    """)
+    """
+
+    #: "이 주변에서 검색" — 지도 범위 안의 단지로 후보를 좁힌다 (REC-5).
+    #:
+    #: ⚠️ **WHERE 의 맨 앞**에 온다. `&&` 가 GiST(idx_complex_geom)를 타야 하고,
+    #:    `ST_Intersects`·`ST_Within` 을 앞에 두면 전건 스캔이 된다(erd.md §3.1).
+    #: ⚠️ geom 이 NULL 인 단지는 `&&` 가 NULL 을 내며 **조용히 빠진다.** 그게 맞는 동작이지만
+    #:    (좌표를 모르면 "이 주변"인지 판정할 수 없다) 사용자에게는 반드시 고지해야 한다
+    #:    — 러너가 `geocode_coverage` 로 숫자를 세어 notes 에 싣는다.
+    _BBOX_CLAUSE = """c.geom && ST_MakeEnvelope(
+                  CAST(:min_lon AS double precision),
+                  CAST(:min_lat AS double precision),
+                  CAST(:max_lon AS double precision),
+                  CAST(:max_lat AS double precision), 4326)
+          AND """
+
+    # SQL 문자열은 **코드 안의 리터럴 두 개로만** 조립한다 — 사용자 입력은 전부
+    # 바인딩 파라미터(:min_lon …)로 들어간다. 조건마다 문자열을 이어 붙이지 않고
+    # 변형을 미리 컴파일해 두는 이유는, `(:has_bbox IS FALSE OR geom && …)` 같은
+    # 형태로 쓰면 플래너가 bbox 를 상수로 못 보고 **GiST 인덱스를 포기**하기 때문이다.
+    _CANDIDATES_SQL = text(_CANDIDATES_SQL_TEMPLATE.format(bbox_clause=""))
+    _CANDIDATES_BBOX_SQL = text(
+        _CANDIDATES_SQL_TEMPLATE.format(bbox_clause=_BBOX_CLAUSE))
 
     def recommendation_candidates(
         self, *, region_codes: list[str], max_price_krw: int | None = None,
-        limit: int = 50,
+        limit: int = 50, bbox: BBox | None = None,
     ) -> list[ComplexSummary]:
         """조건에 맞는 후보 단지.
 
@@ -780,14 +811,24 @@ class PostgisRepository:
         예산이 작은 사용자에게는 후보가 전멸한다(거르는 것과 순서를 주는 것은 다르다).
 
         호가 유무로도 걸러내지 않는다 — 호가가 없으면 실거래 기준으로 후보가 된다(G4).
+
+        `bbox` 가 오면 그 범위로 좁힌다. `region_codes` 와 **둘 다 오면 교집합**이다 —
+        지역을 고르고 "이 주변"까지 눌렀다면 둘 다 만족하는 단지를 원한 것이다.
         """
+        params: dict[str, Any] = {
+            "region_codes": list(region_codes or []),
+            "trade_window_days": _CANDIDATE_TRADE_WINDOW_DAYS,
+            "max_price_krw": max_price_krw,
+            "limit": limit,
+        }
+        sql = self._CANDIDATES_SQL
+        if bbox is not None:
+            sql = self._CANDIDATES_BBOX_SQL
+            params |= {"min_lon": bbox.min_lon, "min_lat": bbox.min_lat,
+                       "max_lon": bbox.max_lon, "max_lat": bbox.max_lat}
+
         with self._engine.connect() as conn:
-            rows = conn.execute(self._CANDIDATES_SQL, {
-                "region_codes": list(region_codes or []),
-                "trade_window_days": _CANDIDATE_TRADE_WINDOW_DAYS,
-                "max_price_krw": max_price_krw,
-                "limit": limit,
-            }).all()
+            rows = conn.execute(sql, params).all()
 
         return [
             ComplexSummary(
@@ -801,6 +842,27 @@ class PostgisRepository:
             )
             for row in rows
         ]
+
+    #: 좌표 확보 현황. bbox 검색에서 **몇 개가 구조적으로 빠지는지**를 세는 데 쓴다.
+    #: 고정 문구("약 5%")로 적으면 수집이 진행돼도 영영 낡은 값이 남는다 — 그래서 센다.
+    _GEOCODE_COVERAGE_SQL = text("""
+        SELECT count(c.geom) AS with_geom, count(*) AS total
+        FROM complex c
+        WHERE cardinality(CAST(:region_codes AS text[])) = 0
+           OR EXISTS (
+                SELECT 1 FROM unnest(CAST(:region_codes AS text[])) AS rc
+                WHERE left(c.region_code, length(rc)) = rc
+              )
+    """)
+
+    def geocode_coverage(
+        self, *, region_codes: list[str] | None = None) -> tuple[int, int]:
+        """(좌표 있는 단지 수, 전체 단지 수). 지역을 주면 그 범위만 센다."""
+        with self._engine.connect() as conn:
+            row = conn.execute(self._GEOCODE_COVERAGE_SQL, {
+                "region_codes": list(region_codes or []),
+            }).one()
+        return int(row.with_geom or 0), int(row.total or 0)
 
     _LISTINGS_SQL = text("""
         SELECT li.id, li.ask_price_krw, li.area_m2, li.floor,

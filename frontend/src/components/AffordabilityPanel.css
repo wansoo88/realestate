@@ -104,3 +104,175 @@
   color: var(--text-secondary);
   line-height: 1.5;
 }
+
+/* ── 자금계획 ───────────────────────────────────────────────────────────
+   "최대 얼마"와 "이 집을 사려면 뭐가 필요한가"는 다른 질문이라 시각적으로도 분리한다. */
+
+.plan {
+  margin: var(--sp-4) 0;
+  padding: var(--sp-4);
+  border-radius: var(--r-card);
+  border: 0.5px solid var(--hairline);
+}
+
+.plan__title {
+  margin: 0 0 var(--sp-2);
+  font-size: var(--fs-footnote);
+  font-weight: 600;
+}
+
+.plan__empty {
+  margin: 0;
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.plan__link {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font-size: var(--fs-caption);
+  text-decoration: underline;
+}
+
+.plan__nodata {
+  margin: 0 0 var(--sp-3);
+  font-size: var(--fs-caption);
+  color: var(--warn-text);
+  line-height: 1.6;
+}
+
+.plan__basis {
+  margin: 0;
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+}
+
+.plan__basis-name {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.plan__badge {
+  margin-left: var(--sp-1);
+}
+
+.plan__estnote {
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.plan__target {
+  margin: var(--sp-1) 0 var(--sp-3);
+  font-size: var(--fs-price);
+  font-weight: 700;
+}
+
+/* 추정 근거일 때는 강도를 낮춘다("확신의 농도") */
+.plan__basis--est ~ .plan__target {
+  opacity: 0.9;
+}
+
+.plan__rows {
+  margin: 0;
+  display: grid;
+  gap: var(--sp-1);
+}
+
+.plan__row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  font-size: var(--fs-footnote);
+}
+
+.plan__row dt {
+  color: var(--text-secondary);
+}
+
+.plan__row dd {
+  margin: 0;
+  font-weight: 600;
+}
+
+.plan__row--strong dd {
+  font-size: var(--fs-title);
+}
+
+.plan__formula {
+  margin: var(--sp-1) 0 var(--sp-3);
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.plan__over,
+.plan__ok {
+  margin: var(--sp-3) 0 0;
+  font-size: var(--fs-caption);
+  line-height: 1.6;
+}
+
+.plan__over {
+  color: var(--warn-text);
+}
+
+.plan__ok {
+  color: var(--text-secondary);
+}
+
+.plan__over-badge {
+  margin-right: var(--sp-2);
+  background: var(--badge-bg);
+  color: var(--warn-text);
+}
+
+.plan__monthly {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+  padding-top: var(--sp-3);
+  border-top: 0.5px solid var(--hairline);
+}
+
+.plan__monthly-label {
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+}
+
+.plan__monthly-value {
+  font-size: var(--fs-title);
+}
+
+/* 가정은 숫자 옆에 붙어 있어야 한다 — 줄이 좁으면 아래로 흐르되 사라지지는 않는다 */
+.plan__terms {
+  flex: 1 1 100%;
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+}
+
+.plan__interest,
+.plan__caveat {
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.plan__reset {
+  margin-top: var(--sp-3);
+  width: 100%;
+  min-height: 44px;
+  border-radius: var(--r-btn);
+  border: 0.5px solid var(--hairline);
+  background: transparent;
+  color: var(--accent);
+  font-size: var(--fs-footnote);
+}

@@ -11,6 +11,7 @@
  */
 import { useState } from "react";
 import { ApiException, type Preferences, type Profile } from "../api/client";
+import { readTargetPrice, withTargetPrice } from "../lib/affordability";
 import { NOTICE_TRUST } from "../lib/notices";
 import {
   DEFAULT_WEIGHTS,
@@ -26,6 +27,7 @@ import {
 import { observedNoSignal } from "../lib/scoreAxes";
 import { InfoTip } from "./InfoTip";
 import { MoneyField } from "./MoneyField";
+import { TargetPriceField } from "./TargetPriceField";
 import "./ConditionsScreen.css";
 
 interface Props {
@@ -34,6 +36,12 @@ interface Props {
   onSave: (profile: Profile, preferences: Preferences) => Promise<void>;
   /** 이미 저장된 조건을 고치는 경우에만 닫기가 있다(최초 입력은 되돌아갈 곳이 없다). */
   onClose?: () => void;
+  /**
+   * 최대 실구매 가능 금액(`/affordability`). 희망가 슬라이더의 **범위 기준**이다.
+   * 최초 입력처럼 아직 계산이 없으면 null — 그때도 슬라이더는 동작하되 한도 비교를
+   * 하지 않는다(모르는 한도를 그리지 않는다).
+   */
+  maxPurchaseKrw?: number | null;
 }
 
 /** 역세권 거리 선택지 — 자유 입력보다 낫다. 300m·500m 는 걸어서 4~7분이라는 감각이 있다. */
@@ -67,7 +75,13 @@ function toNullableInt(v: string): number | null {
   return Number.isNaN(n) ? null : n;
 }
 
-export function ConditionsScreen({ profile, preferences, onSave, onClose }: Props) {
+export function ConditionsScreen({
+  profile,
+  preferences,
+  onSave,
+  onClose,
+  maxPurchaseKrw = null,
+}: Props) {
   // 자산 — null 은 "아직 안 씀"이다. 0 으로 초기화하면 안 쓴 것과 0원이 구분되지 않는다.
   const [cash, setCash] = useState<number | null>(profile?.cash_krw ?? null);
   const [income, setIncome] = useState<number | null>(profile?.income_krw ?? null);
@@ -76,6 +90,12 @@ export function ConditionsScreen({ profile, preferences, onSave, onClose }: Prop
   const [householdSize, setHouseholdSize] = useState(profile?.household_size ?? 1);
 
   const [prefer, setPrefer] = useState<Preferences["prefer"]>(preferences.prefer ?? {});
+  /**
+   * 희망 매매가는 `prefer.target_price_krw` 에 산다(서버 `PreferencesIn` 이 열린 dict).
+   * 별도 state 를 두지 않고 `prefer` 에서 읽고 `prefer` 에 쓴다 — 상태를 둘로 나누면
+   * 저장 직전에 둘 중 하나를 빠뜨리는 순간 "슬라이더는 움직였는데 저장은 안 된" 값이 된다.
+   */
+  const targetPrice = readTargetPrice(prefer);
   const [avoid, setAvoid] = useState<Preferences["avoid"]>(preferences.avoid ?? {});
   const [weights, setWeights] = useState<Weights>(
     Object.keys(preferences.weights ?? {}).length > 0 ? preferences.weights : DEFAULT_WEIGHTS,
@@ -125,7 +145,7 @@ export function ConditionsScreen({ profile, preferences, onSave, onClose }: Prop
           <p className="cond__lede">
             {profile
               ? "조건을 바꾸면 지도와 추천이 함께 바뀝니다."
-              : "자산을 입력해야 실구매 가능 금액과 추천을 계산할 수 있습니다."}
+              : "자산을 입력해야 최대 실구매 가능 금액과 추천을 계산할 수 있습니다."}
           </p>
         </header>
 
@@ -192,6 +212,21 @@ export function ConditionsScreen({ profile, preferences, onSave, onClose }: Prop
               onChange={(e) => setHouseholdSize(toInt(e.target.value, 1, 20, 1))}
             />
           </div>
+        </section>
+
+        {/* ── 희망 매매가 ───────────────────────────────────────────────────
+            자산 바로 다음에 둔다. "얼마 있나" 다음 질문은 "얼마짜리를 볼까"이고,
+            이 값이 지도·추천·자금계획 셋을 동시에 움직이기 때문이다(선호보다 앞선다). */}
+        <section className="cond__group" aria-labelledby="cond-target">
+          <h2 className="cond__group-title" id="cond-target">
+            희망 매매가
+          </h2>
+          <TargetPriceField
+            id="cond-target-price"
+            valueKrw={targetPrice}
+            onChange={(krw) => setPrefer((p) => withTargetPrice(p, krw))}
+            maxPurchaseKrw={maxPurchaseKrw}
+          />
         </section>
 
         <section className="cond__group" aria-labelledby="cond-prefer">

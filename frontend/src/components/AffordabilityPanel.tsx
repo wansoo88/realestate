@@ -1,18 +1,34 @@
 /**
- * 실구매 가능 금액 (F2) — 이 앱에서 가장 큰 숫자가 나오는 자리.
+ * 최대 실구매 가능 금액 + 자금계획 (F2) — 이 앱에서 가장 큰 숫자가 나오는 자리.
  *
  * 규칙 두 가지를 반드시 지킨다.
  *  ① **무엇이 한도를 묶었는지**(binding_constraint)를 문장으로 말한다.
  *     "8.5억"만 보여주면 사용자는 왜 그 숫자인지 모르고, 모르면 못 믿는다.
  *  ② **가정과 출처**(assumptions·evidence)를 함께 노출한다. 출처 없는 세율·한도는
  *     이 제품에서 금지다(G2). 출처가 없는 evidence 항목은 아예 렌더링하지 않는다.
+ *
+ * 자금계획(plan)에서 추가로 지키는 것
+ *  ③ **한도를 넘어도 숫자를 보여준다.** "불가능합니다"만 띄우면 얼마를 더 모아야 하는지
+ *     알 수 없다 — 그게 사용자가 물어본 것이다. 초과분·무엇이 막는지를 함께 적는다.
+ *  ④ **가정을 숫자 옆에 붙인다.** 금리 4%/30년이 5%/20년이 되면 월 상환액이 40% 넘게
+ *     달라진다. 가정 없는 월 상환액은 근거 없는 숫자다(G2).
  */
 import type { AffordabilityResponse } from "../api/client";
-import { formatAsOf, formatKrw } from "../lib/format";
+import { planOverLimit, planOverLimitKrw, usablePlan } from "../lib/affordability";
+import { formatAsOf, formatKrw, formatKrwManwon } from "../lib/format";
 import { usableEvidence } from "../lib/recommendation";
 import { Price } from "./Price";
 import { Section } from "./Section";
 import "./AffordabilityPanel.css";
+
+/**
+ * 이 자금계획이 **어느 가격을 근거로** 세워졌는가.
+ * 단지 기준일 때 그 값은 `recent_price_krw`(최근 실거래 기반 **추정**)이지 호가가 아니다 —
+ * 그 사실이 화면에서 사라지면 추정치가 "이 값에 살 수 있다"로 둔갑한다.
+ */
+export type PlanBasis =
+  | { kind: "manual" }
+  | { kind: "complex"; name: string; estimated: boolean; asOf: string | null };
 
 interface Props {
   data: AffordabilityResponse | null;
@@ -21,6 +37,18 @@ interface Props {
   /** 자산 미입력(422) — 계산할 수 없으니 조건 화면으로 보낸다. */
   needsProfile?: boolean;
   onEditConditions?: () => void;
+  /** 자금계획의 근거. null = 희망가도 없고 고른 단지도 없다. */
+  planBasis?: PlanBasis | null;
+  /**
+   * 고른 단지에 시세 근거가 없을 때 그 단지 이름.
+   * 값을 지어내 계획을 세우지 않되, **왜 이 단지 기준이 아닌지**는 반드시 말한다 —
+   * 조용히 내 희망가 계획을 보여주면 사용자는 그걸 그 단지의 계획으로 읽는다.
+   */
+  noPriceComplexName?: string | null;
+  /** 단지 기준 계획을 접고 내 희망가로 돌아간다. */
+  onClearComplex?: () => void;
+  /** 조건에 저장된 희망가(있으면 되돌아갈 곳을 문장으로 말할 수 있다). */
+  targetPriceKrw?: number | null;
 }
 
 /** 한도를 결정한 제약을 사람 말로. 모르는 코드는 원문을 그대로 둔다(지어내지 않는다). */
@@ -41,18 +69,41 @@ function constraintSentence(code: string): string {
   }
 }
 
+/** 짧은 제약 이름(괄호 안에 들어갈 말). */
+function constraintShort(code: string | null | undefined): string | null {
+  if (!code) return null;
+  switch (code) {
+    case "LTV":
+      return "담보인정비율(LTV)";
+    case "DSR":
+      return "총부채원리금상환비율(DSR)";
+    case "DTI":
+      return "총부채상환비율(DTI)";
+    case "CAP":
+      return "주택담보대출 절대한도";
+    case "CASH":
+      return "보유 현금";
+    default:
+      return code;
+  }
+}
+
 export function AffordabilityPanel({
   data,
   loading,
   error,
   needsProfile,
   onEditConditions,
+  planBasis = null,
+  noPriceComplexName = null,
+  onClearComplex,
+  targetPriceKrw = null,
 }: Props) {
   if (needsProfile) {
     return (
       <div className="afford afford--empty">
         <p className="afford__empty-text">
-          자산 정보를 입력하면 실구매 가능 금액을 계산합니다.
+          자산 정보를 입력하면 최대 실구매 가능 금액을 계산합니다.
         </p>
         {onEditConditions && (
           <button type="button" className="afford__cta" onClick={onEditConditions}>
@@ -77,10 +128,12 @@ export function AffordabilityPanel({
 
   const evidence = usableEvidence(data.evidence);
   const cost = data.acquisition_cost_krw;
+  const plan = usablePlan(data.plan);
+  const isComplex = planBasis?.kind === "complex";
 
   return (
     <div className="afford">
-      <h3 className="afford__caption">실구매 가능 금액</h3>
+      <h3 className="afford__caption">최대 실구매 가능 금액</h3>
       {/* 법정 계산 결과라 추정이 아니다 → confirmed 농도(선명하게). */}
       <Price krw={data.max_purchase_krw} confidence="confirmed" size="lg" hideBadge />
 
@@ -100,6 +153,142 @@ export function AffordabilityPanel({
           <dd className="num">{formatKrw(cost.total)}</dd>
         </div>
       </dl>
+
+      {/* ── 자금계획 ─────────────────────────────────────────────────────── */}
+      <section className="plan" aria-labelledby="plan-title">
+        <h3 className="plan__title" id="plan-title">
+          자금계획
+        </h3>
+
+        {noPriceComplexName && (
+          <p className="plan__nodata" role="status">
+            <strong>{noPriceComplexName}</strong>은(는) 최근 실거래 근거가 없어 이 단지 기준으로는
+            계산할 수 없습니다. 아래는 <strong>내가 정한 희망가</strong> 기준입니다.
+          </p>
+        )}
+
+        {plan === null ? (
+          <p className="plan__empty">
+            {planBasis === null
+              ? "희망 매매가를 정하거나 지도에서 단지를 고르면 필요한 대출과 월 원리금을 계산합니다."
+              : "이 응답에는 자금계획이 포함되지 않았습니다 — 계산 결과를 지어내지 않습니다."}
+            {planBasis === null && onEditConditions && (
+              <>
+                {" "}
+                <button type="button" className="plan__link" onClick={onEditConditions}>
+                  희망 매매가 정하기
+                </button>
+              </>
+            )}
+          </p>
+        ) : (
+          <>
+            {/* 무엇을 기준으로 세운 계획인가 — 단지 기준이면 **추정치임을 함께** 말한다. */}
+            <p className={`plan__basis${isComplex ? " plan__basis--est" : ""}`}>
+              {isComplex ? (
+                <>
+                  <span className="plan__basis-name">{planBasis.name}</span>
+                  <span className="plan__basis-what">
+                    {planBasis.estimated ? " 최근 실거래 기준 추정가" : " 최근 실거래가"}
+                  </span>
+                  {planBasis.estimated && (
+                    <span className="badge badge--estimated plan__badge">추정</span>
+                  )}
+                </>
+              ) : (
+                <span className="plan__basis-what">내가 정한 희망 매매가</span>
+              )}
+            </p>
+
+            {isComplex && (
+              <p className="plan__estnote">
+                이 금액은 <strong>지금 살 수 있는 호가가 아니라</strong> 최근 실거래를 근거로 한
+                추정치입니다. {formatAsOf(planBasis.asOf)}이며 신고 지연으로 최근 거래가 빠졌을 수
+                있습니다.
+              </p>
+            )}
+
+            <p className="plan__target num">{formatKrw(plan.target_price_krw)}</p>
+
+            <dl className="plan__rows">
+              <div className="plan__row">
+                <dt>총 필요자금</dt>
+                <dd className="num">{formatKrw(plan.total_needed_krw)}</dd>
+              </div>
+            </dl>
+            <p className="plan__formula">
+              매매가 {formatKrw(plan.target_price_krw)} + 취득세{" "}
+              {formatKrw(plan.cost_breakdown?.tax)} + 중개보수{" "}
+              {formatKrw(plan.cost_breakdown?.brokerage)} + 기타{" "}
+              {formatKrw(plan.cost_breakdown?.etc)}
+            </p>
+
+            <dl className="plan__rows">
+              <div className="plan__row">
+                <dt>내 현금</dt>
+                <dd className="num">{formatKrw(plan.own_cash_krw)}</dd>
+              </div>
+              <div className="plan__row plan__row--strong">
+                <dt>더 필요한 돈</dt>
+                <dd className="num">{formatKrw(plan.shortfall_krw)}</dd>
+              </div>
+              <div className="plan__row">
+                <dt>필요 대출</dt>
+                <dd className="num">{formatKrw(plan.required_loan_krw)}</dd>
+              </div>
+            </dl>
+
+            {/* 한도 초과여도 **숫자를 지우지 않는다**. 얼마가 모자란지가 곧 답이다. */}
+            {planOverLimit(plan) ? (
+              <p className="plan__over" role="status">
+                <span className="badge plan__over-badge">한도 초과</span>
+                내 대출 한도 <span className="num">{formatKrw(plan.loan_limit_krw)}</span>
+                {constraintShort(plan.binding_constraint)
+                  ? ` · ${constraintShort(plan.binding_constraint)}이(가) 막습니다`
+                  : ""}{" "}
+                — <span className="num">{formatKrw(planOverLimitKrw(plan))}</span> 부족합니다. 그만큼
+                현금을 더 모으거나 더 싼 집을 봐야 합니다.
+              </p>
+            ) : (
+              <p className="plan__ok">
+                내 대출 한도 <span className="num">{formatKrw(plan.loan_limit_krw)}</span> 안입니다.
+              </p>
+            )}
+
+            <div className="plan__monthly">
+              <span className="plan__monthly-label">월 원리금</span>
+              <strong className="plan__monthly-value num">
+                {formatKrwManwon(plan.monthly_payment_krw)}
+              </strong>
+              {/* 가정은 **숫자 옆에** 붙인다 — 접어 두면 아무도 안 본다(G2) */}
+              <span className="plan__terms">
+                금리 {plan.terms?.annual_rate_pct ?? "?"}% · {plan.terms?.years ?? "?"}년 원리금
+                균등 가정
+              </span>
+            </div>
+
+            {typeof plan.total_interest_krw === "number" && (
+              <p className="plan__interest">
+                총 이자 <span className="num">{formatKrw(plan.total_interest_krw)}</span> (같은 가정
+                기준)
+              </p>
+            )}
+
+            <p className="plan__caveat">
+              실제 금리·기간은 금융기관 심사에서 정해집니다. 위 월 상환액은 위 가정으로만 계산한
+              값입니다.
+            </p>
+
+            {isComplex && onClearComplex && (
+              <button type="button" className="plan__reset" onClick={onClearComplex}>
+                {targetPriceKrw !== null
+                  ? `내 희망가(${formatKrw(targetPriceKrw)}) 기준으로 계산`
+                  : "단지 기준 해제"}
+              </button>
+            )}
+          </>
+        )}
+      </section>
 
       <Section title="한도 계산 내역" count={undefined}>
         <ul className="afford__list">

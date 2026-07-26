@@ -57,6 +57,22 @@ export function formatKrwCompact(won: number | null | undefined): string {
   return `${Math.round(won).toLocaleString("ko-KR")}원`;
 }
 
+/**
+ * 월 상환액처럼 **만원 자리 소수까지 봐야 하는** 금액. "300.7만원"
+ *
+ * 왜 `formatKrw` 로 부족한가: 그쪽은 만원 미만을 버려 3,007,000 원이 "300만"이 된다.
+ * 매달 나가는 돈에서 7,000원 차이는 30년이면 250만원이다 — 버리면 안 되는 자리다.
+ * 1억 이상은 억 표기가 읽기 쉬우므로 `formatKrw` 에 넘긴다(현실적인 월 상환액이 아니다).
+ */
+export function formatKrwManwon(won: number | null | undefined): string {
+  if (won === null || won === undefined || Number.isNaN(won)) return "—";
+  if (Math.abs(won) >= 100_000_000) return formatKrw(won);
+  if (won === 0) return "0원";
+  const man = Math.round(won / 1_000) / 10; // 천원 자리에서 반올림 → 만원 소수 1자리
+  if (man === 0) return `${Math.round(won).toLocaleString("ko-KR")}원`;
+  return `${man.toLocaleString("ko-KR")}만원`;
+}
+
 /** ㎡ → "84.97㎡ (25.7평)" */
 export function formatArea(m2: number | null | undefined): string {
   if (m2 === null || m2 === undefined || Number.isNaN(m2)) return "—";

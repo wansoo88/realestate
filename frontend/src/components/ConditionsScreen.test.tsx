@@ -31,9 +31,21 @@ const PREFS: Preferences = {
   weights: { price: 0.3, location: 0.3, value: 0.25, risk: 0.15 },
 };
 
-function renderScreen(onSave = vi.fn().mockResolvedValue(undefined)) {
+/** 최대 실구매 가능 금액 — 희망가 슬라이더 범위의 기준. */
+const MAX_PURCHASE = 850_000_000;
+
+function renderScreen(
+  onSave = vi.fn().mockResolvedValue(undefined),
+  opts: { preferences?: Preferences; maxPurchaseKrw?: number | null } = {},
+) {
   render(
-    <ConditionsScreen profile={PROFILE} preferences={PREFS} onSave={onSave} onClose={vi.fn()} />,
+    <ConditionsScreen
+      profile={PROFILE}
+      preferences={opts.preferences ?? PREFS}
+      onSave={onSave}
+      onClose={vi.fn()}
+      maxPurchaseKrw={opts.maxPurchaseKrw === undefined ? MAX_PURCHASE : opts.maxPurchaseKrw}
+    />,
   );
   return onSave;
 }
@@ -242,6 +254,119 @@ describe("조정 가능한 항목은 그대로 동작한다", () => {
     // 화면이 잠겼다고 서버 값을 몰래 0 으로 만들지 않는다 — 입지 데이터가 들어오면 살아난다
     expect(prefs.weights.location).toBeCloseTo(0.3, 2);
     expect(prefs.weights.risk).toBeCloseTo(0.15, 2);
+  });
+});
+
+/**
+ * 희망 매매가 — 사용자가 직접 요청한 입력.
+ *
+ * 핵심 성질: **한도를 넘겨서도 고를 수 있어야 한다.** 못 사는 가격을 막으면
+ * "얼마를 더 모아야 하나"라는 질문 자체가 사라진다 — 이 기능이 답하려는 바로 그 질문이다.
+ */
+describe("희망 매매가", () => {
+  it("슬라이더와 직접 입력이 **둘 다** 있다(억 단위는 엄지로 못 맞춘다)", () => {
+    renderScreen();
+
+    expect(screen.getByRole("slider", { name: "희망 매매가" })).toBeTruthy();
+    expect(screen.getByLabelText("희망 매매가 직접 입력")).toBeTruthy();
+  });
+
+  it("슬라이더 상한이 최대 실구매 가능 금액보다 **높다** — 한도 넘는 집도 볼 수 있다", () => {
+    renderScreen();
+
+    const slider = screen.getByRole("slider", { name: "희망 매매가" }) as HTMLInputElement;
+    expect(Number(slider.max)).toBeGreaterThan(MAX_PURCHASE);
+    expect(Number(slider.min)).toBeLessThan(MAX_PURCHASE);
+    // 한도가 어디인지 눈금에 적는다(넘었는지 아닌지를 슬라이더만 보고 알 수 있게)
+    expect(screen.getByText(/내 한도 8\.50억/)).toBeTruthy();
+  });
+
+  it("스크린리더에는 자릿수가 아니라 사람 말로 읽힌다", () => {
+    renderScreen(vi.fn(), {
+      preferences: { ...PREFS, prefer: { target_price_krw: 900_000_000 } },
+    });
+
+    const slider = screen.getByRole("slider", { name: "희망 매매가" });
+    expect(slider.getAttribute("aria-valuetext")).toBe("9억");
+  });
+
+  it("슬라이더를 움직이면 그 값이 **선호에 저장된다**", async () => {
+    const user = userEvent.setup();
+    const onSave = renderScreen();
+
+    const slider = screen.getByRole("slider", { name: "희망 매매가" });
+    fireEvent.change(slider, { target: { value: "900000000" } });
+
+    await user.click(screen.getByRole("button", { name: "저장하고 다시 계산" }));
+
+    const [, prefs] = onSave.mock.calls[0] as [Profile, Preferences];
+    expect(prefs.prefer.target_price_krw).toBe(900_000_000);
+  });
+
+  it("직접 입력(만원)도 원 단위로 저장된다 — 1만분의 1이 되면 한도가 무너진다", async () => {
+    const user = userEvent.setup();
+    const onSave = renderScreen();
+
+    await user.type(screen.getByLabelText("희망 매매가 직접 입력"), "123456");
+    await user.click(screen.getByRole("button", { name: "저장하고 다시 계산" }));
+
+    const [, prefs] = onSave.mock.calls[0] as [Profile, Preferences];
+    expect(prefs.prefer.target_price_krw).toBe(1_234_560_000); // 12.3456억
+  });
+
+  it("한도를 넘기면 막지 않고 **얼마나 넘는지** 말한다", () => {
+    renderScreen(vi.fn(), {
+      preferences: { ...PREFS, prefer: { target_price_krw: 1_000_000_000 } },
+    });
+
+    const note = screen.getByText(/최대 실구매 가능 금액 8\.50억보다/);
+    expect(note.textContent).toContain("1.50억 높습니다");
+    expect(note.textContent).toContain("내 자금"); // 어디서 확인하는지까지
+  });
+
+  it("한도 안이면 여유를 말한다", () => {
+    renderScreen(vi.fn(), {
+      preferences: { ...PREFS, prefer: { target_price_krw: 700_000_000 } },
+    });
+    expect(screen.getByText(/안입니다 \(여유 1\.50억\)/)).toBeTruthy();
+  });
+
+  it("한도를 아직 모르면 아는 척하지 않는다", () => {
+    renderScreen(vi.fn(), {
+      preferences: { ...PREFS, prefer: { target_price_krw: 700_000_000 } },
+      maxPurchaseKrw: null,
+    });
+
+    expect(screen.queryByText(/내 한도/)).toBeNull();
+    expect(screen.getByText(/아직 계산되지 않아 한도와 비교할 수 없습니다/)).toBeTruthy();
+    // 그래도 슬라이더는 살아 있다(값을 못 정하게 막지 않는다)
+    expect((screen.getByRole("slider", { name: "희망 매매가" }) as HTMLInputElement).disabled).toBe(
+      false,
+    );
+  });
+
+  it("지우면 **키 자체가 빠진다** — 0 원을 원한다는 뜻이 되면 안 된다", async () => {
+    const user = userEvent.setup();
+    const onSave = renderScreen(vi.fn(), {
+      preferences: { ...PREFS, prefer: { target_price_krw: 900_000_000 } },
+    });
+
+    await user.click(screen.getByRole("button", { name: "희망가 지우기" }));
+    await user.click(screen.getByRole("button", { name: "저장하고 다시 계산" }));
+
+    const [, prefs] = onSave.mock.calls[0] as [Profile, Preferences];
+    expect("target_price_krw" in prefs.prefer).toBe(false);
+  });
+
+  it("정하지 않았으면 무엇이 예산이 되는지 알려준다", () => {
+    renderScreen();
+    expect(screen.getByText(/정하지 않으면 최대 실구매 가능 금액을 예산으로 씁니다/)).toBeTruthy();
+  });
+
+  it("이 값이 어디에 쓰이는지 화면이 먼저 말한다(저장만 되는 값이 아님)", () => {
+    renderScreen();
+    const note = screen.getByText(/지도 필터 · AI 추천 예산 · 자금계획/);
+    expect(note).toBeTruthy();
   });
 });
 

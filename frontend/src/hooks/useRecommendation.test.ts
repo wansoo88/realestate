@@ -112,6 +112,40 @@ describe("useRecommendation", () => {
     expect(result.current.error).toContain("이미 실행 중");
   });
 
+  /**
+   * 서버 422 는 pydantic 검증 오류라 본문이 `{"detail":[...]}` 다 → 우리 클라이언트에서
+   * 코드가 `UNKNOWN` 으로 뭉개진다("요청이 실패했습니다 (422)"). 그 문구만 띄우면
+   * 사용자는 **무엇을 고쳐야 하는지 알 수 없다.** 우리가 보낸 요청으로 짚을 수 있는
+   * 사유(범위가 너무 넓음)는 짚어 준다.
+   */
+  it("범위가 너무 넓어 422 가 나면 **고칠 방법**을 알려준다", async () => {
+    vi.spyOn(api, "createRecommendation").mockRejectedValue(
+      new ApiException(422, { code: "UNKNOWN", message: "요청이 실패했습니다 (422)" }),
+    );
+
+    const { result } = renderHook(() => useRecommendation());
+    await act(async () => {
+      // 한 변 3도 — 서버 상한(2.0도) 초과
+      await result.current.start({ bbox: "125.0,36.0,128.0,38.0" });
+    });
+
+    expect(result.current.error).toContain("너무 넓어");
+    expect(result.current.error).toContain("확대");
+  });
+
+  it("범위 탓이 아닌 422 는 서버 문구를 그대로 전한다(원인을 지어내지 않는다)", async () => {
+    vi.spyOn(api, "createRecommendation").mockRejectedValue(
+      new ApiException(422, { code: "INSUFFICIENT_DATA", message: "자산 정보가 없습니다" }),
+    );
+
+    const { result } = renderHook(() => useRecommendation());
+    await act(async () => {
+      await result.current.start({ bbox: "126.9,37.4,127.0,37.6" });
+    });
+
+    expect(result.current.error).toBe("자산 정보가 없습니다");
+  });
+
   it("중단하면 이후 폴링 결과를 버린다", async () => {
     vi.spyOn(api, "createRecommendation").mockResolvedValue(ACCEPTED);
     vi.spyOn(api, "recommendation").mockResolvedValue(job("running"));

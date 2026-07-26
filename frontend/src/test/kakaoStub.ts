@@ -18,6 +18,12 @@ export interface KakaoStubHandle {
   center(): [number, number];
   /** idle 을 강제로 한 번 더 발생시킨다(팬·줌 시뮬레이션) */
   fireIdle(): void;
+  /**
+   * 지도를 끌어 옮긴 것처럼 중심을 바꾸고 idle 을 발생시킨다.
+   * 인자는 지도 규약과 같은 **[경도, 위도]** — 여기서 뒤집으면 테스트가 좌표순서를 못 잡는다.
+   * (React 상태가 따라 움직이므로 호출부에서 `act()` 로 감싼다)
+   */
+  moveTo(center: [number, number]): void;
   restore(): void;
 }
 
@@ -127,6 +133,8 @@ export function installKakaoStub(
     level: () => level,
     center: () => [center[0], center[1]],
     fireIdle: () => fire("idle"),
+    // 실제 SDK 와 같은 인자 형태(LatLng)로 넘긴다 — 지도 쪽 경로를 그대로 태운다.
+    moveTo: (c) => map.setCenter(latLng(c[1], c[0])),
     restore: () => {
       window.kakao = prev;
       listeners.clear();

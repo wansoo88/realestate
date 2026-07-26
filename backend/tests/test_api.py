@@ -378,6 +378,108 @@ def test_실구매가능금액_계산(client):
     assert "투자 권유가 아니" in body["disclaimer"]
 
 
+# ---------------------------------------------------------------------------
+# 희망 매매가 자금계획 (ORDER 2026-07-26)
+#
+# 계약: `target_price_krw` 를 주면 응답에 `plan` 이 붙는다. 안 주면 예전과 동일.
+# ---------------------------------------------------------------------------
+
+def _profile_and_plan(client, target_price_krw, **extra):
+    token = _register_and_login(client, "a@b.co")
+    client.put("/api/v1/me/profile",
+               json={"cash_krw": 300_000_000, "income_krw": 100_000_000},
+               headers=_auth(token))
+    body = {"area_m2": 84.0, **extra}
+    if target_price_krw is not None:
+        body["target_price_krw"] = target_price_krw
+    return client.post("/api/v1/affordability", json=body, headers=_auth(token))
+
+
+def test_희망가를_주면_자금계획이_붙는다(client):
+    r = _profile_and_plan(client, 600_000_000)
+    assert r.status_code == 200, r.text
+    body = r.json()
+
+    plan = body["plan"]
+    assert plan["target_price_krw"] == 600_000_000
+    # 계약 필드가 전부 있어야 한다 — 하나만 빠져도 프론트가 화면을 못 그린다.
+    for key in ("total_needed_krw", "cost_breakdown", "own_cash_krw", "shortfall_krw",
+                "required_loan_krw", "loan_feasible", "loan_limit_krw",
+                "over_limit_krw", "binding_constraint", "monthly_payment_krw",
+                "total_interest_krw", "terms"):
+        assert key in plan, f"plan.{key} 누락"
+    assert set(plan["cost_breakdown"]) >= {"tax", "brokerage", "etc"}
+
+    # 부족액 = 총필요자금 − 내 현금, 필요대출 = 부족액. 화면 숫자가 서로 안 맞으면 안 된다.
+    assert plan["total_needed_krw"] == 600_000_000 + plan["cost_breakdown"]["total"]
+    assert plan["shortfall_krw"] == plan["total_needed_krw"] - plan["own_cash_krw"]
+    assert plan["required_loan_krw"] == plan["shortfall_krw"]
+    assert plan["monthly_payment_krw"] > 0
+    # '내 돈'은 기존 breakdown 과 같은 값이어야 한다(두 개가 뜨면 사용자가 혼란스럽다).
+    assert plan["own_cash_krw"] == body["breakdown"]["own_cash_krw"]
+
+
+def test_희망가를_조건에_저장하면_그대로_돌아온다(client):
+    """프론트는 슬라이더 값을 `prefer.target_price_krw` 로 저장한다(재방문 시 복원).
+
+    `prefer` 는 자유 형식 jsonb 라 스키마 변경은 필요 없지만, **왕복이 실제로 되는지**는
+    확인해 둔다 — 여기서 값이 사라지면 슬라이더가 매번 초기화되는데, 그건 화면 버그로만
+    보이고 원인이 서버에 있다는 걸 아무도 짐작하지 못한다.
+    """
+    token = _register_and_login(client, "a@b.co")
+    r = client.put("/api/v1/me/preferences",
+                   json={"prefer": {"target_price_krw": 900_000_000}},
+                   headers=_auth(token))
+    assert r.status_code == 200, r.text
+    got = client.get("/api/v1/me/preferences", headers=_auth(token)).json()
+    assert got["prefer"]["target_price_krw"] == 900_000_000
+
+
+def test_희망가를_안_주면_plan_키가_없다(client):
+    """기존 클라이언트 회귀 금지 — 응답 모양이 바뀌면 안 된다."""
+    r = _profile_and_plan(client, None)
+    assert r.status_code == 200, r.text
+    assert "plan" not in r.json()
+
+
+def test_희망가가_한도를_넘어도_200이고_이유를_준다(client):
+    """'불가능합니다'로 끝내지 않는다 — 얼마가 모자란지·무엇이 막는지를 준다."""
+    r = _profile_and_plan(client, 30_000_000_000)     # 300억
+    assert r.status_code == 200, r.text
+    plan = r.json()["plan"]
+
+    assert plan["loan_feasible"] is False
+    assert plan["over_limit_krw"] > 0
+    assert plan["binding_constraint"] in {"LTV", "DSR", "DTI", "CAP"}
+    assert plan["over_limit_krw"] == plan["required_loan_krw"] - plan["loan_limit_krw"]
+    assert any("초과" in w for w in r.json()["warnings"])
+
+
+@pytest.mark.parametrize("bad", [0, -1, 100_000_000_001])
+def test_잘못된_희망가는_422(client, bad):
+    """0·음수·상한초과(1000억)는 조용히 계산하지 않고 되돌린다."""
+    assert _profile_and_plan(client, bad).status_code == 422
+
+
+def test_금리를_바꾸면_월상환액이_바뀌고_terms에_드러난다(client):
+    """금리 4%는 **가정**이다 — 사용자가 덮을 수 있고, 어떤 값을 썼는지 응답이 밝힌다."""
+    base = _profile_and_plan(client, 600_000_000).json()["plan"]
+
+    token = _register_and_login(client, "b@b.co")
+    client.put("/api/v1/me/profile",
+               json={"cash_krw": 300_000_000, "income_krw": 100_000_000},
+               headers=_auth(token))
+    higher = client.post("/api/v1/affordability",
+                         json={"area_m2": 84.0, "target_price_krw": 600_000_000,
+                               "annual_rate": 0.055},
+                         headers=_auth(token)).json()["plan"]
+
+    assert base["terms"]["annual_rate_pct"] == 4.0
+    assert higher["terms"]["annual_rate_pct"] == 5.5
+    assert higher["monthly_payment_krw"] > base["monthly_payment_krw"]
+    assert higher["total_interest_krw"] > base["total_interest_krw"]
+
+
 def test_세율설정이_검증되지_않으면_503(client, monkeypatch, tmp_path):
     """추정해서 보여주느니 거부한다.
 

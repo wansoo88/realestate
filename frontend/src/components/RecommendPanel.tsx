@@ -10,9 +10,12 @@
  *    사고가 된다(architecture.md §6).
  */
 import type { RecommendationJob } from "../api/client";
+import { sameBbox } from "../lib/bbox";
 import { formatKrwShort } from "../lib/format";
 import { NOTICE_NOT_ADVICE, NOTICE_TRADE_DELAY } from "../lib/notices";
 import { progressText, type JobPhase } from "../lib/recommendation";
+import { scopeText, type SearchScope } from "../lib/searchScope";
+import { AreaScope } from "./AreaScope";
 import { RegionPicker } from "./RegionPicker";
 import { ReportCard } from "./ReportCard";
 import { Section } from "./Section";
@@ -23,9 +26,20 @@ interface Props {
   job: RecommendationJob | null;
   error: string | null;
   budgetKrw: number | null;
-  /** 분석 지역(5자리 시군구). 빈 배열 = 수도권 전체. */
+  /** 분석 지역(5자리 시군구). 빈 배열 = 지역 제한 없음. */
   regionCodes: string[];
   onRegionsChange: (codes: string[]) => void;
+  /** 지도가 지금 보고 있는 범위. null = 지도 미준비. */
+  currentBbox: string | null;
+  /** "이 주변"으로 잡아 둔 범위. */
+  areaBbox: string | null;
+  onCaptureArea: (bbox: string) => void;
+  onClearArea: () => void;
+  /**
+   * 이번 결과가 **실제로 돌아간** 범위. 결과가 나온 뒤 지도를 옮기거나 칩을 해제해도
+   * 이 값은 그대로 남는다 — 그러지 않으면 "그때 그 범위"가 뭐였는지 알 길이 사라진다.
+   */
+  appliedScope: SearchScope | null;
   onStart: () => void;
   onCancel: () => void;
   onShowOnMap?: (complexId: number) => void;
@@ -39,6 +53,11 @@ export function RecommendPanel({
   budgetKrw,
   regionCodes,
   onRegionsChange,
+  currentBbox,
+  areaBbox,
+  onCaptureArea,
+  onClearArea,
+  appliedScope,
   onStart,
   onCancel,
   onShowOnMap,
@@ -48,6 +67,10 @@ export function RecommendPanel({
   const items = job?.items ?? [];
   const excluded = job?.excluded ?? null;
 
+  /** 결과를 낸 범위가 지금 지도와 다른가 — 다르면 "지금 화면 = 결과"로 읽히지 않게 말한다. */
+  const resultAreaMoved =
+    appliedScope?.bbox != null && !sameBbox(appliedScope.bbox, currentBbox);
+
   return (
     <div className="rec">
       <p className="rec__budget">
@@ -56,8 +79,22 @@ export function RecommendPanel({
           : "예산이 아직 계산되지 않았습니다 — 자산을 입력하면 예산 안에서만 후보를 세웁니다."}
       </p>
 
-      {/* 어디에서 찾을지 — 분석을 **시작하기 전에** 정한다. 실행 버튼 바로 위가 제자리다. */}
-      <RegionPicker value={regionCodes} onChange={onRegionsChange} disabled={running} />
+      {/* 어디에서 찾을지 — 분석을 **시작하기 전에** 정한다. 실행 버튼 바로 위가 제자리다.
+          빠른 길(이 주변)을 먼저, 정밀한 길(시군구)을 다음에 둔다. */}
+      <AreaScope
+        currentBbox={currentBbox}
+        bbox={areaBbox}
+        onCapture={onCaptureArea}
+        onClear={onClearArea}
+        regionCodes={regionCodes}
+        disabled={running}
+      />
+      <RegionPicker
+        value={regionCodes}
+        onChange={onRegionsChange}
+        areaScoped={areaBbox !== null}
+        disabled={running}
+      />
 
       <div className="rec__actions">
         <button type="button" className="rec__run" onClick={onStart} disabled={running}>
@@ -80,6 +117,17 @@ export function RecommendPanel({
       {error && (
         <p className="rec__error" role="alert">
           {error}
+        </p>
+      )}
+
+      {/* 이 결과가 **어느 범위에서** 나왔는지. 실행 후 지도를 옮기면 화면과 결과가
+          어긋나므로, 결과 옆에 범위를 붙여 두지 않으면 사용자가 알 수 없다. */}
+      {appliedScope && (running || phase === "done") && (
+        <p className="rec__scope">
+          {running ? "분석 범위" : "이 결과를 찾은 범위"}: {scopeText(appliedScope)}
+          {resultAreaMoved && (
+            <span className="rec__scope-moved"> · 지금 보고 있는 지도와 다른 범위입니다</span>
+          )}
         </p>
       )}
 

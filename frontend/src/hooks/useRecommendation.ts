@@ -13,6 +13,7 @@ import {
   type RecommendationJob,
   type RecommendationRequest,
 } from "../api/client";
+import { bboxTooLarge } from "../lib/bbox";
 import { jobPhase, resolvePollPath, type JobPhase } from "../lib/recommendation";
 import { rememberAxisGaps } from "../lib/scoreAxes";
 
@@ -29,10 +30,23 @@ export interface RecommendationState {
 
 const IDLE: RecommendationState = { phase: "idle", jobId: null, job: null, error: null };
 
-function messageOf(e: unknown, fallback: string): string {
+/**
+ * 서버 오류를 사람 말로.
+ *
+ * `req` 를 함께 받는 이유: 서버의 422 본문은 pydantic 검증 오류라 코드가 `UNKNOWN` 으로
+ * 뭉개진다("요청이 실패했습니다 (422)"). 그러면 "이 주변" 범위가 너무 넓어 거절당한
+ * 경우에도 사용자는 **무엇을 고쳐야 하는지 알 수 없다**. 우리가 보낸 요청을 되짚어
+ * 짚어낼 수 있는 사유는 짚어 준다(서버 문구를 추측해 파싱하지 않는다 — 요청은 우리 사실이다).
+ */
+function messageOf(e: unknown, fallback: string, req?: RecommendationRequest): string {
   if (e instanceof ApiException) {
     if (e.status === 409) return "같은 조건의 분석이 이미 실행 중입니다.";
-    if (e.status === 422) return e.error.message || "분석에 필요한 조건이 부족합니다.";
+    if (e.status === 422) {
+      if (req?.bbox && bboxTooLarge(req.bbox)) {
+        return "'이 주변' 범위가 너무 넓어 분석할 수 없습니다 — 지도를 확대해 범위를 다시 잡아 주세요.";
+      }
+      return e.error.message || "분석에 필요한 조건이 부족합니다.";
+    }
     return e.error.message || fallback;
   }
   return fallback;
@@ -88,7 +102,7 @@ export function useRecommendation() {
           phase: "error",
           jobId: null,
           job: null,
-          error: messageOf(e, "분석을 시작하지 못했습니다."),
+          error: messageOf(e, "분석을 시작하지 못했습니다.", req),
         });
         return;
       }

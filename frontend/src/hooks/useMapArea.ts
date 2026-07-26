@@ -10,6 +10,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiException, api, type ClusterItem, type ComplexItem } from "../api/client";
+import { bboxTooLarge } from "../lib/bbox";
 import { buildMapQuery, type MapFilterState } from "../lib/mapFilters";
 
 /** 지도를 끌 때마다 요청이 나가지 않도록 하는 간격. */
@@ -21,6 +22,15 @@ export interface MapAreaState {
   clusters: ClusterItem[];
   loading: boolean;
   error: string | null;
+  /**
+   * 지도가 **지금** 보고 있는 범위(`minLon,minLat,maxLon,maxLat`).
+   * 지도가 아직 준비되지 않았으면 null — 화면은 이 값으로 "이 주변에서 찾기"를 켤지 정한다.
+   *
+   * 왜 ref 가 아니라 state 인가: 버튼 활성/비활성과 "지도를 옮겼다" 표시가 이 값으로 갈리는데,
+   * ref 는 다시 그리지 않으므로 지도가 준비돼도 버튼이 계속 죽어 있게 된다.
+   * (idle 은 지도가 멈출 때만 오므로 렌더 폭풍이 되지 않는다)
+   */
+  bbox: string | null;
 }
 
 export function useMapArea(filters: MapFilterState) {
@@ -30,6 +40,7 @@ export function useMapArea(filters: MapFilterState) {
     clusters: [],
     loading: false,
     error: null,
+    bbox: null,
   });
 
   // 최신 필터를 콜백 재생성 없이 읽는다(지도 리스너를 매번 다시 달지 않기 위해).
@@ -58,19 +69,26 @@ export function useMapArea(filters: MapFilterState) {
       const res = await api.mapComplexes(buildMapQuery(area.bbox, area.zoom, filtersRef.current));
       // 늦게 온 응답이 최신 화면을 덮지 않게 한다(팬을 빠르게 하면 순서가 뒤집힌다).
       if (!alive.current || id !== reqId.current) return;
-      setState(
+      // ⚠️ 통째로 갈아끼우지 않는다(updater 로 이전 상태를 이어받는다) —
+      //    조회 응답이 화면 범위(bbox)를 덮어 지우면 "이 주변에서 찾기"가 조회 때마다 꺼진다.
+      setState((s) =>
         res.level === "complex"
-          ? { level: "complex", items: res.items, clusters: [], loading: false, error: null }
-          : { level: "cluster", items: [], clusters: res.items, loading: false, error: null },
+          ? { ...s, level: "complex", items: res.items, clusters: [], loading: false, error: null }
+          : { ...s, level: "cluster", items: [], clusters: res.items, loading: false, error: null },
       );
     } catch (e) {
       if (!alive.current || id !== reqId.current) return;
       // 401 은 client.ts 가 로그아웃으로 방송한다 — 여기선 문구만 만든다.
+      // 400 중에는 **지도를 너무 많이 축소한 경우**가 섞여 있다(서버 상한: 한 변 2도).
+      // 서버 문구는 파라미터 검증 오류라 사용자가 고칠 방법을 알려주지 못한다 —
+      // 우리가 보낸 bbox 로 그 사유를 짚어낼 수 있으면 그렇게 말한다.
       const msg =
         e instanceof ApiException
           ? e.error.code === "UNAUTHORIZED"
             ? "세션이 만료되었습니다. 다시 로그인해 주세요."
-            : e.error.message
+            : (e.status === 400 || e.status === 422) && bboxTooLarge(area.bbox)
+              ? "지도 범위가 너무 넓어 단지를 불러올 수 없습니다 — 확대하면 표시됩니다."
+              : e.error.message
           : "네트워크 오류가 발생했습니다.";
       setState((s) => ({ ...s, loading: false, error: msg }));
     }
@@ -87,6 +105,10 @@ export function useMapArea(filters: MapFilterState) {
   const onBoundsChange = useCallback(
     (bbox: string, zoom: number) => {
       lastArea.current = { bbox, zoom };
+      // 조회는 디바운스하지만 **범위 자체는 즉시** 반영한다. 이건 요청이 아니라
+      // "지금 어디를 보고 있나"이고, 화면(이 주변에서 찾기)이 곧바로 알아야 한다.
+      // 같은 값이면 새 객체를 만들지 않는다(불필요한 리렌더 금지).
+      setState((s) => (s.bbox === bbox ? s : { ...s, bbox }));
       schedule(MAP_DEBOUNCE_MS);
     },
     [schedule],

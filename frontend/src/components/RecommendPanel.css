@@ -40,6 +40,18 @@
   font-size: var(--fs-footnote);
 }
 
+/* 이 결과를 찾은 범위 — 결과 바로 위. 지도를 옮겨도 여기 남아 있어야 한다. */
+.rec__scope {
+  margin: 0 0 var(--sp-3);
+  font-size: var(--fs-caption);
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+.rec__scope-moved {
+  color: var(--warn-text);
+}
+
 .rec__status {
   margin: 0 0 var(--sp-3);
   font-size: var(--fs-footnote);

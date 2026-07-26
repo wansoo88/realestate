@@ -89,25 +89,77 @@ sources:
       erd.md Q3(동 좌표 확보) 후보 1순위. 동별 가치 추정의 근거.
       대장에 동별 좌표가 없으면 지도 API 지오코딩으로 보완(재조사 필요).
 
-  - id: school_info                 # 학교알리미 (학군·학업성취도)
+  - id: school_info                 # 학교 기본정보 (학군)
     priority: 2
-    enabled: false
+    enabled: true
     legal: public_open_api
-    provider: "학교알리미/공공데이터포털 — 학교 기본정보·학업성취"
-    endpoint: TBD
-    auth: { type: service_key, env: MOLIT_API_KEY }
+    provider: "교육부 NEIS 교육정보 개방 포털 — 학교기본정보(schoolInfo)"
+    endpoint: "https://open.neis.go.kr/hub/schoolInfo"
+    auth: { type: none }            # 인증키 없이 조회 가능(실측 2026-07-26)
+    parser: "app.ingest.poi:parse_neis_schools"
+    loader: "app.ingest.poi_loader:PostgisPoiLoader"
+    runner: "scripts/load_poi.py --dataset school --geocode"
     target_table: poi               # category=school
     cadence: weekly
+    rate_limit: { min_interval_sec: 0.5, jitter_sec: 0.2 }
+    notes: >
+      수도권 3개 시도교육청(B10 서울·J10 경기·E10 인천) × 초·중·고 = 4,462교(실측).
+      ⚠️ **좌표가 없다** — 도로명주소만 준다. 카카오 주소검색으로 지오코딩하며
+      동 중심점(REGION)은 채택하지 않는다(geocode.ADDRESS_TYPES_OK).
+      ⚠️ 학구도(school_district)가 없으면 이 좌표는 입지 점수에 쓰이지 않는다 —
+      도메인이 배정을 거리로 대체하지 않기 때문(analysis.assess_school).
+      학업성취도는 이 API 에 없다. 출처·기준연도 없이 넣지 않는다(G2).
 
-  - id: subway_station              # 지하철역·노선 (역세권·신설 호재)
+  # ── 입지 POI·도로·신설노선 (OSM) ──
+  # ⚠️ 공공데이터포털의 해당 API들(전국도시철도역사·대규모점포·병원·도시공원)은
+  #    **API별 활용신청이 사람 단계**라 현재 키로 403 이다(실측 2026-07-26:
+  #    B551182 병원정보·B552657 응급의료 모두 403, MOLIT 실거래만 200).
+  #    승인되면 이쪽을 1순위로 되돌리고 OSM 은 보완재로 내린다.
+  - id: osm_poi
     priority: 2
-    enabled: false
-    legal: public_open_api
-    provider: "공공데이터포털 — 지하철역 정보"
-    endpoint: TBD
-    auth: { type: service_key, env: MOLIT_API_KEY }
-    target_table: poi               # category=subway
+    enabled: true
+    legal: open_data_odbl          # 크롤링 아님 — 공개 API
+    provider: "OpenStreetMap / Overpass API"
+    endpoint: "https://overpass.kumi.systems/api/interpreter"
+    auth: { type: none }
+    parser: "app.ingest.poi"
+    loader: "app.ingest.poi_loader:PostgisPoiLoader"
+    runner: "scripts/fetch_poi.py → scripts/load_poi.py"
+    target_table: poi               # subway / mart / park / hospital / hazard
     cadence: weekly
+    rate_limit: { min_interval_sec: 5.0, jitter_sec: 1.0 }   # 무료 공용 인스턴스
+    license:
+      name: "ODbL 1.0"
+      attribution: "© OpenStreetMap contributors"
+      # ⚠️ 파생 DB 를 **공개 배포**하면 동일 라이선스로 공개할 의무가 생긴다(share-alike).
+      #    개인 비상업 사용에는 제약이 없으나, 서비스를 외부 공개할 때 재검토 대상이다.
+      share_alike_review_required: true
+    notes: >
+      실측 수도권 건수(2026-07-26): 역 786(여객 기준), 마트 3,763, 공원 8,213,
+      병원 2,245, 유해요소 후보 12,398, 간선도로 24,638, 공사중·계획 철도 221.
+      ⚠️ 노선(attrs.lines)은 역 노드가 아니라 정차지점(stop_position)에 붙어 있어
+      좌표·이름으로 이어야 한다(poi.assign_lines). ID 직접 매칭은 0건이다.
+      ⚠️ 태그 품질 편차 있음 — 성형외과가 amenity=hospital 로 붙는 사례 확인.
+      응급실 여부는 emergency 태그가 없으면 '모름'으로 두고 없음으로 단정하지 않는다.
+
+  - id: osm_road_transit
+    priority: 2
+    enabled: true
+    legal: open_data_odbl
+    provider: "OpenStreetMap / Overpass API — 간선도로 선형·신설노선"
+    endpoint: "https://overpass.kumi.systems/api/interpreter"
+    auth: { type: none }
+    parser: "app.ingest.poi:parse_roads / parse_transit_plans"
+    target_table: road_segment      # + transit_plan
+    cadence: monthly
+    rate_limit: { min_interval_sec: 5.0, jitter_sec: 1.0 }
+    notes: >
+      motorway→고속도로 · trunk→자동차전용 · primary→간선 만 적재한다.
+      보조간선·이면도로까지 넣으면 모든 단지가 '대로 횡단'이 되어 판정이 무의미해진다.
+      ⚠️ 현재 road_segment 는 **소비처가 둘 다 비어 있어 효과가 없다**:
+         (1) 통학로 횡단 판정은 school_district 필요(0행)
+         (2) 동별 간선도로 거리는 building.geom 필요(52,901행 중 좌표 0행)
+      두 선행조건 중 하나가 채워질 때 적재하는 것이 순서상 맞다.
 
   # ── 3순위: 시장 지표 (타이밍 근거) ──
   - id: reb_market_index            # 부동산원 전세가율·미분양·매수우위지수

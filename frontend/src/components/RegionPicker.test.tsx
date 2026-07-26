@@ -22,6 +22,19 @@ describe("선택 전", () => {
     expect(scope.textContent).toContain("50개");
     expect(scope.textContent).toContain("지역을 좁히면");
   });
+
+  /**
+   * "이 주변"(지도 범위)이 걸려 있으면 전체에서 찾지 **않는다**.
+   * 이 분기가 없으면 화면이 "수도권 전체에서 찾습니다"라고 거짓말한다.
+   */
+  it("이 주변이 걸려 있으면 전체라고 말하지 않는다", () => {
+    render(<RegionPicker value={[]} onChange={vi.fn()} areaScoped />);
+
+    expect(screen.queryByText(/수도권 전체에서 찾습니다/)).toBeNull();
+    const scope = screen.getByText(/이 주변/);
+    expect(scope.textContent).toMatch(/지도 범위/);
+    expect(scope.textContent).toMatch(/교집합/); // 시군구를 더하면 어떻게 되는지도 말한다
+  });
 });
 
 describe("멀티 선택", () => {

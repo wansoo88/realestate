@@ -7,6 +7,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RecommendationJob } from "../api/client";
+import type { SearchScope } from "../lib/searchScope";
 import { RecommendPanel } from "./RecommendPanel";
 
 afterEach(cleanup);
@@ -21,6 +22,11 @@ function base(over: Partial<React.ComponentProps<typeof RecommendPanel>> = {}) {
     budgetKrw: 850_000_000,
     regionCodes: [] as string[],
     onRegionsChange: noop,
+    currentBbox: "126.9,37.4,127.0,37.6" as string | null,
+    areaBbox: null as string | null,
+    onCaptureArea: noop as (bbox: string) => void,
+    onClearArea: noop,
+    appliedScope: null as SearchScope | null,
     onStart: noop,
     onCancel: noop,
     ...over,
@@ -100,5 +106,68 @@ describe("결과", () => {
     render(<RecommendPanel {...base({ phase: "done", job: DONE })} />);
     expect(screen.getByText("투자 권유가 아닙니다.")).toBeTruthy();
     expect(screen.getByText(/최대 30일/)).toBeTruthy();
+  });
+
+  it("서버 notes(좌표 없는 단지 누락 등)를 빠뜨리지 않는다", () => {
+    const job = {
+      ...DONE,
+      notes: ["좌표가 없는 단지 5.5%는 지도 범위(bbox) 검색에서 빠졌습니다."],
+    };
+    render(<RecommendPanel {...base({ phase: "done", job })} />);
+    expect(screen.getByText(/좌표가 없는 단지 5.5%/)).toBeTruthy();
+  });
+});
+
+/**
+ * 결과가 나온 뒤 지도를 옮기면 "그때 그 범위"를 알 길이 사라진다.
+ * 그래서 **실행 당시 범위**를 결과 옆에 적어 둔다(조건 상태가 아니라 실행 기록을 그린다).
+ */
+describe("이 결과를 찾은 범위", () => {
+  const SCOPE: SearchScope = { regionCodes: ["11680"], bbox: "126.9,37.4,127.0,37.6" };
+
+  it("어느 범위로 돌았는지 결과와 함께 남는다", () => {
+    render(<RecommendPanel {...base({ phase: "done", job: DONE, appliedScope: SCOPE })} />);
+    expect(
+      screen.getByText(/이 결과를 찾은 범위: 이 주변\(약 8\.8 × 22km\) ∩ 서울 강남구/),
+    ).toBeTruthy();
+  });
+
+  it("실행 뒤 조건을 바꿔도 결과의 범위 표기는 따라 바뀌지 않는다", () => {
+    // 지금 조건은 비었는데(칩 해제·지역 초기화) 결과는 그때 범위에서 나온 것이다
+    render(
+      <RecommendPanel
+        {...base({ phase: "done", job: DONE, appliedScope: SCOPE, areaBbox: null, regionCodes: [] })}
+      />,
+    );
+    expect(screen.getByText(/이 결과를 찾은 범위: 이 주변\(약 8\.8 × 22km\) ∩ 서울 강남구/))
+      .toBeTruthy();
+  });
+
+  it("지금 지도와 다른 범위면 그 사실을 말한다(지금 화면 = 결과 로 읽히지 않게)", () => {
+    render(
+      <RecommendPanel
+        {...base({
+          phase: "done",
+          job: DONE,
+          appliedScope: SCOPE,
+          currentBbox: "127.5,37.4,127.6,37.6",
+        })}
+      />,
+    );
+    expect(screen.getByText(/지금 보고 있는 지도와 다른 범위입니다/)).toBeTruthy();
+  });
+
+  it("지도가 그대로면 굳이 다르다고 말하지 않는다", () => {
+    render(
+      <RecommendPanel
+        {...base({ phase: "done", job: DONE, appliedScope: SCOPE, currentBbox: SCOPE.bbox })}
+      />,
+    );
+    expect(screen.queryByText(/지금 보고 있는 지도와 다른 범위입니다/)).toBeNull();
+  });
+
+  it("실행 전에는 범위 표기를 만들지 않는다(돌지도 않은 분석의 범위는 없다)", () => {
+    const { container } = render(<RecommendPanel {...base({ appliedScope: null })} />);
+    expect(container.textContent).not.toContain("이 결과를 찾은 범위");
   });
 });

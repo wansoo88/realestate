@@ -2,7 +2,12 @@
  * "내 조건이 지도에 반영되는가" — 이 제품이 지도 뷰어가 아니라는 증거.
  */
 import { describe, expect, it } from "vitest";
-import { buildMapQuery, filterChips, type MapFilterState } from "./mapFilters";
+import {
+  buildMapQuery,
+  effectiveBudgetKrw,
+  filterChips,
+  type MapFilterState,
+} from "./mapFilters";
 
 const BASE: MapFilterState = {
   budgetKrw: 850_000_000,
@@ -39,6 +44,44 @@ describe("buildMapQuery", () => {
   it("예산을 모르면(null) 필터를 걸지 않는다 — 0원으로 좁혀 전멸시키지 않는다", () => {
     const q = buildMapQuery("1,2,3,4", 15, { ...BASE, budgetKrw: null });
     expect(q.max_price_krw).toBeUndefined();
+  });
+});
+
+/**
+ * 희망 매매가 — 사용자가 정한 상한. 추천(`budget_override_krw`)과 **같은 숫자**를 지도에도
+ * 써야 "추천에는 뜨는데 지도엔 없는 단지"가 생기지 않는다.
+ */
+describe("희망 매매가가 지도 상한이 된다", () => {
+  it("희망가가 있으면 한도 대신 희망가로 좁힌다", () => {
+    const q = buildMapQuery("1,2,3,4", 15, { ...BASE, targetPriceKrw: 700_000_000 });
+    expect(q.max_price_krw).toBe(700_000_000);
+  });
+
+  it("한도를 **넘겨 잡아도 그대로 쓴다** — 못 사는 집을 보는 게 이 기능의 목적이다", () => {
+    const q = buildMapQuery("1,2,3,4", 15, { ...BASE, targetPriceKrw: 1_200_000_000 });
+    expect(q.max_price_krw).toBe(1_200_000_000);
+  });
+
+  it("희망가가 없으면 예전대로 한도를 쓴다", () => {
+    expect(effectiveBudgetKrw(BASE)).toBe(850_000_000);
+    expect(effectiveBudgetKrw({ ...BASE, targetPriceKrw: null })).toBe(850_000_000);
+    expect(effectiveBudgetKrw({ ...BASE, targetPriceKrw: 0 })).toBe(850_000_000);
+  });
+
+  it("예산 스위치를 끄면 희망가도 함께 빠진다(끄는 게 실제로 동작한다)", () => {
+    const q = buildMapQuery("1,2,3,4", 15, {
+      ...BASE,
+      targetPriceKrw: 700_000_000,
+      budgetApplied: false,
+    });
+    expect(q.max_price_krw).toBeUndefined();
+  });
+
+  it("칩이 '내 예산'이 아니라 '희망가'라고 말한다 — 둘은 다른 숫자다", () => {
+    const chips = filterChips({ ...BASE, targetPriceKrw: 700_000_000 });
+    const budget = chips.filter((c) => c.id === "budget");
+    expect(budget).toHaveLength(1); // 예산 칩이 두 개로 늘지 않는다
+    expect(budget[0].label).toBe("희망가 7.00억 이하");
   });
 });
 

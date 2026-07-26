@@ -102,6 +102,84 @@ class LoanLimits:
 
 
 @dataclass(frozen=True)
+class PurchasePlan:
+    """**희망 매매가 기준** 자금계획.
+
+    `AffordabilityResult` 가 "최대 얼마까지 살 수 있나"(역방향)라면 이쪽은
+    "이 가격이면 얼마가 더 필요하고 매달 얼마를 갚나"(정방향)다. 둘은 **같은 부등식**의
+    양쪽 끝이라 서로 모순될 수 없어야 한다 —
+
+        loan_feasible  ⟺  target_price ≤ max_purchase_krw
+
+    두 값이 어긋나면 어느 한쪽이 틀린 것이다(테스트가 이 등가를 못박는다).
+
+    ⚠️ 한도를 넘어도 **계산은 끝까지 한다.** "불가능합니다"만 띄우면 사용자는
+    *얼마를 더 모아야 하는지* 알 수 없다. 그래서 `over_limit_krw`(모자란 현금)와
+    `binding`(무엇이 막았는가)을 함께 준다.
+    """
+
+    target_price_krw: int
+    costs: CostBreakdown
+    #: 매매가 + 취득 부대비용 (실제로 준비해야 하는 총액)
+    total_needed_krw: int
+    #: 내가 지금 낼 수 있는 현금 = 보유현금 − 이사·수리 예비비.
+    #: `AffordabilityResult.usable_cash_krw` 와 **반드시 같은 값**이다 —
+    #: 화면에 "내 돈"이 두 개 뜨면 사용자는 어느 쪽을 믿어야 할지 모른다.
+    own_cash_krw: int
+    #: 더 필요한 돈 (= total_needed − own_cash, 음수는 0 으로 자른다)
+    shortfall_krw: int
+    #: 필요 대출 (부족분 전액을 대출로 메운다는 전제)
+    required_loan_krw: int
+    limits: LoanLimits
+    loan_feasible: bool
+    #: 한도 초과분(불가일 때만). **이 금액만큼 현금이 더 필요하다**는 뜻이다.
+    over_limit_krw: int | None
+    #: 한도 안에서 실제로 받을 수 있는 금액 = min(필요대출, 한도).
+    #: 계약 필수 필드는 아니지만 이게 없으면 "그래서 얼마는 빌릴 수 있는데?"에 답을 못 한다.
+    feasible_loan_krw: int
+    #: 필요 대출 전액을 빌렸다고 가정한 월 원리금(원리금균등·거치 없음).
+    monthly_payment_krw: int
+    #: 한도까지만 빌렸을 때의 월 원리금. 한도 안이면 `monthly_payment_krw` 와 같다.
+    monthly_payment_feasible_krw: int
+    #: 만기까지 낼 이자 총액(필요 대출 기준). 금리 가정이 바뀌면 크게 움직인다.
+    total_interest_krw: int
+    terms: LoanTerms
+
+    def to_api(self) -> dict[str, Any]:
+        return {
+            "target_price_krw": self.target_price_krw,
+            "total_needed_krw": self.total_needed_krw,
+            "cost_breakdown": {
+                "tax": self.costs.acquisition_tax_krw,
+                "brokerage": self.costs.brokerage_krw,
+                # 계약상 키는 `etc` 다. 내부 이름(registration)과 다르지만 여기서만 바꾼다 —
+                # 등기·법무 외 항목이 늘어도 응답 키가 흔들리지 않게 하려는 것이다.
+                "etc": self.costs.registration_krw,
+                "total": self.costs.total_krw,
+            },
+            "own_cash_krw": self.own_cash_krw,
+            "shortfall_krw": self.shortfall_krw,
+            "required_loan_krw": self.required_loan_krw,
+            "loan_feasible": self.loan_feasible,
+            "loan_limit_krw": self.limits.effective_krw,
+            "over_limit_krw": self.over_limit_krw,
+            "binding_constraint": self.limits.binding,
+            "feasible_loan_krw": self.feasible_loan_krw,
+            "monthly_payment_krw": self.monthly_payment_krw,
+            "monthly_payment_feasible_krw": self.monthly_payment_feasible_krw,
+            "total_interest_krw": self.total_interest_krw,
+            "terms": {
+                # 요청은 소수(0.04), 응답은 퍼센트(4.0)다 — 단위를 응답 필드명에 박아
+                # 프론트가 100 을 곱할지 말지 헷갈리지 않게 한다.
+                "annual_rate_pct": round(self.terms.annual_rate * 100, 4),
+                "years": self.terms.years,
+                "repayment": "equal_total",   # 원리금균등
+                "grace_months": 0,            # 거치기간 없음(가정)
+            },
+        }
+
+
+@dataclass(frozen=True)
 class AffordabilityResult:
     """`POST /affordability` 응답의 원천."""
 
@@ -114,9 +192,11 @@ class AffordabilityResult:
     assumptions: list[str] = field(default_factory=list)
     evidence: list[dict[str, Any]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    #: 희망 매매가를 준 경우에만 채워진다. 안 주면 None → 응답에 `plan` 키가 없다.
+    plan: PurchasePlan | None = None
 
     def to_api(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "max_purchase_krw": self.max_purchase_krw,
             "breakdown": {
                 "own_cash_krw": self.usable_cash_krw,
@@ -139,3 +219,8 @@ class AffordabilityResult:
             "disclaimer": "실제 한도는 금융기관 심사에 따라 달라집니다. "
                           "투자 권유가 아니며 개인 판단을 돕는 참고 자료입니다.",
         }
+        # 희망가를 안 줬으면 키 자체를 넣지 않는다. `"plan": null` 로 내보내면
+        # "계획이 없다"와 "계획이 실패했다"를 프론트가 구분할 수 없다.
+        if self.plan is not None:
+            payload["plan"] = self.plan.to_api()
+        return payload

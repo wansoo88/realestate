@@ -68,9 +68,10 @@ def _set_profile(client, token, cash=300_000_000, income=200_000_000):
     assert r.status_code == 200, r.text
 
 
-def _seed_complex(repo, *, complex_id=1, ask_oku=7.0, area=84.97, households=500):
+def _seed_complex(repo, *, complex_id=1, ask_oku=7.0, area=84.97, households=500,
+                  lon=127.05, lat=37.51, region=REGION, name="테스트단지"):
     repo.add_complex(ComplexSummary(
-        id=complex_id, name="테스트단지", lon=127.05, lat=37.51, region_code=REGION,
+        id=complex_id, name=name, lon=lon, lat=lat, region_code=region,
         built_year=2015, total_households=households,
         recent_price_krw=int(ask_oku * OKU), price_as_of=TODAY.isoformat(),
         active_listings=2))
@@ -638,3 +639,326 @@ def test_실패하면_job이_failed로_남는다():
     run_recommendation_job(repo=repo, settings=object(), job_id="rec_x",
                            user_id=1, criteria={})
     assert repo.saved == [JOB_FAILED], f"실패 시 상태가 {repo.saved} 로 남았습니다"
+
+
+# ---------------------------------------------------------------------------
+# "이 주변에서 검색" (REC-5) — API 경로
+#
+# 확정 계약: `bbox="minLon,minLat,maxLon,maxLat"` (/map/complexes 와 같은 형식).
+# region_codes 와 둘 다 오면 **교집합**. 둘 다 없으면 전체. 형식 오류는 **422**.
+# ---------------------------------------------------------------------------
+
+#: 강남 근처 / 평촌(안양 동안구) 근처 — 서로 겹치지 않는 두 범위.
+BBOX_GANGNAM = "127.01,37.45,127.12,37.54"
+BBOX_PYEONGCHON = "126.92,37.35,126.99,37.42"
+
+
+def _seed_two_areas(repo):
+    """강남 좌표 단지 1번, 평촌 좌표 단지 2번. **예산·가격은 동일하게** 둔다.
+
+    가격을 다르게 두면 결과가 바뀐 이유가 bbox 때문인지 예산 때문인지 알 수 없다.
+    """
+    _seed_complex(repo, complex_id=1, ask_oku=7.0, lon=127.05, lat=37.51,
+                  region="1168000000", name="강남단지")
+    _seed_complex(repo, complex_id=2, ask_oku=7.0, lon=126.95, lat=37.39,
+                  region="4117300000", name="평촌단지")
+
+
+def test_bbox로_같은_예산에서_다른_단지가_나온다(client):
+    """★ 요점: 예산을 그대로 두고 **bbox 만 바꾸면** 결과가 달라져야 한다."""
+    token = _login(client)
+    _set_profile(client, token)
+    _seed_two_areas(client.repo)
+
+    gangnam = _run(client, token, {"bbox": BBOX_GANGNAM})
+    pyeongchon = _run(client, token, {"bbox": BBOX_PYEONGCHON})
+
+    assert [i["complex"]["name"] for i in gangnam["items"]] == ["강남단지"]
+    assert [i["complex"]["name"] for i in pyeongchon["items"]] == ["평촌단지"]
+
+
+def test_bbox가_없으면_전체가_후보다(client):
+    token = _login(client)
+    _set_profile(client, token)
+    _seed_two_areas(client.repo)
+
+    body = _run(client, token, {})
+    assert {i["complex"]["name"] for i in body["items"]} == {"강남단지", "평촌단지"}
+
+
+def test_지역과_bbox는_교집합이다(client):
+    """지역은 강남, 범위는 평촌 → **둘 다 만족하는 단지가 없다**(합집합이면 2건이 된다)."""
+    token = _login(client)
+    _set_profile(client, token)
+    _seed_two_areas(client.repo)
+
+    both = _run(client, token, {"region_codes": ["11680"], "bbox": BBOX_PYEONGCHON})
+    assert both["items"] == [], "교집합이 아니라 합집합으로 동작한다"
+
+    # 같은 지역 + 같은 범위면 그 단지가 나온다(교집합이 과하게 좁지도 않다).
+    match = _run(client, token, {"region_codes": ["11680"], "bbox": BBOX_GANGNAM})
+    assert [i["complex"]["name"] for i in match["items"]] == ["강남단지"]
+
+
+def test_교집합이면_그_사실을_notes로_말한다(client):
+    token = _login(client)
+    _set_profile(client, token)
+    _seed_two_areas(client.repo)
+
+    body = _run(client, token, {"region_codes": ["11680"], "bbox": BBOX_GANGNAM})
+    assert any("교집합" in n for n in body["notes"]), body["notes"]
+
+
+def test_좌표없는_단지가_빠지면_숫자로_고지한다(client):
+    """★ 좌표 미확보 단지는 bbox 로 못 찾는다 — **조용히 빠지면 안 된다.**
+
+    고정 문구("약 5%")가 아니라 그때그때 센 숫자를 싣는다. 수집이 진행되면
+    문구도 같이 따라가야 한다.
+    """
+    token = _login(client)
+    _set_profile(client, token)
+    _seed_complex(client.repo, complex_id=1, lon=127.05, lat=37.51, name="좌표있음")
+    client.repo.add_complex(ComplexSummary(
+        id=2, name="좌표없음", lon=None, lat=None, region_code=REGION))
+
+    body = _run(client, token, {"bbox": BBOX_GANGNAM})
+
+    assert [i["complex"]["name"] for i in body["items"]] == ["좌표있음"]
+    note = [n for n in body["notes"] if "좌표" in n]
+    assert note, body["notes"]
+    assert "1개" in note[0] and "2개" in note[0], f"세어서 말하지 않는다: {note[0]}"
+
+
+def test_좌표가_전부_있으면_겁주지_않는다(client):
+    """빠진 게 없는데 '빠질 수 있다'고 하면 그 고지는 곧 무시된다."""
+    token = _login(client)
+    _set_profile(client, token)
+    _seed_complex(client.repo, complex_id=1, lon=127.05, lat=37.51)
+
+    body = _run(client, token, {"bbox": BBOX_GANGNAM})
+    assert not [n for n in body["notes"] if "좌표" in n], body["notes"]
+
+
+def test_bbox를_criteria_스냅샷에_남긴다(client):
+    """재현성 — 어떤 범위로 돌린 결과인지 나중에 확인할 수 있어야 한다."""
+    token = _login(client)
+    _set_profile(client, token)
+    _seed_two_areas(client.repo)
+
+    body = _run(client, token, {"bbox": BBOX_GANGNAM})
+    assert body["criteria_snapshot"]["bbox"] == BBOX_GANGNAM
+
+
+# --- 입력 검증 (형식 오류는 422) --------------------------------------------
+
+@pytest.mark.parametrize("bad", [
+    "bad", "126.9,37.5,127.1",                 # 형식
+    "127.2,37.5,127.1,37.6",                   # min >= max
+    "126.9,91,127.1,92",                       # 위도 범위 밖
+    "-181,37.5,127.1,37.6",                    # 경도 범위 밖
+    "120.0,30.0,130.0,40.0",                   # 너무 넓음
+    "37.5,126.9,37.6,127.1",                   # 위경도 뒤바뀜
+])
+def test_잘못된_bbox는_422(client, bad):
+    token = _login(client)
+    r = client.post("/api/v1/recommendations", json={"bbox": bad}, headers=_auth(token))
+    assert r.status_code == 422, r.text
+
+
+@pytest.mark.parametrize("bad", ["%", "11%", "_1680", "11680; DROP", "abc", ""])
+def test_잘못된_region_code는_422(client, bad):
+    """SR21-4 — `%` 를 넣으면 지역 선택이 **조용히 무력화**된다(전 지역 매칭).
+
+    인젝션은 아니지만 실패가 실패로 보이지 않아서 더 나쁘다 — 입구에서 거절한다.
+    """
+    token = _login(client)
+    r = client.post("/api/v1/recommendations",
+                    json={"region_codes": [bad]}, headers=_auth(token))
+    assert r.status_code == 422, r.text
+
+
+def test_와일드카드_지역코드가_범위를_넓히지_못한다(client):
+    """검증을 우회해 러너까지 내려가도 `%` 가 전 지역으로 번지지 않아야 한다."""
+    from app.agents.recommend import _analyze
+
+    _seed_two_areas(client.repo)
+    token = _login(client)
+    _set_profile(client, token)
+
+    from app.core.config import get_settings
+    user = client.repo.get_user_by_email("a@b.co")
+    status, result = _analyze(client.repo, get_settings(), user.id,
+                              {"region_codes": ["%"]}, None)
+    assert status == "done"
+    assert result["items"] == [], "`%` 가 전 지역을 매칭했다(조용한 실패)"
+
+
+def test_bbox가_비어있으면_전체로_본다(client):
+    """빈 문자열은 '안 보냄'과 같게 다룬다 — 프론트가 초기값으로 ''를 보낼 수 있다."""
+    token = _login(client)
+    _set_profile(client, token)
+    _seed_two_areas(client.repo)
+
+    body = _run(client, token, {"bbox": ""})
+    assert len(body["items"]) == 2
+
+
+def test_러너가_bbox형식오류를_조용히_넘기지_않는다(client):
+    """API 를 거치지 않는 호출(스크립트·재실행)에서도 무시하지 않고 말한다."""
+    from app.agents.recommend import _analyze
+    from app.core.config import get_settings
+
+    _seed_two_areas(client.repo)
+    token = _login(client)
+    _set_profile(client, token)
+    user = client.repo.get_user_by_email("a@b.co")
+
+    status, result = _analyze(client.repo, get_settings(), user.id,
+                              {"bbox": "쓰레기"}, None)
+    assert status == "done"
+    assert any("bbox" in n for n in result["notes"]), result["notes"]
+
+
+# ---------------------------------------------------------------------------
+# 희망 매매가를 예산으로 (ORDER 2026-07-26)
+#
+# `budget_override_krw` 의 의미는 **상한**이다(대역이 아니다). 근거는
+# `app/agents/recommend.py::_budget_notes` 참조.
+# ---------------------------------------------------------------------------
+
+def test_희망가를_주면_후보가_실제로_달라진다(client):
+    """같은 데이터·같은 프로필인데 희망가만 바꿔서 결과가 바뀌는지 본다.
+
+    ⚠️ 여기서 '달라진다'를 상수로 확인하지 않는다. **희망가 없이 돌린 결과**를
+    기준으로 삼아 두 실행을 비교한다 — 기준선이 함께 움직이면 대조가 무의미해진다.
+    """
+    token = _login(client)
+    _set_profile(client, token)                       # 현금 3억 · 소득 2억
+    _seed_complex(client.repo, complex_id=1, ask_oku=7.0, name="싼단지")
+    _seed_complex(client.repo, complex_id=2, ask_oku=8.5, name="비싼단지")
+
+    wide = _run(client, token, {"region_codes": [REGION]})
+    assert {i["complex"]["id"] for i in wide["items"]} == {1, 2}, \
+        "기준선부터 두 단지가 다 나와야 대조가 성립한다"
+
+    narrow = _run(client, token, {"region_codes": [REGION],
+                                  "budget_override_krw": 8 * OKU})
+
+    assert {i["complex"]["id"] for i in narrow["items"]} == {1}
+    dropped = [e for e in narrow["excluded"] if e["complex_id"] == 2]
+    assert dropped and dropped[0]["reason_code"] == "over_budget"
+
+
+def test_희망가가_예산_상한으로_고지된다(client):
+    token = _login(client)
+    _set_profile(client, token)
+    _seed_complex(client.repo, ask_oku=7.0)
+
+    body = _run(client, token, {"region_codes": [REGION],
+                                "budget_override_krw": 8 * OKU})
+    joined = " ".join(body["notes"])
+    assert f"{8 * OKU:,}" in joined
+    assert "상한" in joined
+
+
+def test_희망가가_최대구매가를_넘으면_그_사실을_말한다(client):
+    """슬라이더를 올린 만큼 살 수 있다고 믿게 두지 않는다.
+
+    예산 필터가 사용자의 실제 한도를 **조용히 대체**하는 것이 이 고지가 막는 문제다.
+    """
+    token = _login(client)
+    _set_profile(client, token, cash=100_000_000, income=50_000_000)
+    _seed_complex(client.repo, ask_oku=7.0)
+
+    over = _run(client, token, {"region_codes": [REGION],
+                                "budget_override_krw": 30 * OKU})
+    assert any("초과" in n and "최대 실구매" in n for n in over["notes"]), over["notes"]
+
+    # 한도 안의 희망가에는 그 경고가 붙지 않는다(항상 겁주면 아무도 안 읽는다).
+    under = _run(client, token, {"region_codes": [REGION],
+                                 "budget_override_krw": 1 * OKU})
+    assert not any("최대 실구매" in n for n in under["notes"]), under["notes"]
+
+
+def test_추천카드에_희망가_대비_차액이_실린다(client):
+    """프론트가 '희망가보다 1.2억 저렴'을 그릴 수 있어야 한다."""
+    token = _login(client)
+    _set_profile(client, token)
+    _seed_complex(client.repo, ask_oku=7.0)
+
+    budget = 8 * OKU
+    body = _run(client, token, {"region_codes": [REGION],
+                                "budget_override_krw": budget})
+    item = body["items"][0]
+    # 비교 대상은 파이프라인이 예산 판정에 실제로 쓴 값이어야 한다.
+    assert item["budget_gap_krw"] == item["est_price_krw"] - budget
+    assert item["budget_gap_krw"] < 0, "희망가보다 싼 후보는 음수여야 한다"
+    assert item["budget_gap_pct"] == pytest.approx(
+        item["budget_gap_krw"] * 100.0 / budget, abs=0.05)
+
+
+def test_희망가가_없으면_차액의_기준은_최대구매가다(client):
+    """희망가를 안 줘도 필드는 존재한다 — 키가 없다가 생기면 프론트가 깨진다."""
+    token = _login(client)
+    _set_profile(client, token)
+    _seed_complex(client.repo, ask_oku=7.0)
+
+    body = _run(client, token, {"region_codes": [REGION]})
+    item = body["items"][0]
+    assert "budget_gap_krw" in item and item["budget_gap_krw"] is not None
+    assert item["budget_gap_krw"] < 0        # 추천된 이상 예산 이하다
+
+
+def test_예산이_없으면_차액은_None이다(client):
+    """자산 미입력 등으로 예산이 0 이면 '0 차이'가 아니라 **모름**이다(G2)."""
+    from app.agents.recommend import _annotate_budget_gap
+
+    items = [{"est_price_krw": 700_000_000}]
+    _annotate_budget_gap(items, 0)
+    assert items[0]["budget_gap_krw"] is None
+    assert items[0]["budget_gap_pct"] is None
+
+
+def test_희망가가_내_한도보다_높아도_후보가_사라지지_않는다(client):
+    """회귀: `budget_override_krw` 가 **제외 판정에 닿지 않던** 버그.
+
+    예전에는 파이프라인이 항상 `affordability.max_purchase_krw` 로만 예산을 판정했다.
+    그래서 희망가를 자기 한도보다 높게 잡으면 조회는 통과한 후보가 전부 "예산 초과"로
+    잘려 **결과가 통째로 비었다** — 슬라이더를 올릴수록 결과가 사라지는 형태라
+    사용자가 원인을 짐작할 수도 없다.
+
+    ⚠️ 기준선(희망가 없이 = 한도로 판정)이 실제로 비어야 대조가 성립한다. 그래야
+    "희망가 덕분에 살아난 것"이지 "원래 나오던 것"이 아니다.
+    """
+    token = _login(client)
+    _set_profile(client, token, cash=100_000_000, income=50_000_000)   # 한도 작게
+    _seed_complex(client.repo, ask_oku=7.0)
+
+    baseline = _run(client, token, {"region_codes": [REGION]})
+    assert baseline["items"] == [], "기준선이 비어 있지 않으면 이 회귀를 못 잡는다"
+
+    with_target = _run(client, token, {"region_codes": [REGION],
+                                       "budget_override_krw": 8 * OKU})
+    assert [i["complex"]["id"] for i in with_target["items"]] == [1]
+    # 살려 주되 **한도를 넘는다는 사실은 반드시 말한다**(조용히 통과시키지 않는다).
+    assert any("최대 실구매" in n for n in with_target["notes"]), with_target["notes"]
+
+
+def test_예산상한은_희망가가_없으면_최대구매가로_폴백한다():
+    """`AnalysisContext.budget_krw` 를 안 주면 기존 동작 그대로여야 한다."""
+    from app.agents.orchestrator import AnalysisContext
+    from app.domain.affordability.models import (
+        AffordabilityResult, CostBreakdown, LoanLimits,
+    )
+
+    afford = AffordabilityResult(
+        max_purchase_krw=837_750_000, usable_cash_krw=280_000_000,
+        loan_krw=557_750_000,
+        limits=LoanLimits(ltv_krw=1, dsr_krw=1, dti_krw=None,
+                          effective_krw=1, binding="LTV"),
+        costs=CostBreakdown(0, 0, 0, 0), binding_constraint="LTV")
+
+    assert AnalysisContext(affordability=afford,
+                           candidates=[]).effective_budget_krw == 837_750_000
+    assert AnalysisContext(affordability=afford, candidates=[],
+                           budget_krw=600_000_000).effective_budget_krw == 600_000_000

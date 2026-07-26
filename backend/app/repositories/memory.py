@@ -13,12 +13,25 @@ from app.domain.location.models import BuildingLocationFact, LocationFacts
 from app.domain.valuation.models import ListingRow, TradeRow
 from app.repositories.base import (
     STATUS_APPROVED,
+    BBox,
     ComplexSummary,
     JobRecord,
     LastAdminError,
     ProfileRecord,
     UserRecord,
 )
+
+
+def _within(c: ComplexSummary, bbox: BBox) -> bool:
+    """단지가 bbox 안에 있나. **좌표가 없으면 False** (PostGIS `&&` 와 같은 결과).
+
+    좌표 없는 단지를 여기서 통과시키면 인메모리 테스트만 초록불이 되고,
+    실제 PostGIS 에서는 조용히 빠진다 — 가장 나쁜 종류의 불일치다.
+    """
+    if c.lon is None or c.lat is None:
+        return False
+    return (bbox.min_lon <= c.lon <= bbox.max_lon
+            and bbox.min_lat <= c.lat <= bbox.max_lat)
 
 
 class InMemoryRepository:
@@ -151,9 +164,11 @@ class InMemoryRepository:
         built_after: int | None = None,
         limit: int = 500,
     ) -> list[ComplexSummary]:
+        box = BBox(min_lon, min_lat, max_lon, max_lat)
         out: list[ComplexSummary] = []
         for c in self._complexes:
-            if not (min_lon <= c.lon <= max_lon and min_lat <= c.lat <= max_lat):
+            # 좌표 없는 단지는 지도에 찍을 수 없다 → 자연히 빠진다(PostGIS `&&` 와 동일).
+            if not _within(c, box):
                 continue
             if built_after is not None and (c.built_year or 0) < built_after:
                 continue
@@ -227,19 +242,40 @@ class InMemoryRepository:
 
     def recommendation_candidates(
         self, *, region_codes: list[str], max_price_krw: int | None = None,
-        limit: int = 50,
+        limit: int = 50, bbox: BBox | None = None,
     ) -> list[ComplexSummary]:
         """조건에 맞는 후보 단지. 예산으로 **걸러내지 않는다** — 초과 단지도 넘기고
-        파이프라인이 사유와 함께 제외한다(ux/README.md §4)."""
+        파이프라인이 사유와 함께 제외한다(ux/README.md §4).
+
+        `region_codes` 와 `bbox` 가 둘 다 오면 **교집합**이다(PostGIS 구현과 동일).
+        ⚠️ bbox 는 **좌표가 있는 단지만** 찾는다 — geom NULL 인 단지가 PostGIS 에서
+        `&&` 로 자연히 빠지는 것과 같게, 여기서도 lon/lat 이 None 이면 뺀다.
+        (여기서만 통과시키면 인메모리 테스트가 프로덕션을 대표하지 못한다.)
+        """
         wanted = {r for r in (region_codes or [])}
         out: list[ComplexSummary] = []
         for c in self._complexes:
-            if wanted and c.region_code not in wanted:
+            if wanted and not any(str(c.region_code or "").startswith(r) for r in wanted):
+                continue
+            if bbox is not None and not _within(c, bbox):
                 continue
             out.append(c)
             if len(out) >= limit:
                 break
         return out
+
+    def geocode_coverage(
+        self, *, region_codes: list[str] | None = None) -> tuple[int, int]:
+        """(좌표 있는 단지 수, 전체 단지 수). bbox 검색에서 빠지는 몫을 세는 데 쓴다."""
+        wanted = {r for r in (region_codes or [])}
+        total = with_geom = 0
+        for c in self._complexes:
+            if wanted and not any(str(c.region_code or "").startswith(r) for r in wanted):
+                continue
+            total += 1
+            if c.lon is not None and c.lat is not None:
+                with_geom += 1
+        return with_geom, total
 
     def listings_for_complex(self, complex_id: int) -> list[ListingRow]:
         return list(self._listings.get(complex_id, ()))

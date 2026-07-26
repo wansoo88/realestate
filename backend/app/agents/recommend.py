@@ -47,6 +47,7 @@ from app.agents.orchestrator import (
 )
 from app.agents.scoring import BASIS_USER_WEIGHTED
 from app.core.security import decrypt_amount, load_key
+from app.repositories.base import BBox, BBoxError
 from app.domain.affordability.engine import compute_affordability
 from app.domain.affordability.models import Borrower, PropertyFacts
 from app.domain.listings.dedup import AREA_TOLERANCE_M2, group_duplicates
@@ -123,8 +124,10 @@ def _analyze(repo: Any, settings: Any, user_id: int, criteria: dict[str, Any],
     prop = PropertyFacts(purpose=str(criteria.get("purpose") or "live"))
     afford = compute_affordability(borrower, rules, prop=prop)
 
-    # 예산: 명시 override 우선, 없으면 실구매 가능액.
-    budget = criteria.get("budget_override_krw") or afford.max_purchase_krw
+    # 예산: 명시 override(= 희망 매매가) 우선, 없으면 최대 실구매 가능액.
+    # ⚠️ 의미는 **상한**이다 — 자세한 근거는 `_budget_notes` 참조.
+    override = criteria.get("budget_override_krw") or None
+    budget = override or afford.max_purchase_krw
 
     prefs = repo.get_preferences(user_id) if hasattr(repo, "get_preferences") else {}
     avoid = (prefs or {}).get("avoid") or {}
@@ -138,6 +141,10 @@ def _analyze(repo: Any, settings: Any, user_id: int, criteria: dict[str, Any],
     ctx = AnalysisContext(
         affordability=afford, candidates=candidates,
         avoid=avoid, weights=weights, forbidden_amounts=forbidden,
+        # 희망가를 **명시했을 때만** 넘긴다. None 이면 파이프라인이 최대 실구매
+        # 가능 금액을 쓴다(기존 동작). afford 를 조작해 우회하지 않는다 —
+        # 그러면 finance finding 이 희망가를 '실구매 가능 금액'이라고 말하게 된다.
+        budget_krw=override,
     )
     # 요청한 top_n 을 실제로 지킨다. 예전엔 파이프라인 기본값(10)으로 고정돼 있어
     # `top_n` 이 API 계약에만 있고 동작하지 않았다 — 이제 제외 사유가 "상위 N건 밖"을
@@ -145,6 +152,8 @@ def _analyze(repo: Any, settings: Any, user_id: int, criteria: dict[str, Any],
     top_n = max(1, min(MAX_TOP_N, int(criteria.get("top_n") or DEFAULT_TOP_N)))
     result = run_mvp_pipeline(ctx, llm=llm, top_n=top_n)
     items = result["items"]
+    # 각 후보가 **희망가 대비 얼마인지** 실어 준다(프론트가 "희망가보다 1.2억 저렴"을 표시).
+    _annotate_budget_gap(items, budget)
     # 조립 단계에서 떨어진 단지가 앞에 온다 — 후보조차 되지 못한 쪽이 사용자 질문에
     # 더 가깝다("우리 단지가 아예 안 보인다").
     # 제외 사유는 사용자에게 그대로 보인다 — 나가기 직전에 자산 원본을 한 번 더 거른다.
@@ -159,8 +168,67 @@ def _analyze(repo: Any, settings: Any, user_id: int, criteria: dict[str, Any],
         "가중치반영 %d) 제외=%d %s",
         user_id, len(candidates), len(items), trade_basis, len(items) - trade_basis,
         weighted, len(excluded), _reason_counts(excluded))
-    return "done", {"items": items, "excluded": excluded,
-                    "notes": list(result.get("notes") or []) + assembly.notes}
+    notes = (list(result.get("notes") or []) + assembly.notes
+             + _budget_notes(override, afford.max_purchase_krw))
+    return "done", {"items": items, "excluded": excluded, "notes": notes}
+
+
+#: 희망가 예산이 붙은 후보에 실리는 키. 프론트가 "희망가 대비 −1.2억(−13%)"을 그린다.
+#: 값의 부호 규약: **음수 = 희망가보다 싸다**(가격 − 예산).
+BUDGET_GAP_KEY = "budget_gap_krw"
+BUDGET_GAP_PCT_KEY = "budget_gap_pct"
+
+
+def _annotate_budget_gap(items: list[dict[str, Any]], budget: int | None) -> None:
+    """추천 카드에 '적용 예산 대비 차액'을 붙인다.
+
+    ⚠️ 예산이 0/None 이면(자산 미입력 등) 예산 필터 자체가 꺼진 상태다. 그때 0 을 넣으면
+    "희망가와 딱 맞다"로 읽힌다 — **모르는 건 None** 으로 둔다(G2).
+    비교 대상은 파이프라인이 예산 판정에 실제로 쓴 값(`est_price_krw`)이다.
+    다른 값을 쓰면 "예산 안"이라며 통과시킨 후보가 화면에서는 초과로 보인다.
+    """
+    if not budget:
+        for item in items:
+            item[BUDGET_GAP_KEY] = None
+            item[BUDGET_GAP_PCT_KEY] = None
+        return
+    for item in items:
+        price = item.get("est_price_krw")
+        if not price:
+            item[BUDGET_GAP_KEY] = None
+            item[BUDGET_GAP_PCT_KEY] = None
+            continue
+        gap = int(price) - int(budget)
+        item[BUDGET_GAP_KEY] = gap
+        item[BUDGET_GAP_PCT_KEY] = round(gap * 100.0 / int(budget), 1)
+
+
+def _budget_notes(override: int | None, max_purchase_krw: int) -> list[str]:
+    """희망 매매가를 예산으로 쓸 때의 고지.
+
+    **희망가는 '상한'이다** (대역이 아니다)
+    -----------------------------------------
+    `budget_override_krw` 는 원래 "이 금액 이하만 보여 달라"는 뜻으로 만들어졌고,
+    후보 조회(`max_price_krw`)와 하드 제외(`price > budget`)가 이미 그렇게 동작한다.
+    희망가를 ±N% **대역**으로 바꾸면 (1) 같은 필드가 호출자에 따라 다른 뜻이 되고,
+    (2) 희망가보다 **싼** 좋은 후보가 하한에 걸려 사라진다. 예산은 "여기까지"이지
+    "여기쯤"이 아니다 — 싸게 사는 것은 실패가 아니다. 그래서 상한을 유지한다.
+    (대역이 필요하면 `min_price_krw` 를 따로 만들 일이지 이 필드를 바꿀 일이 아니다.)
+
+    다만 희망가가 최대 실구매 가능 금액을 넘으면 **말해 준다** — 안 그러면 사용자는
+    슬라이더를 올린 만큼 살 수 있다고 믿는다(예산 필터가 조용히 자기 한도를 대체한다).
+    여기 실리는 금액은 희망가(사용자 입력)와 최대 구매가(파생값)뿐이다 —
+    보유현금·연소득 원본은 넣지 않는다(SR4-2).
+    """
+    if not override:
+        return []
+    note = (f"희망 매매가 {override:,}원을 예산 **상한**으로 적용했습니다 "
+            f"— 이 금액 이하 후보만 봅니다.")
+    if max_purchase_krw and override > max_purchase_krw:
+        note += (f" 다만 이 금액은 산정된 최대 실구매 가능 금액 {max_purchase_krw:,}원을 "
+                 f"{override - max_purchase_krw:,}원 초과합니다 — 초과분은 추가 현금이 "
+                 f"필요하며, 대출 한도 안에서 해결되지 않을 수 있습니다.")
+    return [note]
 
 
 def _reason_counts(excluded: list[dict[str, Any]]) -> dict[str, int]:
@@ -175,7 +243,9 @@ def _reason_counts(excluded: list[dict[str, Any]]) -> dict[str, int]:
 #: 자산 원본이 섞인 사유를 대체할 문구. 사유를 통째로 버리지 않는다 —
 #: "왜 빠졌는지"는 남기고 **숫자만** 지운다(사용자는 여전히 답을 얻는다).
 _SAFE_REASON = {
-    EXCLUDED_OVER_BUDGET: "예산 초과 — 산정된 실구매 가능 금액을 넘습니다",
+    # 예산은 희망 매매가일 수도, 최대 실구매 가능 금액일 수도 있다. 어느 쪽인지는
+    # notes 가 말한다 — 여기서 단정하면 희망가를 준 사용자에게 틀린 문장이 나간다.
+    EXCLUDED_OVER_BUDGET: "예산 초과 — 적용된 예산 상한을 넘습니다",
     EXCLUDED_NO_PRICE: "가격 근거 없음 — 활성 호가가 없고 실거래 표본이 부족합니다",
     EXCLUDED_AVOIDED: "기피 조건에 해당합니다",
 }
@@ -285,6 +355,68 @@ def _trade_area_groups(trades: list[TradeRow], *,
     return chosen
 
 
+def _parse_bbox(raw: Any) -> tuple[BBox | None, str | None]:
+    """criteria 의 `bbox` → BBox. 어긋나면 `(None, 사유 문장)`.
+
+    ⚠️ 여기서 **조용히 None 으로 넘어가지 않는다.** bbox 가 무시된 채 전체를 뒤지면
+    사용자는 "이 주변"을 눌렀는데 엉뚱한 동네가 나온 이유를 알 수 없다.
+    정상 경로에서는 API 스키마가 이미 422 로 막으므로 이 문장은 뜨지 않는다.
+    """
+    if raw in (None, ""):
+        return None, None
+    try:
+        return BBox.parse(str(raw)), None
+    except BBoxError as exc:
+        logger.warning("추천: bbox 형식 오류 — 지도 범위 조건을 적용하지 않았습니다 (%s)", exc)
+        return None, (f"지도 범위(bbox) 형식이 올바르지 않아 '이 주변' 조건을 "
+                      f"적용하지 않았습니다: {exc}")
+
+
+#: bbox 검색이 좌표 없는 단지를 구조적으로 놓친다는 사실. **반드시 말해야 한다** —
+#: 조용히 빠지면 사용자는 "그 단지는 조건에 안 맞았다"고 잘못 이해한다.
+_BBOX_GEOM_NOTE = (
+    "'이 주변' 검색은 좌표가 확인된 단지만 대상입니다. "
+    "{scope} 단지 {total:,}개 중 {missing:,}개({missing_pct}%)는 주소 좌표가 아직 없어 "
+    "이 결과에서 빠졌습니다 — 지역으로 검색하면 포함됩니다."
+)
+_BBOX_GEOM_NOTE_PLAIN = (
+    "'이 주변' 검색은 좌표가 확인된 단지만 대상입니다. 주소 좌표가 아직 없는 단지는 "
+    "이 결과에서 빠집니다 — 지역으로 검색하면 포함됩니다."
+)
+_BBOX_INTERSECT_NOTE = (
+    "지역 선택과 '이 주변'을 함께 적용했습니다(교집합) — 두 조건을 모두 만족하는 단지만 봅니다."
+)
+
+
+def _bbox_scope_notes(repo: Any, region_codes: list[str], intersected: bool) -> list[str]:
+    """bbox 를 쓸 때 붙는 고지 — 교집합 여부 + 좌표 미확보로 빠진 몫.
+
+    좌표 확보율은 **그때그때 센다.** "약 5%" 같은 고정 문구를 적으면 수집이 진행돼도
+    영영 낡은 값이 남고, 사용자는 틀린 숫자를 근거로 판단하게 된다.
+    """
+    notes: list[str] = [_BBOX_INTERSECT_NOTE] if intersected else []
+
+    coverage = getattr(repo, "geocode_coverage", None)
+    if coverage is None:
+        notes.append(_BBOX_GEOM_NOTE_PLAIN)
+        return notes
+    try:
+        with_geom, total = coverage(region_codes=region_codes)
+    except Exception:  # noqa: BLE001 - 고지 하나 때문에 추천을 죽이지 않는다
+        logger.exception("좌표 확보율 조회 실패 — 숫자 없이 고지합니다")
+        notes.append(_BBOX_GEOM_NOTE_PLAIN)
+        return notes
+
+    missing = max(0, int(total) - int(with_geom))
+    if missing <= 0:
+        return notes                    # 빠진 게 없으면 겁줄 필요도 없다
+    notes.append(_BBOX_GEOM_NOTE.format(
+        scope="선택한 지역의" if region_codes else "전체",
+        total=int(total), missing=missing,
+        missing_pct=round(missing * 100.0 / int(total), 1) if total else 0.0))
+    return notes
+
+
 @dataclass
 class Assembly:
     """후보 조립 결과.
@@ -334,10 +466,19 @@ def _assemble_candidates(repo: Any, criteria: dict[str, Any],
     location_of = getattr(repo, "location_facts", None)
 
     region_codes = list(criteria.get("region_codes") or [])
-    complexes = query(region_codes=region_codes, max_price_krw=budget,
-                      limit=CANDIDATE_COMPLEX_LIMIT)
+    # "이 주변에서 검색"(REC-5). API 스키마가 이미 검증했지만 여기서 다시 판다 —
+    # 러너는 API 를 거치지 않는 호출(스크립트·재실행)도 받는다. 형식이 어긋나면
+    # **범위를 무시하고 전체를 뒤지는 대신** 그 사실을 말하고 지역 조건만 쓴다.
+    bbox, bbox_note = _parse_bbox(criteria.get("bbox"))
 
     out = Assembly()
+    if bbox_note:
+        out.notes.append(bbox_note)
+    complexes = query(region_codes=region_codes, max_price_krw=budget,
+                      limit=CANDIDATE_COMPLEX_LIMIT, bbox=bbox)
+    if bbox is not None:
+        out.notes.extend(_bbox_scope_notes(repo, region_codes, bool(region_codes)))
+
     candidates = out.candidates
     if len(complexes) >= CANDIDATE_COMPLEX_LIMIT:
         # 조회 상한에 걸렸다 = **지역에 단지가 더 있는데 보지 않았다.** 말하지 않으면

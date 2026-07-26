@@ -29,7 +29,12 @@ from app.agents.base import (
     scan_injection,
     validate_finding,
 )
-from app.agents.llm import LLMClient, LLMError
+from app.agents.llm import (
+    DEFAULT_MAX_TOKENS,
+    MAX_PROMPT_CHARS,
+    LLMClient,
+    LLMError,
+)
 from app.agents.scoring import (
     ScoreResult,
     build_axis_signals,
@@ -166,6 +171,24 @@ class AnalysisContext:
     #: tripwire 검사값(프롬프트 구성에는 쓰지 않는다). 비워두면 파이프라인이
     #: affordability 파생값으로 보강하고, 그래도 비면 fail-loud 로 막는다.
     forbidden_amounts: list[int] = field(default_factory=list)
+    #: **적용할 예산 상한**(원). 사용자가 희망 매매가를 지정하면 그 값이 온다.
+    #: None 이면 `affordability.max_purchase_krw`(최대 실구매 가능 금액)를 쓴다 — 기존 동작.
+    #:
+    #: ⚠️ 왜 필드를 따로 두는가 (ORDER 2026-07-26)
+    #: 예전에는 파이프라인이 **항상** `affordability.max_purchase_krw` 로만 예산을 판정해서,
+    #: API 의 `budget_override_krw` 가 후보 **조회**에만 닿고 **제외 판정에는 닿지 않았다**.
+    #: 그 결과 희망가를 자기 한도보다 높게 잡으면 조회는 통과한 후보가 전부
+    #: "예산 초과"로 잘려 **결과가 통째로 비었다** — 슬라이더를 올릴수록 결과가 사라지는
+    #: 형태라 원인을 짐작할 수도 없다. `affordability` 를 조작해 우회하지 않는 이유는
+    #: 그러면 finance finding 이 희망가를 "실구매 가능 금액"이라고 잘못 말하기 때문이다.
+    budget_krw: int | None = None
+
+    @property
+    def effective_budget_krw(self) -> int:
+        """예산 판정에 실제로 쓰는 값. 0 이면 '예산 제한 없음'(자산 미입력 등)."""
+        if self.budget_krw is not None:
+            return self.budget_krw
+        return self.affordability.max_purchase_krw
 
 
 # ---------------------------------------------------------------------------
@@ -183,7 +206,9 @@ def finance_finding(result: AffordabilityResult) -> Finding:
 
     return validate_finding(Finding(
         agent_id="finance-tax-advisor",
-        verdict=f"실구매 가능 {result.max_purchase_krw:,}원",
+        # 라벨은 화면과 **같은 말**이어야 한다. 프론트가 "최대 실구매 가능 금액"으로 부르는데
+        # 여기만 "실구매 가능"이면 같은 숫자가 두 이름으로 보인다(FIN-1 지적).
+        verdict=f"최대 실구매 가능 {result.max_purchase_krw:,}원",
         rationale=(
             f"취득 부대비용 {result.costs.total_krw:,}원을 포함해 "
             f"{result.max_purchase_krw:,}원까지 가능합니다. "
@@ -446,6 +471,101 @@ def location_finding(candidate: Candidate, as_of: dt.date, *,
 # [4] portfolio-advisor — LLM 종합
 # ---------------------------------------------------------------------------
 
+# --- LLM 비용·지연 방어 ------------------------------------------------------
+#
+# 이 파이프라인은 **후보 1건마다** 요약 LLM 을 부른다. 후보 상한이 200 건이므로
+# 아무 제한이 없으면 추천 한 번에 최대 200 회 호출이 나간다 — 그런데 사용자에게
+# 실제로 보이는 것은 상위 `top_n`(기본 10) 뿐이고 나머지는 **만들자마자 버려진다.**
+# 그래서 두 가지를 건다:
+#   ① 요약은 **순위를 매긴 뒤 상위 후보에만** 만든다(아래 run_mvp_pipeline 2패스).
+#   ② 그 위에 **호출 횟수 상한**을 둔다(top_n 이 50 이어도 여기서 멈춘다).
+# 상한에 걸린 후보는 규칙 기반 요약을 받고, **그 사실을 notes 로 말한다**(조용히 줄이지 않는다).
+
+#: 순위 확정 전까지 Finding 객체를 실어 나르는 **내부 전용** 키.
+#: 밑줄로 시작해 응답 필드와 겹치지 않고, 요약 패스에서 pop 되어 절대 밖으로 나가지 않는다.
+_SUMMARY_INPUT_KEY = "_summary_findings"
+
+#: 추천 1건이 쓸 수 있는 LLM 요약 호출 수. `DEFAULT_TOP_N` 과 같은 값으로 둔다 —
+#: 기본 요청(top_n=10)은 전부 LLM 요약을 받고, 더 큰 top_n 만 상한에 걸린다.
+LLM_SUMMARY_LIMIT = 10
+#: 연속 실패 임계. 이만큼 실패하면 남은 후보는 시도조차 하지 않는다(회로 차단).
+#: 장애는 보통 전면적이라, 계속 시도하면 후보 수만큼 타임아웃을 곱하게 된다.
+LLM_MAX_FAILURES = 2
+
+
+@dataclass
+class LLMBudget:
+    """추천 1건의 LLM 사용 한도와 **실제 사용 내역**.
+
+    한도만 두고 끝내지 않고 무엇이 왜 규칙 기반으로 떨어졌는지 세어 둔다 —
+    그래야 결과 `notes` 로 사용자에게 말할 수 있다. 세지 않으면 "AI 추천"을 눌렀는데
+    규칙 기반 문장이 나온 이유를 아무도 설명할 수 없다.
+    """
+
+    max_calls: int = LLM_SUMMARY_LIMIT
+    max_failures: int = LLM_MAX_FAILURES
+    max_tokens: int = DEFAULT_MAX_TOKENS
+    max_prompt_chars: int = MAX_PROMPT_CHARS
+
+    calls: int = 0                  #: 실제로 나간 호출 수
+    failures: int = 0               #: 실패(타임아웃·429·5xx·스키마 위반) 수
+    over_budget: int = 0            #: 호출 상한에 걸려 시도조차 못 한 후보 수
+    circuit_open: int = 0           #: 연속 실패로 차단된 뒤 건너뛴 후보 수
+    oversized: int = 0              #: 프롬프트가 길이 상한을 넘어 폐기한 후보 수
+
+    @property
+    def tripped(self) -> bool:
+        """회로가 열렸나(= 이번 job 에서 LLM 을 더 이상 시도하지 않는다)."""
+        return self.failures >= self.max_failures
+
+    def take(self) -> bool:
+        """호출 슬롯 하나를 확보한다. 못 얻으면 사유를 세고 False."""
+        if self.tripped:
+            self.circuit_open += 1
+            return False
+        if self.calls >= self.max_calls:
+            self.over_budget += 1
+            return False
+        self.calls += 1
+        return True
+
+
+#: 키가 없어 규칙 기반으로 돈 경우. **"AI 추천"을 눌렀는데 LLM 이 안 돌았다는 사실을
+#: 사용자가 알 길이 없는 상태**를 막는다. 순위·근거는 LLM 과 무관하다는 점도 함께 말한다
+#: (그래야 "그럼 이 결과는 못 믿나"로 오해하지 않는다).
+NOTE_LLM_DISABLED = (
+    "요약 문장은 규칙 기반으로 생성했습니다(AI 미연결 — ANTHROPIC_API_KEY 미설정). "
+    "추천 순위·가격 근거·제외 사유는 규칙과 실거래 통계로 계산하므로 AI 연결 여부와 무관합니다."
+)
+NOTE_LLM_FAILED = (
+    "AI 요약 호출이 실패해 {n}건은 규칙 기반 요약으로 대체했습니다. "
+    "추천 순위와 근거 자체는 영향받지 않습니다."
+)
+NOTE_LLM_BUDGET = (
+    "비용 상한(추천 1건당 AI 요약 {limit}회)에 걸려 {n}건은 규칙 기반 요약입니다."
+)
+NOTE_LLM_OVERSIZED = (
+    "근거가 많아 프롬프트 길이 상한을 넘은 {n}건은 규칙 기반 요약입니다"
+    "(근거를 잘라서 요약하지 않습니다)."
+)
+
+
+def llm_notes(budget: LLMBudget | None, *, llm_connected: bool) -> list[str]:
+    """LLM 사용 내역 → 사용자에게 보일 고지 문장."""
+    if not llm_connected:
+        return [NOTE_LLM_DISABLED]
+    if budget is None:
+        return []
+    out: list[str] = []
+    if budget.failures:
+        out.append(NOTE_LLM_FAILED.format(n=budget.failures + budget.circuit_open))
+    if budget.over_budget:
+        out.append(NOTE_LLM_BUDGET.format(limit=budget.max_calls, n=budget.over_budget))
+    if budget.oversized:
+        out.append(NOTE_LLM_OVERSIZED.format(n=budget.oversized))
+    return out
+
+
 PORTFOLIO_SYSTEM = """당신은 부동산 분석 결과를 요약하는 역할입니다.
 
 절대 규칙:
@@ -479,7 +599,14 @@ def _fallback_summary(findings: list[Finding]) -> dict[str, Any]:
 
 
 def portfolio_summary(findings: list[Finding], llm: LLMClient | None,
-                      forbidden_amounts: list[int]) -> dict[str, Any]:
+                      forbidden_amounts: list[int], *,
+                      budget: LLMBudget | None = None) -> dict[str, Any]:
+    """근거를 요약 문장으로. **실패·상한은 전부 규칙 기반으로 폴백**한다.
+
+    LLM 이 죽어도 추천은 나온다 — 순위·가격 근거·제외 사유는 이미 규칙과 통계로
+    계산돼 있고, 여기서 하는 일은 그것을 문장으로 옮기는 것뿐이다.
+    다만 **폴백했다는 사실은 세어서(`budget`) 결과 notes 로 말한다**(조용히 바꾸지 않는다).
+    """
     if llm is None:
         # 외부 전송이 없다 → tripwire 불필요(구조적 방어만으로 충분).
         return _fallback_summary(findings)
@@ -499,20 +626,39 @@ def portfolio_summary(findings: list[Finding], llm: LLMClient | None,
 
     # 자산 원본 금액이 섞였는지 호출 직전에 걸러낸다 (best-effort tripwire, security.md §6).
     # ⚠️ 주 방어는 이게 아니라 finding 이 파생값만 싣는 구조다.
+    # ⚠️ 이 검사는 **호출 상한·회로 차단보다 먼저** 돈다. 예산이 없다는 이유로 tripwire 를
+    #    건너뛰면, 상한에 걸린 날에만 검사가 사라지는 셈이 된다(그런 방어는 방어가 아니다).
     assert_no_secrets(user, forbidden_amounts)
 
     for hit in scan_injection(user):
         logger.warning("수집 데이터에서 인젝션 의심 패턴 발견: %s", hit)
 
+    if budget is not None:
+        limit = budget.max_prompt_chars
+        if len(user) + len(PORTFOLIO_SYSTEM) > limit:
+            # 자르지 않는다 — 근거 일부만 보고 쓴 요약은 근거와 어긋난다(G2).
+            budget.oversized += 1
+            logger.warning("프롬프트가 상한(%d자)을 넘어 규칙 기반으로 대체합니다", limit)
+            return _fallback_summary(findings)
+        if not budget.take():
+            return _fallback_summary(findings)
+
+    max_tokens = budget.max_tokens if budget is not None else DEFAULT_MAX_TOKENS
     try:
-        raw = llm.complete_json(system=PORTFOLIO_SYSTEM, user=user)
+        raw = llm.complete_json(system=PORTFOLIO_SYSTEM, user=user,
+                                max_tokens=max_tokens)
     except LLMError as exc:
+        # ⚠️ 예외 문자열에 프롬프트·키가 없다는 전제는 llm.py 가 지킨다(상태코드만 남긴다).
         logger.warning("LLM 요약 실패, 규칙 기반으로 대체합니다: %s", exc)
+        if budget is not None:
+            budget.failures += 1
         return _fallback_summary(findings)
 
     # 스키마 검증 — 벗어나면 폐기하고 폴백
     if not isinstance(raw.get("headline"), str) or not isinstance(raw.get("why"), list):
         logger.warning("LLM 응답이 스키마를 벗어나 폐기합니다")
+        if budget is not None:
+            budget.failures += 1
         return _fallback_summary(findings)
 
     why_not = raw.get("why_not")
@@ -629,7 +775,9 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
     ``notes``     결과 전체에 붙는 단서
     """
     finance = finance_finding(ctx.affordability)
-    budget = ctx.affordability.max_purchase_krw
+    # 희망 매매가가 있으면 그것이 상한이고, 없으면 최대 실구매 가능 금액이다.
+    # (예전엔 후자로 고정돼 있어 `budget_override_krw` 가 제외 판정에 닿지 못했다.)
+    budget = ctx.effective_budget_krw
     avoid_tokens = _avoid_tokens(ctx.avoid)
     forbidden = _derive_forbidden(ctx)
     # 저장된 가중치는 **클라이언트의 주장**이다. 여기서 다시 정규화하고,
@@ -705,7 +853,6 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
         score = score_item(findings=findings, signals=signals, weights=weights)
         scores.append(score)
 
-        summary = portfolio_summary(findings, llm, forbidden)
         items.append({
             "complex": {"id": cand.complex_id, "name": cand.complex_name},
             "unit_type": {"area_m2": cand.area_m2},
@@ -741,11 +888,11 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
             "score_coverage_pct": score.coverage_pct,
             # MVP 에는 타이밍 분석가가 없다. 없는 기능을 있는 척하지 않는다.
             "timing_signal": "unknown",
-            "headline": summary["headline"],
-            "why": summary["why"],
-            "why_not": summary["why_not"],
-            "next_actions": summary["next_actions"],
             "findings": [f.to_dict() for f in findings],
+            # 요약(headline/why/why_not/next_actions)은 **순위를 매긴 뒤** 상위 후보에만
+            # 만든다(아래 2패스). Finding 객체는 그때까지 여기 들고 간다 —
+            # `_SUMMARY_INPUT_KEY` 는 응답에 나가기 전에 반드시 제거된다.
+            _SUMMARY_INPUT_KEY: findings,
         })
 
     # 점수가 있는 후보가 먼저. 점수 없는 후보끼리는 **근거 표본이 많은 순**으로 둔다
@@ -758,6 +905,28 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
     for rank, item in enumerate(items[:top_n], start=1):
         item["rank"] = rank
 
+    # --- 2패스: 요약은 **살아남은 후보에만** 만든다 -------------------------
+    #
+    # 예전에는 후보를 도는 루프 안에서 요약을 만들었다. 그러면 상위 10건을 보여주려고
+    # 후보 200건의 요약을 만들고 190건을 버린다 — LLM 이 붙는 순간 그 190건이 그대로
+    # **돈과 지연**이 된다(그리고 아무도 읽지 않는다). 순위를 먼저 확정하고 여기서 만든다.
+    budget = LLMBudget() if llm is not None else None
+    for item in items[:top_n]:
+        summary = portfolio_summary(item.pop(_SUMMARY_INPUT_KEY), llm, forbidden,
+                                    budget=budget)
+        item["headline"] = summary["headline"]
+        item["why"] = summary["why"]
+        item["why_not"] = summary["why_not"]
+        item["next_actions"] = summary["next_actions"]
+        # 이 카드의 문장이 AI 가 쓴 것인지 규칙이 쓴 것인지 **카드 단위로** 밝힌다.
+        # notes 만으로는 "어느 카드가 규칙 기반인지"를 사용자가 알 수 없다.
+        item["summary_basis"] = summary["generated_by"]
+
+    # 순위 밖 후보에는 요약을 만들지 않는다(어차피 응답에 나가지 않는다).
+    # 다만 임시 키는 반드시 지운다 — Finding 객체가 남으면 직렬화가 깨진다.
+    for item in items[top_n:]:
+        item.pop(_SUMMARY_INPUT_KEY, None)
+
     # 순위에서 잘린 후보도 **사용자 입장에서는 "안 나온 후보"** 다. 조건을 다 통과하고도
     # 11위라서 빠진 단지를 아무 데도 안 남기면, 사용자는 그게 예산 때문인지 데이터가
     # 없어서인지 알 수 없다. 그래서 잘린 것도 사유와 함께 남긴다 —
@@ -767,6 +936,10 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
 
     notes = ["타이밍 분석(market-timing-analyst)은 2차 기능입니다.",
              "입지 분석은 데이터 수집 후 제공됩니다."]
+    # "AI 추천"을 눌렀는데 요약이 규칙 기반이면 **그 사실을 말한다.**
+    # 추천이 있는 경우에만 붙인다 — 후보가 0건이면 요약 자체가 없었으므로 할 말이 아니다.
+    if items[:top_n]:
+        notes += llm_notes(budget, llm_connected=llm is not None)
     # 가중치가 **어떻게 반영됐는지**(그리고 무엇이 반영되지 않았는지)를 목록 상단에도 말한다.
     # 개별 카드의 score_notes 만 남기면 사용자는 카드를 하나씩 열어야 알 수 있다.
     notes += summary_notes(weights=weights, unknown_keys=unknown_weight_keys,

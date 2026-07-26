@@ -88,8 +88,49 @@ export type MapResponse =
   | { level: "complex"; items: ComplexItem[]; note: string }
   | { level: "cluster"; items: ClusterItem[] };
 
+/**
+ * 자금계획 — **희망 매매가(`target_price_krw`)를 보냈을 때만** 응답에 실린다.
+ *
+ * "최대 얼마까지 살 수 있나"(max_purchase_krw)와 "이 집을 사려면 무엇이 필요한가"는
+ * 다른 질문이다. 후자에만 답이 있는 값들이 여기 모인다: 부족한 현금·필요 대출·월 원리금.
+ *
+ * ⚠️ 계산은 **전부 서버**가 한다. 프론트는 표시만 — 여기서 다시 계산하면 진실이 두 개가 되고,
+ *    금리·기간·세율이 바뀌는 날 둘이 조용히 어긋난다(useAffordability 주석과 같은 이유).
+ */
+export interface AffordabilityPlan {
+  /** 이 계획이 어느 가격을 전제로 하는가 */
+  target_price_krw: number;
+  /** 매매가 + 부대비용 */
+  total_needed_krw: number;
+  cost_breakdown: { tax: number; brokerage: number; etc: number };
+  own_cash_krw: number;
+  /** 지금 현금으로 모자란 돈 */
+  shortfall_krw: number;
+  required_loan_krw: number;
+  /** false 면 필요 대출이 한도를 넘는다. **그래도 숫자는 보여준다**(얼마가 더 필요한지가 답이다). */
+  loan_feasible: boolean;
+  loan_limit_krw: number;
+  /** 한도 초과분. 불가능할 때만 온다. */
+  over_limit_krw?: number | null;
+  /** 무엇이 한도를 묶었나("DSR" 등) */
+  binding_constraint?: string | null;
+  monthly_payment_krw: number;
+  total_interest_krw?: number | null;
+  /** 월 상환액은 가정에 따라 크게 달라진다 — **숫자 옆에 반드시 함께 보여준다**(G2). */
+  terms: { annual_rate_pct: number; years: number };
+}
+
+/** `/affordability` 요청. 지역은 보내지 않는다(CR10-1 — 서버가 판정한다). */
+export interface AffordabilityRequest {
+  purpose?: "live" | "invest";
+  /** 희망 매매가. 주면 응답에 `plan` 이 함께 온다. */
+  target_price_krw?: number;
+}
+
 export interface AffordabilityResponse {
   max_purchase_krw: number;
+  /** 희망가를 보냈을 때만. 서버가 아직 이 계약을 배포하지 않았으면 없다. */
+  plan?: AffordabilityPlan | null;
   breakdown: {
     own_cash_krw: number;
     max_loan_krw: number;
@@ -132,6 +173,14 @@ export interface Preferences {
     /** 지도 면적 필터. api-spec 예시엔 없지만 `prefer` 는 열린 dict 라 함께 보관한다. */
     area_min_m2?: number | null;
     area_max_m2?: number | null;
+    /**
+     * 희망 매매가(원). `prefer` 에 두는 이유: 서버 `PreferencesIn` 이 열린 dict 라
+     * 마이그레이션 없이 저장되고, 자산(`/me/profile`)이 아니라 **취향**이기 때문이다
+     * (현금·소득처럼 서버가 암호화해 다루는 사실 값이 아니다).
+     * ⚠️ 저장만 되는 값이 되면 안 된다 — `/affordability` 의 `target_price_krw` 와
+     *    추천의 `budget_override_krw` 로 **실제로 나간다**(App.tsx, 테스트가 고정).
+     */
+    target_price_krw?: number | null;
   };
   avoid: {
     first_floor?: boolean;
@@ -290,6 +339,13 @@ export interface RecommendationAccepted {
 
 export interface RecommendationRequest {
   region_codes?: string[];
+  /**
+   * "이 주변" — 지도 범위 `minLon,minLat,maxLon,maxLat` (`/map/complexes` 와 **같은 형식**).
+   * `region_codes` 와 함께 보내면 **교집합**이다. 형식이 깨지면 서버는 422 를 준다
+   * (그래서 lib/searchScope 가 유효한 값만 싣는다).
+   * ⚠️ 좌표가 없는 단지는 bbox 로 찾을 수 없어 후보에서 빠진다 — 서버가 `notes` 로 알린다.
+   */
+  bbox?: string;
   purpose?: "live" | "invest";
   budget_override_krw?: number | null;
   top_n?: number;
@@ -596,7 +652,7 @@ export const api = {
     return request<MapResponse>(`/map/complexes?${q}`);
   },
 
-  affordability(body: Record<string, unknown> = {}) {
+  affordability(body: AffordabilityRequest = {}) {
     return request<AffordabilityResponse>("/affordability", {
       method: "POST",
       body: JSON.stringify(body),

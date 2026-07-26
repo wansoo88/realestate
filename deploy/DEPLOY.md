@@ -223,6 +223,8 @@ docker exec realestate-db psql -U realestate -d realestate -c "
 docker exec realestate-db psql -U realestate -d realestate -c "
   SELECT column_name FROM information_schema.columns
    WHERE table_name='recommendation_job' AND column_name='result_meta';"   # 있으면 010 적용됨
+docker exec realestate-db psql -U realestate -d realestate -c "
+  SELECT indexname FROM pg_indexes WHERE indexname='uq_poi_source_ref';"   # 있으면 011 적용됨
 
 # (2) 백업 먼저 (파괴적이지 않아도 습관으로)
 mkdir -p /root/realestate-backup
@@ -230,7 +232,9 @@ docker exec realestate-db pg_dump -U realestate -d realestate --schema-only \
   > /root/realestate-backup/schema-$(date +%Y%m%d-%H%M%S).sql
 
 # (3) 미적용분만 순서대로. 파일은 모두 ADD COLUMN IF NOT EXISTS 라 재실행해도 안전하다
-for f in backend/migrations/009_user_approval.sql backend/migrations/010_job_result_meta.sql; do
+#     011 은 입지(F3) 수집의 멱등성(자연키)을 만든다 — 없으면 poi 재수집이 행을 쌓는다.
+for f in backend/migrations/009_user_approval.sql backend/migrations/010_job_result_meta.sql \
+         backend/migrations/011_poi_natural_key.sql; do
   echo "--- $f ---"
   docker exec -i realestate-db psql -U realestate -d realestate -v ON_ERROR_STOP=1 < "$f"
 done
