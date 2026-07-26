@@ -36,6 +36,40 @@
   color: var(--text-secondary);
 }
 
+/* 상태 안내 배너(승인 대기·거부·가입 접수).
+   에러가 아니라 **상태**이므로 빨강을 쓰지 않는다 — 옅은 카드 + 왼쪽 색띠.
+   색만으로 구분하지 않게 제목 문구가 항상 상태를 말한다(A3). */
+.auth__banner {
+  margin: 0 0 var(--sp-4);
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--r-card);
+  border-left: 3px solid var(--text-estimated);
+  background: var(--bg-elev);
+  box-shadow: var(--shadow-1);
+}
+
+.auth__banner--pending,
+.auth__banner--submitted {
+  border-left-color: var(--accent);
+}
+
+.auth__banner--rejected {
+  border-left-color: var(--warn);
+}
+
+.auth__banner-title {
+  margin: 0;
+  font-size: var(--fs-footnote);
+  font-weight: 600;
+}
+
+.auth__banner-body {
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
 /* inset grouped 카드 — 필드마다 박스를 두르지 않고 헤어라인으로만 구분 */
 .auth__group {
   background: var(--bg-elev);

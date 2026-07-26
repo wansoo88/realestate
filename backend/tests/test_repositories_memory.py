@@ -15,6 +15,7 @@ from app.repositories.memory import InMemoryRepository
 PROTOCOLS = (
     base.UserRepository, base.ProfileRepository, base.MapRepository,
     base.JobRepository, base.LocationRepository, base.RecommendationRepository,
+    base.UserAdminRepository,
 )
 
 
@@ -59,3 +60,46 @@ def test_get_job은_소유자_외에는_None(repo):
     repo.create_job("rec_1", owner.id, {})
     assert repo.get_job("rec_1", owner.id) is not None
     assert repo.get_job("rec_1", other.id) is None
+
+
+def test_제외사유와_notes도_왕복한다(repo):
+    """items 만 저장하면 '왜 이건 안 나왔지'가 조회 경로에서 사라진다."""
+    user = repo.create_user("x@example.com", "h")
+    repo.create_job("rec_x", user.id, {})
+    excluded = [{"complex_id": 9, "complex_name": "○○아파트",
+                 "reason_code": "over_budget", "reason": "예산 초과 (…)"}]
+
+    repo.save_job_result("rec_x", user.id, status="done", items=[],
+                         excluded=excluded, notes=["추정치 포함"])
+
+    job = repo.get_job("rec_x", user.id)
+    assert job.excluded == excluded and job.notes == ["추정치 포함"]
+
+
+def test_남의_작업에는_제외사유도_못_쓴다(repo):
+    """IDOR — 결과 저장 경로가 늘어나도 소유권 검증은 하나뿐이어야 한다."""
+    owner = repo.create_user("o@example.com", "h")
+    other = repo.create_user("t@example.com", "h")
+    repo.create_job("rec_y", owner.id, {})
+
+    repo.save_job_result("rec_y", other.id, status="done", items=[],
+                         excluded=[{"complex_id": 1, "reason": "남의 결과"}])
+
+    assert repo.get_job("rec_y", owner.id).excluded == []
+
+
+@pytest.mark.parametrize("param", ["excluded", "notes"])
+def test_두_구현_모두_제외사유_인자를_받는다(param):
+    """시그니처가 어긋나면 러너의 저장 호출이 통째로 실패한다(결과가 조용히 사라진다).
+
+    러너는 `save_job_result` 를 duck-typing 으로 부른다. 인메모리 구현만 인자를 받으면
+    테스트는 다 통과하는데 **프로덕션(PostGIS)에서만** 결과가 사라진다 — 그 침묵을 막는다.
+    """
+    import inspect
+
+    from app.repositories.postgis import PostgisRepository
+
+    for impl in (InMemoryRepository, PostgisRepository):
+        sig = inspect.signature(impl.save_job_result)
+        assert param in sig.parameters, f"{impl.__name__}.save_job_result 에 {param} 없음"
+        assert sig.parameters[param].kind is inspect.Parameter.KEYWORD_ONLY

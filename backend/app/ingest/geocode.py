@@ -356,12 +356,24 @@ def dong_matches(place: Place, legal_dong: str) -> bool:
     질의했는데 카카오 지번주소가 '서울 강남구 역삼동 736-24' 면 여기서 걸린다.
     지번주소가 아예 없으면 확인할 수 없으므로 **불합격**으로 본다(모르면 넣지 않는다).
     '당산동4가' 처럼 가(街)까지 있는 표기는 그대로 비교한다(당산동4가 ≠ 당산동5가).
+
+    ⚠️ GEO-8 — 읍·면 지역은 법정동명이 **두 토막**이다
+    ------------------------------------------------
+    MOLIT 은 읍·면 지역에서 `umdNm` 을 '오남읍 오남리' 처럼 두 토막으로 준다.
+    예전 구현은 `dong in addr.split()` 이라 두 토막짜리 이름이 **어떤 주소와도 절대
+    같아질 수 없었고**, 그 결과 경기 외곽 읍·면 단지는 검색 결과가 맞아도 전부
+    불합격 → 좌표 없음 → 지도에서 사라졌다(실측 1,009단지). 코드가 통과 불가능한
+    조건을 걸어 놓은 것이라 "엄격"이 아니라 결함이다.
+    이제 **모든 토막이 주소에 있어야** 통과한다 — 한 토막짜리 이름에 대해서는
+    예전과 완전히 같고, 두 토막짜리는 '오남읍'과 '오남리' 를 **둘 다** 요구하므로
+    느슨해지지 않는다.
     """
     dong = (legal_dong or "").strip()
     addr = (place.address_name or "").strip()
     if not dong or not addr:
         return False
-    return dong in addr.split()
+    parts = addr.split()
+    return all(tok in parts for tok in dong.split())
 
 
 def region_matches(place: Place, target: GeoTarget) -> bool:

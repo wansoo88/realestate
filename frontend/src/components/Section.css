@@ -1,0 +1,54 @@
+/* 접기 섹션 — summary 줄 전체가 44px 터치 타깃. */
+
+.section {
+  border-top: 0.5px solid var(--hairline);
+}
+
+.section__summary {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: var(--touch-min);
+  padding: var(--sp-2) 0;
+  cursor: pointer;
+  list-style: none;
+  font-size: var(--fs-footnote);
+  font-weight: 600;
+}
+
+/* 기본 삼각형 대신 직접 그린다(사파리 대응) */
+.section__summary::-webkit-details-marker {
+  display: none;
+}
+
+.section__summary::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid var(--text-secondary);
+  border-bottom: 1.5px solid var(--text-secondary);
+  transform: rotate(-45deg);
+  transition: transform 0.2s var(--ease-spring);
+}
+
+.section[open] > .section__summary::before {
+  transform: rotate(45deg);
+}
+
+.section__title {
+  flex: 1;
+}
+
+.section--warn .section__title {
+  color: var(--warn-text);
+}
+
+.section__body {
+  padding: 0 0 var(--sp-3) var(--sp-4);
+}
+
+.section__empty {
+  margin: 0;
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+}

@@ -146,6 +146,19 @@ def test_당산동4가와_5가는_다른_동이다():
     assert dong_matches(place, "당산동4가") is False
 
 
+def test_읍면_지역은_읍면과_리를_둘_다_요구한다():
+    """GEO-8 — MOLIT 은 읍·면에서 '오남읍 오남리' 처럼 두 토막으로 준다.
+
+    예전 구현(`dong in addr.split()`)은 두 토막짜리 이름이 **어떤 주소와도** 같아질
+    수 없어, 경기 외곽 읍·면 단지 1,009건이 전부 불합격 → 좌표 없음이었다.
+    """
+    place = _place(name="○○아파트", addr="경기 남양주시 오남읍 오남리 588")
+    assert dong_matches(place, "오남읍 오남리") is True
+    # 느슨해진 게 아니다 — 두 토막을 **둘 다** 요구한다.
+    assert dong_matches(place, "진접읍 오남리") is False
+    assert dong_matches(place, "오남읍 양지리") is False
+
+
 def test_지번주소가_없으면_불합격():
     """대조할 수 없으면 채택하지 않는다 — 모르는 건 모른다고 둔다."""
     assert dong_matches(Place(127.0, 37.5, "○○아파트", ""), "대치동") is False

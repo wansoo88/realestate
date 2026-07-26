@@ -226,7 +226,63 @@ def funnel(engine, region_codes: list[str], budget: int | None) -> dict:
 
 #: 제외 사유 문구 → 보고용 버킷. 파이프라인이 남기는 사유는 사람이 읽는 문장이라
 #: 그대로 세면 단지 이름·금액 때문에 전부 유니크해진다.
+#: ⚠️ `reason_code` 가 있으면 그걸 쓴다 — 문구 매칭은 문장이 바뀌면 조용히 '기타'로 샌다.
 _EXCLUSION_BUCKETS = (("가격 근거 없음", "가격 근거 없음"), ("예산 초과", "예산 초과"))
+
+
+def _bucket(entry: dict) -> str:
+    code = entry.get("reason_code")
+    if code:
+        return str(code)
+    reason = entry.get("reason") or ""
+    return next((name for key, name in _EXCLUSION_BUCKETS if key in reason), "기타")
+
+
+def _count_reasons(excluded: list[dict]) -> dict[str, int]:
+    buckets: dict[str, int] = {}
+    for e in excluded:
+        label = _bucket(e)
+        buckets[label] = buckets.get(label, 0) + 1
+    return buckets
+
+
+def check_excluded_persisted(engine, job, expected_items: int) -> dict:
+    """**저장 경로**까지 실렸는지 본다 — 파이프라인이 만드는 것만으로는 부족하다.
+
+    예전에는 러너가 `items` 만 저장해서, 파이프라인이 만든 제외 사유가 DB 에 닿기 전에
+    사라졌다. 그래서 여기서는 (1) 조회 결과(`repo.get_job`)에 실렸는지, (2) DB 컬럼
+    (`recommendation_job.result_meta`)에 실제로 앉았는지를 **따로** 확인한다.
+    둘 중 하나만 보면 "메모리에선 되는데 DB 엔 없는" 상태를 못 잡는다.
+    """
+    from sqlalchemy import text
+
+    excluded = list(job.excluded or [])
+    buckets = _count_reasons(excluded)
+    print("\n── 제외 사유 (excluded) — 조회 응답 기준")
+    print(f"   추천 {expected_items}건 · 제외 {len(excluded)}건 "
+          f"{json.dumps(buckets, ensure_ascii=False)}")
+    for e in excluded[:5]:
+        name = e.get("complex_name") or f"단지 #{e.get('complex_id')}"
+        print(f"    · {str(name)[:20]:<20} {e.get('area_m2')}㎡ | {e.get('reason')}")
+    if excluded:
+        # 사람이 읽을 최소 정보가 빠지면 화면에 "단지 #2048"이라고 밖에 못 쓴다.
+        named = sum(1 for e in excluded if e.get("complex_name"))
+        coded = sum(1 for e in excluded if e.get("reason_code"))
+        print(f"    단지명 보유 {named}/{len(excluded)} · reason_code 보유 "
+              f"{coded}/{len(excluded)} "
+              + ("✔" if named == coded == len(excluded) else "← **불일치**"))
+
+    with engine.connect() as conn:
+        row = conn.execute(text("""
+            SELECT coalesce(jsonb_array_length(result_meta->'excluded'), -1) AS n,
+                   coalesce(jsonb_array_length(result_meta->'notes'), -1) AS notes
+            FROM recommendation_job WHERE id = :job_id
+        """), {"job_id": job.id}).one()
+    ok = row.n == len(excluded)
+    print(f"    DB 컬럼 검사: result_meta.excluded {row.n}건 · notes {row.notes}건 "
+          + ("✔" if ok else "← **불일치(저장 경로 끊김)**"))
+    return {"excluded": len(excluded), "reasons": buckets,
+            "db_rows": row.n, "consistent": ok}
 
 
 def runtime_funnel(repo, criteria: dict, afford, top_n: int = 10) -> dict:
@@ -242,7 +298,8 @@ def runtime_funnel(repo, criteria: dict, afford, top_n: int = 10) -> dict:
     from app.agents.orchestrator import AnalysisContext, run_mvp_pipeline
     from app.agents.recommend import CANDIDATE_COMPLEX_LIMIT, _assemble_candidates
 
-    cands = _assemble_candidates(repo, criteria, afford.max_purchase_krw)
+    assembly = _assemble_candidates(repo, criteria, afford.max_purchase_krw)
+    cands = assembly.candidates
     by_basis: dict[str, int] = {}
     for c in cands:
         by_basis[c.price_basis] = by_basis.get(c.price_basis, 0) + 1
@@ -250,24 +307,30 @@ def runtime_funnel(repo, criteria: dict, afford, top_n: int = 10) -> dict:
     out = run_mvp_pipeline(
         AnalysisContext(affordability=afford, candidates=cands), llm=None, top_n=top_n)
 
-    buckets: dict[str, int] = {}
-    for e in out["excluded"]:
-        reason = e.get("reason") or ""
-        label = next((name for key, name in _EXCLUSION_BUCKETS if key in reason), "기타")
-        buckets[label] = buckets.get(label, 0) + 1
-
-    analysed = len(cands) - len(out["excluded"])
+    # 조립 단계에서 떨어진 단지(후보조차 못 된 쪽)도 같이 센다 — 러너가 하는 것과 같게.
+    all_excluded = assembly.excluded + out["excluded"]
+    buckets = _count_reasons(all_excluded)
+    # 하드 제외(가격근거·예산·기피)만 '분석 전에 떨어진' 것이다. 순위 컷은 분석을 통과한
+    # 뒤에 잘린 것이라 여기서 빼면 '분석 통과' 수가 거짓말이 된다.
+    hard = sum(n for k, n in buckets.items()
+               if k not in ("below_rank_cutoff", "no_price_evidence"))
+    analysed = len(cands) - hard
     print("\n── 후보 깔때기 (런타임)")
     print(f"   조회 단지 상한               : {CANDIDATE_COMPLEX_LIMIT}")
+    print(f"   조립 전 탈락(가격근거 없음)  : {len(assembly.excluded)}")
     print(f"   조립된 후보                  : {len(cands)}"
           f"  (호가기준 {by_basis.get('listing', 0)} · "
           f"실거래기준 {by_basis.get('trade', 0)})")
-    print(f"   제외                         : {len(out['excluded'])}"
+    print(f"   제외                         : {len(all_excluded)}"
           f"  {json.dumps(buckets, ensure_ascii=False)}")
     print(f"   분석 통과                    : {analysed}")
     print(f"   최종 추천(top_n={top_n})         : {len(out['items'])}")
+    # 후보는 추천이거나 제외다 — 어긋나면 후보가 말없이 사라진 것이다.
+    total = len(out["items"]) + len(out["excluded"])
+    print(f"   추천 + 제외 = 후보           : {total} / {len(cands)} "
+          + ("✔" if total == len(cands) else "← **후보가 사라졌다**"))
     return {"candidates": len(cands), "by_basis": by_basis,
-            "excluded": len(out["excluded"]), "exclusion_buckets": buckets,
+            "excluded": len(all_excluded), "exclusion_buckets": buckets,
             "analysed": analysed, "recommended": len(out["items"])}
 
 
@@ -424,6 +487,9 @@ def main(argv: list[str] | None = None) -> int:
             print("    계약 검사: 실거래 기준 후보에 호가/갭 유출 "
                   + ("없음 ✔" if not leaked else f"**{len(leaked)}건 — G2 위반**"))
             _check_persisted_columns(engine, job_id, len(job.items))
+
+        # "왜 이건 안 나왔지" — 저장·조회 경로까지 실렸는지 확인한다(items 가 0건이어도).
+        check_excluded_persisted(engine, job, len(job.items))
 
         print()
         funnel(engine, region_codes, afford.max_purchase_krw)

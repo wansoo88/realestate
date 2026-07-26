@@ -142,6 +142,23 @@ free -m
 ```
 `docker stop` 만 한다. 컨테이너·이미지·볼륨을 지우지 않으므로 언제든 되돌아온다.
 
+### 5-1b. 서버 소스 갱신 — **빌드보다 먼저** (2회차 이후 배포는 여기서 시작)
+
+서버의 `/opt/realestate` 는 **자동으로 갱신되지 않는다.** 이걸 건너뛰면 §5-2 가 **낡은 소스로
+이미지를 빌드**하고, §5-3b 는 새 마이그레이션 파일을 못 찾고, §5-5b 는 `manage_users.py` 가 없다고
+멈춘다(CR-025 DEPLOY-2).
+
+```bash
+cd /opt/realestate
+git fetch origin && git reset --hard origin/main
+git log --oneline -1                     # 배포하려는 커밋인지 눈으로 확인
+ls backend/migrations/ | tail -3         # 새 마이그레이션이 실제로 왔는지
+ls backend/scripts/manage_users.py       # 관리자 CLI 가 왔는지
+```
+
+> ⚠️ `git reset --hard` 는 서버의 로컬 수정을 버린다. 서버에서 직접 고친 게 있으면(예: 임시
+> nginx 블록은 `/etc/nginx` 라 무관) 먼저 확인한다.
+
 ### 5-2. API 이미지 빌드 — **db 를 올리기 전에 한다**
 
 ```bash
@@ -171,7 +188,17 @@ docker compose -f docker-compose.deploy.yml up -d db
 docker compose -f docker-compose.deploy.yml logs -f db     # "database system is ready" 까지
 ```
 `backend/migrations/*.sql` 이 `docker-entrypoint-initdb.d` 로 **빈 볼륨 첫 기동에만**
-001→002→003 순서로 자동 적용된다(CR-008 에서 검증된 경로).
+001→002→… 순서로 자동 적용된다(CR-008 에서 검증된 경로).
+
+> ### ⛔ 두 번째 배포부터는 이 자동 적용이 **돌지 않는다**
+> `docker-entrypoint-initdb.d` 는 **데이터 디렉터리가 비어 있을 때만** 실행된다.
+> 지금 운영 볼륨에는 실데이터(거래 60만 행 이상)가 들어 있으므로 **영원히 실행되지 않는다.**
+> 새 마이그레이션은 **반드시 아래 5-3b 로 손수 적용**해야 한다.
+>
+> 이걸 빠뜨리면 어떻게 되는가 — 조용히 넘어가지 않고 **전면 장애**가 된다.
+> 새 코드는 `app_user.status`·`is_admin` 을 SELECT 하는데(`postgis.py` `_USER_COLUMNS`),
+> 그 컬럼이 없으면 `UndefinedColumn` → **로그인·토큰검증 포함 모든 인증 경로가 500**.
+> (fail-closed 라 보안 사고는 아니지만 서비스가 통째로 멈춘다 — CR-024 DEPLOY-1)
 
 확인:
 ```bash
@@ -179,8 +206,40 @@ docker exec realestate-db psql -U realestate -d realestate -c "\dt" | head -20
 docker exec realestate-db psql -U realestate -d realestate \
   -c "SELECT extname FROM pg_extension WHERE extname IN ('postgis','citext');"
 docker exec realestate-db psql -U realestate -d realestate \
-  -c "SELECT count(*) FROM pg_tables WHERE schemaname='public';"   # 34 예상
+  -c "SELECT count(*) FROM pg_tables WHERE schemaname='public';"
 ```
+
+### 5-3b. 새 마이그레이션 손수 적용 — **코드보다 먼저**
+
+**순서가 중요하다: 마이그레이션 → 코드.** 반대로 하면 위의 500 이 난다.
+
+```bash
+cd /opt/realestate
+
+# (1) 지금 무엇이 적용돼 있는지 사실 확인 — 문서나 기억이 아니라 DB 에 묻는다
+docker exec realestate-db psql -U realestate -d realestate -c "
+  SELECT column_name FROM information_schema.columns
+   WHERE table_name='app_user' ORDER BY 1;"          # status·is_admin 이 있으면 009 적용됨
+docker exec realestate-db psql -U realestate -d realestate -c "
+  SELECT column_name FROM information_schema.columns
+   WHERE table_name='recommendation_job' AND column_name='result_meta';"   # 있으면 010 적용됨
+
+# (2) 백업 먼저 (파괴적이지 않아도 습관으로)
+mkdir -p /root/realestate-backup
+docker exec realestate-db pg_dump -U realestate -d realestate --schema-only \
+  > /root/realestate-backup/schema-$(date +%Y%m%d-%H%M%S).sql
+
+# (3) 미적용분만 순서대로. 파일은 모두 ADD COLUMN IF NOT EXISTS 라 재실행해도 안전하다
+for f in backend/migrations/009_user_approval.sql backend/migrations/010_job_result_meta.sql; do
+  echo "--- $f ---"
+  docker exec -i realestate-db psql -U realestate -d realestate -v ON_ERROR_STOP=1 < "$f"
+done
+
+# (4) 적용 확인 — (1)을 다시 돌려 컬럼이 생겼는지 눈으로 본다
+```
+
+> ⚠️ `psql` 에 `-v ON_ERROR_STOP=1` 을 반드시 준다. 없으면 **중간에 실패해도 0 으로 끝나** 실패가
+> 성공으로 보인다.
 
 ### 5-4. API 기동
 ```bash
@@ -340,6 +399,74 @@ sudo certbot renew --dry-run
 sudo rm /etc/nginx/sites-enabled/realestate.conf
 sudo nginx -t && sudo systemctl reload nginx
 ```
+
+### 5-5b. 가입 승인제 — 첫 관리자 지정 (**009 적용 직후 반드시**)
+
+009 를 적용하면 **기존 계정이 전부 `pending` 으로 바뀌어 로그인이 막힌다.** 의도된 설계지만,
+**관리자가 0명인 상태**라 웹에서는 아무도 승인할 수 없다. 아래 CLI 로 부트스트랩해야 한다.
+
+> ### ⛔ CLI 는 **호스트에서** 돈다 — API 컨테이너 안에 없다
+> 컨테이너에는 `scripts/` 가 없고 `DATABASE_URL` 도 설정돼 있지 않다.
+> `docker exec realestate-api python scripts/manage_users.py` 는 **실패한다.**
+> 반드시 호스트의 venv 로, `DATABASE_URL` 을 주고 실행한다.
+
+```bash
+cd /opt/realestate/backend
+. .venv/bin/activate
+
+# 컨테이너 IP 와 비밀번호는 파일에서 읽는다(값을 화면에 찍지 않는다)
+PW=$(grep '^POSTGRES_PASSWORD=' ../.env | cut -d= -f2-)
+DBIP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' realestate-db)
+export DATABASE_URL="postgresql+psycopg://realestate:${PW}@${DBIP}:5432/realestate"
+
+python scripts/manage_users.py --list                    # 대기자를 눈으로 확인
+python scripts/manage_users.py --approve <이메일>
+python scripts/manage_users.py --grant-admin <이메일>     # 승인된 계정에만 부여된다
+python scripts/manage_users.py --list                    # approved·admin 으로 바뀌었는지 확인
+```
+
+**웹에는 관리자 부여 경로가 없다**(의도적 — SSH 접근자만 가능). 이후 다른 사람의 가입 승인은
+관리자로 로그인해 화면에서 처리한다.
+
+#### 잠김 복구 (관리자가 0명이 된 경우)
+마지막 관리자 강등·거부는 API·CLI 양쪽에서 `LAST_ADMIN` 으로 막히지만, 그래도 0명이 되었다면
+**위 CLI 가 유일한 복구 수단**이다. SSH 키를 잃으면 복구할 방법이 없으므로 키를 별도 보관한다.
+
+### 5-5c. 임시 가입 차단 해제
+
+> ### ⛔ 열기 전에 **승인제가 실제로 살아 있는지** 먼저 확인한다
+> 낡은 코드가 떠 있으면 `status` 를 읽지 않아 **승인 없이 가입이 그대로 열린다** — 이번 배포에서
+> 유일하게 나쁜 분기다(CR-025 DEPLOY-2). 차단을 풀기 **전에** 내부 포트로 직접 찔러 확인한다.
+>
+> ```bash
+> # 임시 차단은 nginx 에만 걸려 있으므로 8013 으로 직접 부르면 앱의 실제 동작이 보인다
+> curl -sS -X POST http://127.0.0.1:8013/api/v1/auth/register \
+>   -H 'Content-Type: application/json' \
+>   -d '{"email":"deploycheck@example.com","password":"deploycheck-2026!"}'
+> # → 201 이고 본문에 "status":"pending" 이어야 한다. 200/토큰이 나오면 승인제가 안 걸린 것 —
+> #   차단을 풀지 말고 5-1b(소스 갱신)·5-3b(마이그레이션)부터 다시 확인한다.
+>
+> # 확인용 계정은 바로 지운다(관리자 CLI 로 거부하거나 DB 에서 삭제)
+> ```
+
+승인제가 살아 있음을 확인했으면 임시 차단(`# === TEMP-REG-BLOCK ===`)을 제거한다.
+
+```bash
+SITE=/etc/nginx/sites-available/realestate.utilverse.info
+cp "$SITE" /root/realestate-backup/nginx-site-$(date +%Y%m%d-%H%M%S).conf
+
+# 저장소 원본을 다시 깔면 임시 블록이 사라진다(원본에는 애초에 없다)
+sed "s#<APP_ROOT>#/opt/realestate#g" /opt/realestate/deploy/nginx-realestate.conf > "$SITE"
+
+nginx -t && systemctl reload nginx     # ⚠️ 검사 실패 시 reload 하지 마라(동거 서비스가 같이 죽는다)
+
+# 확인: 가입이 403 이 아니라 정상 동작하고, 보안 헤더가 5종 다 붙는지
+curl -sI https://realestate.utilverse.info/api/v1/auth/register | \
+  grep -ciE "content-security-policy|strict-transport|x-frame|x-content|referrer"   # 5 기대
+```
+
+> 임시 블록의 `location` 안에 `add_header` 를 쓰면 **상위 헤더 상속이 끊겨** 그 경로만 보안 헤더가
+> 0개가 된다(SR20-2 에서 실제로 발생). 블록 제거가 곧 그 수정이다.
 
 ### 5-6. 최종 확인
 

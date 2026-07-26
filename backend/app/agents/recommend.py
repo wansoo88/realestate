@@ -14,20 +14,37 @@
       (1) 프로필 복호화 → 예산(affordability) 산출
       (2) repo 로 후보 매물·실거래·입지 조회 → Candidate 조립
       (3) run_mvp_pipeline 실행
-      (4) recommendation_item/finding 저장 · status 'done'
+      (4) recommendation_item/finding + **제외 사유(excluded)·notes** 저장 · status 'done'
     → GET /recommendations/{id} 로 결과
 
 데이터가 없으면(수집 전) **빈 결과가 정상**이다 — 지어내지 않는다.
-어떤 예외도 밖으로 던지지 않는다. 실패하면 job 을 'error' 로 남긴다 —
+어떤 예외도 밖으로 던지지 않는다. 실패하면 job 을 'failed' 로 남긴다 —
 'queued' 로 영영 멈춰 있는 게 가장 위험하다(worker.py 주석 참조).
+
+왜 제외 사유까지 저장하는가
+---------------------------
+파이프라인은 예전부터 `excluded`(떨어뜨린 후보와 사유)를 만들었지만, 이 러너가
+`items` 만 꺼내 저장해서 **응답에 도달하지 못했다.** 그러면 사용자는 자기가 아는 단지가
+빠졌을 때 "예산 초과라서"인지 "표본이 없어서"인지 모른 채 결과 전체를 의심하게 된다.
+추천 목록은 답의 절반이고, 나머지 절반은 **왜 저건 없는가**다(api-spec.md §5.2).
 """
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from typing import Any
 
+from app.agents.base import TRIPWIRE_MIN_AMOUNT, extract_amounts
 from app.agents.llm import LLMClient
-from app.agents.orchestrator import AnalysisContext, Candidate, run_mvp_pipeline
+from app.agents.orchestrator import (
+    EXCLUDED_AVOIDED,
+    EXCLUDED_NO_PRICE,
+    EXCLUDED_OVER_BUDGET,
+    AnalysisContext,
+    Candidate,
+    excluded_record,
+    run_mvp_pipeline,
+)
 from app.core.security import decrypt_amount, load_key
 from app.domain.affordability.engine import compute_affordability
 from app.domain.affordability.models import Borrower, PropertyFacts
@@ -38,10 +55,21 @@ from app.domain.valuation.stats import eligible_trades
 
 logger = logging.getLogger("app.agents.recommend")
 
+#: 실패한 job 의 상태값. **DB 제약(001_init.sql: queued|running|done|failed)과 반드시 같아야 한다.**
+#: 예전에는 'error' 를 썼는데 제약에 없는 값이라 UPDATE 가 통째로 깨졌고, 그 결과 job 이
+#: **'queued' 로 영원히 멈춰** 화면에는 "분석 중…" 이 무한히 떴다. 실패가 실패로 보이지 않는,
+#: 이 프로젝트가 가장 경계하는 형태의 사고다(러너 docstring 이 지목한 바로 그 상태).
+#: 프론트의 jobPhase 매핑(lib/recommendation.ts)도 이 값을 알아야 한다 — 한쪽만 고치면 증상이 같다.
+JOB_FAILED = "failed"
+
 #: 후보로 볼 단지 상한 — LLM/통계 비용을 태우는 대상이라 넉넉하되 유한하게.
 CANDIDATE_COMPLEX_LIMIT = 50
 #: 조립된 Candidate 총량 상한(단지 × 면적그룹이 폭증하지 않게).
 MAX_CANDIDATES = 200
+#: 추천 개수. 상한은 API 스키마(`RecommendationIn.top_n`)와 같은 값이어야 한다 —
+#: 여기서만 큰 값을 허용하면 스키마를 우회하는 호출부가 응답을 무한정 키울 수 있다.
+DEFAULT_TOP_N = 10
+MAX_TOP_N = 50
 #: 호가가 없는 단지에서 실거래로 세울 면적대 수(거래 많은 순).
 #: 한 단지가 후보 목록을 독식하지 않게 막는다.
 TRADE_AREA_GROUPS_PER_COMPLEX = 3
@@ -54,22 +82,27 @@ _AMOUNT_FIELDS = (
 )
 
 
+def _empty_result() -> dict[str, Any]:
+    """결과가 없을 때의 표준 모양. 키를 빠뜨리면 하류가 KeyError 로 죽는다."""
+    return {"items": [], "excluded": [], "notes": []}
+
+
 def run_recommendation_job(
     *, repo: Any, settings: Any, job_id: str, user_id: int,
     criteria: dict[str, Any], llm: LLMClient | None = None,
 ) -> None:
     """BackgroundTask 진입점. **절대 예외를 던지지 않는다.**"""
-    status, items = "error", []
+    status, result = "error", _empty_result()
     try:
-        status, items = _analyze(repo, settings, user_id, criteria, llm)
+        status, result = _analyze(repo, settings, user_id, criteria, llm)
     except Exception:  # noqa: BLE001 - 백그라운드라 삼켜서 job 상태로만 남긴다
         logger.exception("추천 작업 실패 job=%s", job_id)
-        status, items = "error", []
-    _persist(repo, job_id, user_id, status, items)
+        status, result = JOB_FAILED, _empty_result()
+    _persist(repo, job_id, user_id, status, result)
 
 
 def _analyze(repo: Any, settings: Any, user_id: int, criteria: dict[str, Any],
-             llm: LLMClient | None) -> tuple[str, list[dict[str, Any]]]:
+             llm: LLMClient | None) -> tuple[str, dict[str, Any]]:
     # 세율·키는 여기서 로드한다(BackgroundTask 는 Depends 를 못 받는다).
     rules = load_rules(settings.tax_rules_path)          # 실패 시 상위 except → error
     key = load_key(settings.field_encryption_key)
@@ -77,8 +110,13 @@ def _analyze(repo: Any, settings: Any, user_id: int, criteria: dict[str, Any],
     profile = repo.get_profile(user_id)
     if profile is None:
         # 자산 미입력 → 예산을 알 수 없다. 지어내지 않고 빈 결과.
+        # ⚠️ 이것도 "왜 비었는지"다. 빈 목록만 주면 사용자는 데이터가 없는 줄 안다.
         logger.info("추천: 프로필 없음 → 빈 결과 (user=%s)", user_id)
-        return "done", []
+        return "done", {
+            "items": [], "excluded": [],
+            "notes": ["자산 정보가 없어 예산을 계산할 수 없습니다. "
+                      "내 정보에서 보유 현금·연소득을 입력하면 후보를 좁혀 드립니다."],
+        }
 
     borrower, forbidden = _borrower_from_profile(profile, user_id, key)
     prop = PropertyFacts(purpose=str(criteria.get("purpose") or "live"))
@@ -90,19 +128,85 @@ def _analyze(repo: Any, settings: Any, user_id: int, criteria: dict[str, Any],
     prefs = repo.get_preferences(user_id) if hasattr(repo, "get_preferences") else {}
     avoid = (prefs or {}).get("avoid") or {}
 
-    candidates = _assemble_candidates(repo, criteria, budget)
+    assembly = _assemble_candidates(repo, criteria, budget)
+    candidates = assembly.candidates
     ctx = AnalysisContext(
         affordability=afford, candidates=candidates,
         avoid=avoid, forbidden_amounts=forbidden,
     )
-    result = run_mvp_pipeline(ctx, llm=llm)
+    # 요청한 top_n 을 실제로 지킨다. 예전엔 파이프라인 기본값(10)으로 고정돼 있어
+    # `top_n` 이 API 계약에만 있고 동작하지 않았다 — 이제 제외 사유가 "상위 N건 밖"을
+    # 말하므로, 그 N 이 사용자가 요청한 값과 달라선 안 된다.
+    top_n = max(1, min(MAX_TOP_N, int(criteria.get("top_n") or DEFAULT_TOP_N)))
+    result = run_mvp_pipeline(ctx, llm=llm, top_n=top_n)
     items = result["items"]
+    # 조립 단계에서 떨어진 단지가 앞에 온다 — 후보조차 되지 못한 쪽이 사용자 질문에
+    # 더 가깝다("우리 단지가 아예 안 보인다").
+    # 제외 사유는 사용자에게 그대로 보인다 — 나가기 직전에 자산 원본을 한 번 더 거른다.
+    excluded = _strip_asset_amounts(
+        assembly.excluded + (result.get("excluded") or []), forbidden)
     trade_basis = sum(1 for it in items if it.get("price_basis") == "trade")
     logger.info(
-        "추천 완료 user=%s 후보=%d 추천=%d (실거래기준 %d · 호가기준 %d) 제외=%d",
+        "추천 완료 user=%s 후보=%d 추천=%d (실거래기준 %d · 호가기준 %d) 제외=%d %s",
         user_id, len(candidates), len(items), trade_basis, len(items) - trade_basis,
-        len(result.get("excluded") or []))
-    return "done", items
+        len(excluded), _reason_counts(excluded))
+    return "done", {"items": items, "excluded": excluded,
+                    "notes": list(result.get("notes") or []) + assembly.notes}
+
+
+def _reason_counts(excluded: list[dict[str, Any]]) -> dict[str, int]:
+    """사유 **코드별** 분포. 문장으로 세면 금액·단지명 때문에 전부 유니크해진다."""
+    counts: dict[str, int] = {}
+    for e in excluded:
+        code = str(e.get("reason_code") or "unknown")
+        counts[code] = counts.get(code, 0) + 1
+    return counts
+
+
+#: 자산 원본이 섞인 사유를 대체할 문구. 사유를 통째로 버리지 않는다 —
+#: "왜 빠졌는지"는 남기고 **숫자만** 지운다(사용자는 여전히 답을 얻는다).
+_SAFE_REASON = {
+    EXCLUDED_OVER_BUDGET: "예산 초과 — 산정된 실구매 가능 금액을 넘습니다",
+    EXCLUDED_NO_PRICE: "가격 근거 없음 — 활성 호가가 없고 실거래 표본이 부족합니다",
+    EXCLUDED_AVOIDED: "기피 조건에 해당합니다",
+}
+_SAFE_REASON_FALLBACK = "제외됨 — 사유 문구에 민감정보가 섞여 가렸습니다"
+
+
+def _strip_asset_amounts(excluded: list[dict[str, Any]],
+                         forbidden: list[int]) -> list[dict[str, Any]]:
+    """제외 사유에 **자산 원본 금액**이 섞였는지 마지막으로 거른다 (SR4-2).
+
+    왜 필요한가
+    -----------
+    제외 사유는 `recommendation_job.result_meta` 에 **평문 jsonb** 로 저장되고 API 응답에도
+    그대로 실린다. 보유현금·연소득·기존대출은 컬럼 암호화 대상인데(security.md §3),
+    사유 문장으로 새면 그 암호화가 무의미해진다. 한도·부대비용 같은 **파생값**은 허용이고
+    (사용자가 `/affordability` 로 이미 보는 값), **원본**은 금지다.
+
+    1차 방어는 구조다 — 사유를 만드는 `orchestrator` 는 원본을 아예 갖고 있지 않다
+    (`AnalysisContext` 에 없다). 이건 그 위에 얹는 그물이고, 미래에 누가 "친절하게"
+    "보유현금 8억으로는 부족합니다" 같은 문구를 넣으면 여기서 잡힌다.
+
+    매칭은 substring 이 아니라 **값 비교**다(`extract_amounts`) — 시세 13억이 자산 3억으로
+    오차단되지 않는다. 걸리면 사유 문장만 안전한 문구로 바꾸고 코드·단지명은 남긴다.
+    """
+    guarded = {v for v in forbidden if v and v >= TRIPWIRE_MIN_AMOUNT}
+    if not guarded:
+        return list(excluded)
+
+    out: list[dict[str, Any]] = []
+    for entry in excluded:
+        reason = str(entry.get("reason") or "")
+        if reason and extract_amounts(reason) & guarded:
+            code = str(entry.get("reason_code") or "")
+            # ⚠️ 로그에도 값을 찍지 않는다(무엇이 걸렸는지는 코드로 충분하다).
+            logger.warning("제외 사유에 자산 원본 금액이 섞여 마스킹했습니다 (code=%s)", code)
+            entry = {**entry,
+                     "reason": _SAFE_REASON.get(code, _SAFE_REASON_FALLBACK),
+                     "reason_redacted": True}
+        out.append(entry)
+    return out
 
 
 def _borrower_from_profile(profile: Any, user_id: int, key: bytes) -> tuple[Borrower, list[int]]:
@@ -172,12 +276,29 @@ def _trade_area_groups(trades: list[TradeRow], *,
     return chosen
 
 
+@dataclass
+class Assembly:
+    """후보 조립 결과.
+
+    후보만 돌려주면 **조립 단계에서 떨어진 단지가 어디에도 안 남는다.** 실측(강남구)에서
+    조회한 50개 단지 중 4개가 "실거래 표본 부족"으로 여기서 사라졌고, 사용자는 그
+    단지들에 대해 아무 답도 받지 못했다. 그래서 사유와 단서를 함께 돌려준다.
+    """
+
+    candidates: list[Candidate] = field(default_factory=list)
+    #: 후보가 되기 전에 떨어진 단지들(파이프라인 excluded 와 **같은 모양**).
+    excluded: list[dict[str, Any]] = field(default_factory=list)
+    #: 결과 전체에 붙는 단서(조회 상한에 걸렸다 등).
+    notes: list[str] = field(default_factory=list)
+
+
 def _assemble_candidates(repo: Any, criteria: dict[str, Any],
-                         budget: int | None) -> list[Candidate]:
+                         budget: int | None) -> Assembly:
     """repo 조회 결과를 orchestrator 의 Candidate 로 조립.
 
-    후보/매물/실거래 조회 메서드가 없으면(PostGIS 구현 대기) **빈 리스트** —
-    지어내지 않고, 크래시하지도 않는다.
+    후보/매물/실거래 조회 메서드가 없으면(PostGIS 구현 대기) **빈 결과** —
+    지어내지 않고, 크래시하지도 않는다. 다만 그 사실을 notes 로 말한다
+    (빈 화면과 "아직 못 만든 기능"은 사용자에게 완전히 다른 사실이다).
 
     ⚠️ 호가 없는 단지도 후보다 (CHARTER G4)
     ----------------------------------------
@@ -198,7 +319,7 @@ def _assemble_candidates(repo: Any, criteria: dict[str, Any],
             "repo 에 후보 조회 메서드가 없어 후보를 조립할 수 없습니다(빈 결과). "
             "PostGIS 구현 대기: recommendation_candidates·listings_for_complex·"
             "trades_for_complex (re-arch).")
-        return []
+        return Assembly(notes=["후보 조회 기능이 아직 연결되지 않아 결과가 비어 있습니다."])
 
     trades_of = getattr(repo, "trades_for_complex", None)
     location_of = getattr(repo, "location_facts", None)
@@ -207,7 +328,15 @@ def _assemble_candidates(repo: Any, criteria: dict[str, Any],
     complexes = query(region_codes=region_codes, max_price_krw=budget,
                       limit=CANDIDATE_COMPLEX_LIMIT)
 
-    candidates: list[Candidate] = []
+    out = Assembly()
+    candidates = out.candidates
+    if len(complexes) >= CANDIDATE_COMPLEX_LIMIT:
+        # 조회 상한에 걸렸다 = **지역에 단지가 더 있는데 보지 않았다.** 말하지 않으면
+        # 사용자는 이 목록이 지역 전체를 본 결과라고 믿는다(실측 강남구: 단지 506개).
+        out.notes.append(
+            f"조회 상한({CANDIDATE_COMPLEX_LIMIT}개 단지)에 걸려 지역 내 일부 단지는 "
+            "분석하지 않았습니다. 지역을 좁히면 더 정확합니다.")
+
     # 깔때기: 어디서 후보가 사라지는지 로그로 남긴다("그냥 0건" 보고를 막는다).
     funnel = {"complexes": len(complexes), "with_listings": 0, "trade_only": 0,
               "no_price_evidence": 0, "listing_candidates": 0, "trade_candidates": 0}
@@ -225,27 +354,39 @@ def _assemble_candidates(repo: Any, criteria: dict[str, Any],
                 candidates.append(_build(c, area, trades, listings, location, group=grp))
                 funnel["listing_candidates"] += 1
                 if len(candidates) >= MAX_CANDIDATES:
-                    logger.info("후보 상한 %d 도달 — 이후 단지는 생략", MAX_CANDIDATES)
-                    _log_funnel(funnel, len(candidates))
-                    return candidates
+                    return _capped(out, funnel)
             continue
 
         # 호가 0건 — 실거래로 후보를 세운다(G4).
         areas = _trade_area_groups(trades)
         if not areas:
             funnel["no_price_evidence"] += 1
+            # ⚠️ 여기서 그냥 continue 하면 이 단지는 **어디에도 안 남는다.** 사용자가
+            #    "왜 우리 단지가 없지"라고 물으면 답할 근거가 사라진다(실측: 50개 중 4개).
+            out.excluded.append(excluded_record(
+                complex_id=c.id, complex_name=c.name, area_m2=None,
+                price_basis=None, code=EXCLUDED_NO_PRICE,
+                reason=(f"가격 근거 없음 — 활성 호가가 없고 최근 {PERIOD_LADDER[-1]}개월 "
+                        f"실거래가 같은 면적대에서 {MIN_SAMPLE}건 미만입니다")))
             continue
         funnel["trade_only"] += 1
         for area in areas:
             candidates.append(_build(c, area, trades, [], location, group=None))
             funnel["trade_candidates"] += 1
             if len(candidates) >= MAX_CANDIDATES:
-                logger.info("후보 상한 %d 도달 — 이후 단지는 생략", MAX_CANDIDATES)
-                _log_funnel(funnel, len(candidates))
-                return candidates
+                return _capped(out, funnel)
 
     _log_funnel(funnel, len(candidates))
-    return candidates
+    return out
+
+
+def _capped(out: Assembly, funnel: dict[str, int]) -> Assembly:
+    """후보 상한에 걸려 중단. **그 사실을 사용자에게도 말한다**(로그만 남기지 않는다)."""
+    logger.info("후보 상한 %d 도달 — 이후 단지는 생략", MAX_CANDIDATES)
+    _log_funnel(funnel, len(out.candidates))
+    out.notes.append(
+        f"후보 상한({MAX_CANDIDATES}건)에 도달해 이후 단지는 분석하지 않았습니다.")
+    return out
 
 
 def _build(c: Any, area: float, trades: list[Any], listings: list[Any],
@@ -275,7 +416,12 @@ def _log_funnel(funnel: dict[str, int], total: int) -> None:
 
 
 def _persist(repo: Any, job_id: str, user_id: int, status: str,
-             items: list[dict[str, Any]]) -> None:
+             result: dict[str, Any]) -> None:
+    """items + **제외 사유 + notes** 를 한 번에 되쓴다.
+
+    셋을 따로 저장하지 않는다 — 하나만 성공하면 "추천은 있는데 제외 사유는 없는"
+    반쪽 결과가 남고, 사용자는 그게 사유가 없어서인지 저장이 깨져서인지 구분하지 못한다.
+    """
     save = getattr(repo, "save_job_result", None)
     if save is None:
         logger.error(
@@ -283,6 +429,7 @@ def _persist(repo: Any, job_id: str, user_id: int, status: str,
             "PostGIS 구현 대기(re-arch).", job_id)
         return
     try:
-        save(job_id, user_id, status=status, items=items)
+        save(job_id, user_id, status=status, items=result.get("items") or [],
+             excluded=result.get("excluded") or [], notes=result.get("notes") or [])
     except Exception:  # noqa: BLE001
         logger.exception("추천 결과 저장 실패 job=%s", job_id)

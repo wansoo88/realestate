@@ -270,6 +270,26 @@ def verify_password(password: str, hashed: str) -> bool:
             return False
 
 
+@functools.lru_cache(maxsize=1)
+def dummy_password_hash() -> str:
+    """**존재하지 않는 계정**을 검증할 때 쓰는 버림용 해시 (계정 열거 방지).
+
+    왜 필요한가
+    -----------
+    `user is not None and verify_password(...)` 는 논리적으로는 맞지만
+    **시간이 다르다.** 없는 계정은 argon2 를 아예 돌리지 않아 즉시 401 이 나가고,
+    있는 계정은 19MiB 해시를 돌린 뒤 401 이 나간다. 응답 본문이 똑같아도
+    그 수십 ms 차이가 "이 이메일은 가입돼 있다"를 알려주는 오라클이 된다.
+    승인제를 붙이면 이 신호의 값어치가 더 커진다 — 공격자는 "누가 가입 대기 중인지"를
+    훑어 표적을 고를 수 있다.
+
+    그래서 없는 계정에도 **같은 비용의 검증을 태운다.** 이 해시와는 어떤 비밀번호도
+    일치하지 않는다(프로세스마다 난수로 만들고 밖으로 나가지 않는다).
+    """
+    # 12자 하한(MIN_PASSWORD_LEN)을 넉넉히 넘긴다. 이 값은 어디에도 저장되지 않는다.
+    return hash_password(secrets.token_urlsafe(32))
+
+
 def needs_rehash(hashed: str) -> bool:
     """현재 파라미터와 다른 해시인가.
 

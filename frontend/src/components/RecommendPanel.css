@@ -1,0 +1,136 @@
+/* 추천 실행·결과 — 실행 버튼은 엄지 범위, 결과는 카드로 쌓는다. */
+
+.rec {
+  padding-bottom: var(--sp-6);
+}
+
+.rec__budget {
+  margin: var(--sp-2) 0 var(--sp-3);
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.rec__actions {
+  display: flex;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-3);
+}
+
+.rec__run {
+  flex: 1;
+  min-height: 50px;
+  border-radius: var(--r-btn);
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: var(--fs-body);
+  font-weight: 600;
+}
+
+.rec__run:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.rec__cancel {
+  min-width: 88px;
+  border-radius: var(--r-btn);
+  background: var(--badge-bg);
+  color: var(--text-secondary);
+  font-size: var(--fs-footnote);
+}
+
+.rec__status {
+  margin: 0 0 var(--sp-3);
+  font-size: var(--fs-footnote);
+  color: var(--text-secondary);
+}
+
+.rec__error {
+  margin: 0 0 var(--sp-3);
+  padding: var(--sp-3);
+  border-radius: var(--r-card);
+  background: var(--badge-bg);
+  color: var(--danger-text);
+  font-size: var(--fs-footnote);
+}
+
+.rec__empty {
+  padding: var(--sp-4) 0;
+}
+
+.rec__empty-title {
+  margin: 0 0 var(--sp-2);
+  font-size: var(--fs-footnote);
+  font-weight: 600;
+}
+
+.rec__empty-body {
+  margin: 0 0 var(--sp-2);
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.rec__empty-body--weak {
+  color: var(--text-estimated);
+}
+
+.rec__edit {
+  min-height: var(--touch-min);
+  padding: 0 var(--sp-3);
+  border-radius: var(--r-btn);
+  background: var(--accent-weak);
+  color: var(--accent);
+  font-size: var(--fs-footnote);
+  font-weight: 600;
+}
+
+.rec__excluded {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--fs-caption);
+}
+
+.rec__excluded li {
+  padding: var(--sp-2) 0;
+  border-bottom: 0.5px solid var(--hairline);
+}
+
+.rec__excluded li:last-child {
+  border-bottom: none;
+}
+
+.rec__excluded-name {
+  display: block;
+  color: var(--text);
+}
+
+.rec__excluded-reason {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.rec__notes {
+  margin: var(--sp-4) 0 0;
+  padding-left: var(--sp-4);
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.rec__foot {
+  margin-top: var(--sp-4);
+  padding-top: var(--sp-3);
+  border-top: 0.5px solid var(--hairline);
+}
+
+.rec__foot p {
+  margin: 0 0 var(--sp-2);
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+  line-height: 1.5;
+}

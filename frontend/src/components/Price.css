@@ -1,0 +1,84 @@
+/* 금액 — 화면의 주인공(규칙 2). 크기로 위계를 주고 색은 하나만 쓴다. */
+
+.price {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-2);
+}
+
+.price__label {
+  flex-basis: 100%;
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+}
+
+.price__value {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.price--lg .price__value {
+  font-size: var(--fs-price);
+}
+
+.price--md .price__value {
+  font-size: var(--fs-title);
+}
+
+.price--sm .price__value {
+  font-size: var(--fs-footnote);
+}
+
+/* 추정 — 흐림 + `~` + 배지. 세 겹으로 표기해 색이 사라져도 남는다. */
+.price--est .price__value {
+  color: var(--text-estimated);
+  font-weight: 400;
+}
+
+.price__tilde {
+  margin-right: 1px;
+}
+
+.price--none {
+  font-size: var(--fs-footnote);
+}
+
+/* 배지: 확정=실선 / 추정·미상=점선. 형태로도 구분되게(흑백·저조도 대비). */
+.price__badge {
+  border: 1px solid transparent;
+}
+
+.price__badge--confirmed {
+  border-color: var(--hairline-strong);
+}
+
+.price__badge--estimated,
+.price__badge--unknown {
+  border-style: dashed;
+  border-color: var(--hairline-strong);
+  color: var(--text-estimated);
+}
+
+.price__asof {
+  flex-basis: 100%;
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+}
+
+/* 신뢰도 점 — 색이 아니라 개수로 읽히게. */
+.dots {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.dots__marks {
+  letter-spacing: 1px;
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+}
+
+.dots__low {
+  border: 1px dashed var(--hairline-strong);
+}

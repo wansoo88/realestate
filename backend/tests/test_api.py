@@ -69,9 +69,23 @@ def https_client(monkeypatch):
     get_settings.cache_clear()
 
 
+def _approve(client, email: str) -> int:
+    """가입 대기 계정을 승인한다 (관리자 승인제 · migrations/009).
+
+    가입 직후 상태는 `pending` 이고 로그인은 403 이다. 테스트가 **명시적으로** 승인한다 —
+    편의를 위해 프로덕션 기본값을 approved 로 되돌리면 승인제 자체가 사라지고,
+    그걸 잡아 줄 테스트도 함께 사라진다.
+    """
+    user = client.repo.get_user_by_email(email)
+    assert user is not None and user.status == "pending", "가입 기본값은 승인 대기여야 한다"
+    client.repo.set_user_status(user.id, "approved", actor="cli")
+    return user.id
+
+
 def _register_and_login(client, email: str) -> str:
     r = client.post("/api/v1/auth/register", json={"email": email, "password": PASSWORD})
     assert r.status_code == 201, r.text
+    _approve(client, email)
     r = client.post("/api/v1/auth/login", json={"email": email, "password": PASSWORD})
     assert r.status_code == 200, r.text
     return r.json()["access_token"]
@@ -143,6 +157,7 @@ def test_refresh_토큰으로_API_호출_불가(client):
 def _login(client, email: str = "a@b.co") -> httpx.Response:
     r = client.post("/api/v1/auth/register", json={"email": email, "password": PASSWORD})
     assert r.status_code == 201, r.text
+    _approve(client, email)
     r = client.post("/api/v1/auth/login", json={"email": email, "password": PASSWORD})
     assert r.status_code == 200, r.text
     return r

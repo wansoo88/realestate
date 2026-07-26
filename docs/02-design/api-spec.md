@@ -24,8 +24,11 @@
 | 400 | `INVALID_PARAM` | 파라미터 오류 |
 | 401 | `UNAUTHORIZED` | 토큰 없음/만료 |
 | 403 | `CSRF_HEADER_REQUIRED` | 쿠키 인증 엔드포인트(`/auth/refresh`·`/auth/logout`)에 `X-Requested-With: XMLHttpRequest` 누락 |
+| 403 | `PENDING_APPROVAL` | **관리자 승인 대기** 계정 (§1.5) |
+| 403 | `ACCOUNT_REJECTED` | 가입이 거부된 계정 (§1.5) |
 | 404 | `NOT_FOUND` | 대상 없음 |
 | 409 | `JOB_IN_PROGRESS` | 동일 조건 분석이 이미 실행 중 |
+| 409 | `LAST_ADMIN` | 마지막 관리자를 거부·강등하려 함 (§6.5) |
 | 422 | `INSUFFICIENT_DATA` | **데이터 부족으로 판단 보류** (추정하지 않고 명시적으로 거부) |
 | 429 | `RATE_LIMITED` | 호출 제한 |
 | 503 | `UPSTREAM_UNAVAILABLE` | 공공API/Claude API 장애 |
@@ -49,16 +52,22 @@
 | 전송 범위 | `Path` 때문에 `/api/v1/auth/*` 요청에만 실린다 (지도·추천 요청에는 따라다니지 않는다) |
 
 ### `POST /auth/register`
+가입은 **접수**될 뿐이다. 계정은 `pending` 으로 만들어지고 **관리자 승인 전에는 로그인할 수 없다**(§1.5).
 ```json
 // req
 { "email": "me@example.com", "password": "..." }
 // res 201
-{ "user_id": 1 }
+{ "user_id": 1, "status": "pending",
+  "message": "가입 신청이 접수되었습니다. 관리자 승인 후 로그인할 수 있습니다." }
 ```
 | 코드 | 의미 |
 |---|---|
 | 409 `EMAIL_TAKEN` | 이미 가입된 이메일 |
 | 422 | 비밀번호 12자 미만 등 형식 오류 |
+
+> ⚠️ 알려진 잔여 노출: `409 EMAIL_TAKEN` 은 그 이메일이 가입돼 있음을 알려준다(기존 계약 유지).
+> 로그인 경로의 열거 방지(§1.5)와 달리 여기서는 "이미 가입됨"을 알려주지 않으면 사용자가
+> 같은 주소로 반복 신청하게 된다. 승인제가 켜져 있어 가입 사실만으로는 접근 권한이 없다.
 
 ### `POST /auth/login`
 ```json
@@ -72,6 +81,8 @@ Set-Cookie: refresh_token=<jwt>; HttpOnly; Secure; SameSite=Strict; Path=/api/v1
 ```
 - `expires_in` = access 수명(초, 30분). 프론트는 만료 전에 미리 갱신한다.
 - 401 은 **없는 계정과 틀린 비밀번호를 구분하지 않는다**(계정 열거 방지).
+- 403 `PENDING_APPROVAL` / `ACCOUNT_REJECTED`: 비밀번호는 맞았지만 승인되지 않은 계정.
+  **이 응답은 비밀번호가 맞을 때만 나온다** — 검사 순서가 계약의 일부다(§1.5).
 
 ### `POST /auth/refresh`
 **요청 본문 없음.** 쿠키로 인증한다.
@@ -104,6 +115,31 @@ X-Requested-With: XMLHttpRequest        ← 필수
 > **fetch 주의**: 동일 오리진이므로 기본값(`credentials: "same-origin"`)으로 쿠키가 실린다.
 > 프록시 뒤 다른 오리진에서 호출한다면 `credentials: "include"` 가 필요하고, 그때는
 > 서버에 CORS 허용 오리진 설정이 별도로 있어야 한다(현재 없음 — 동일 오리진 전제).
+
+### 1.5 가입 승인 상태 (2026-07-26 추가 · `migrations/009_user_approval.sql`)
+
+이 서비스는 **보유현금·연소득·기존대출**을 저장한다. 계정 하나가 곧 개인 금융정보
+저장소 하나이므로, 공개된 주소에서 **아무나 가입해 바로 쓰는** 상태를 두지 않는다.
+
+| 상태 | 로그인 | 설명 |
+|---|---|---|
+| `pending` | ❌ 403 `PENDING_APPROVAL` | 가입 직후 기본값. 관리자 검토 대기 |
+| `approved` | ✅ | 관리자가 승인함 |
+| `rejected` | ❌ 403 `ACCOUNT_REJECTED` | 거부됨(승인 회수 포함) |
+
+**검사 순서가 곧 보안 규약이다 (SR10-1 계정 열거 방지)**
+1. 비밀번호를 **먼저** 검증한다. 틀리면 없는 계정과 **완전히 동일한** 401
+   (본문·상태코드·응답시간 모두 — 없는 계정에도 같은 비용의 argon2 검증을 태운다).
+2. 비밀번호가 맞은 **뒤에만** 승인 상태를 본다 → 403.
+
+> 순서를 뒤집으면(“pending 이면 먼저 403”) 아무 비밀번호나 넣어 보는 것만으로
+> **가입된 이메일 목록**을 만들 수 있다. 승인제가 오히려 "누가 대기 중인지"까지
+> 알려주는 장치가 된다. `backend/tests/test_admin_approval.py` §2 가 이 성질을 고정한다.
+
+**승인 회수는 즉시 적용된다.** `status` 는 토큰에 담기지 않고 **매 요청 DB 에서 다시 읽는다**.
+- 이미 발급된 access 로 API 호출 → 403 (`PENDING_APPROVAL`/`ACCOUNT_REJECTED`)
+- `POST /auth/refresh` → 401 + 쿠키 삭제 (사유를 구분하지 않는다)
+- 서버측 토큰 폐기(SR15-3)가 없는 상태에서 **이 재확인이 유일한 회수 수단**이다.
 
 ---
 
@@ -249,16 +285,20 @@ X-Requested-With: XMLHttpRequest        ← 필수
 
 // res 202
 { "job_id": "rec_01J...", "status": "queued",
-  "estimated_seconds": 45,
   "poll_url": "/api/v1/recommendations/rec_01J...",
-  "stream_url": "/api/v1/recommendations/rec_01J.../stream" }
+  "note": "분석을 시작했습니다. 잠시 후 결과를 조회하세요." }
 ```
+
+> **구현 상태(2026-07-26)** — 분석은 redis·워커 없이 **인프로세스 BackgroundTask** 로 돈다
+> (배포 최소구성이 api+db 다). 그래서 `estimated_seconds`·`stream_url`·`progress` 는
+> **구현하지 않았다** — 진행률을 셀 중간 상태가 없다. 폴링하면 `queued` 다음이 `done` 이다.
+> 있는 척하면 프론트가 없는 필드를 기다린다. SSE(`/stream`)는 2차.
 
 ### `GET /recommendations/{job_id}` — 결과 폴링
 ```json
-// 진행 중
-{ "status": "running", "progress": { "done": 3, "total": 5,
-  "current_agent": "valuation-trader" } }
+// 진행 중 (아직 결과가 없다. progress 필드는 없다 — 위 구현 상태 참조)
+{ "job_id": "rec_01J...", "status": "queued", "items": [],
+  "excluded": [], "notes": [] }
 
 // 완료
 { "status": "done",
@@ -292,8 +332,12 @@ X-Requested-With: XMLHttpRequest        ← 필수
       },
       // 동 정보/표본 부족 시: { "available": false, "method": "동정보없음"|"동표본부족",
       //                       "confidence": 0.0, "reason": "...", "note": "좌표추정 폴백" }
-      "timing_signal": "buy",
-      "summary": "예산 8.5억 내, 전세가율 하락 구간 진입 전 매수 유리.",
+      "timing_signal": "unknown",          // MVP 에 타이밍 분석가 없음 — 있는 척하지 않는다
+      // portfolio-advisor 종합. LLM 실패 시 규칙 기반으로 채운다(문장은 투박해도 근거는 정확).
+      "headline": "예산 안에서 가장 균형 잡힌 후보",
+      "why": [ "동일 타입 중위 대비 호가 -2%", "역세권 350m" ],
+      "why_not": [ "실거래 신고 지연으로 최근 거래가 빠졌을 수 있음" ],   // 항상 채운다
+      "next_actions": [ "현장에서 소음·일조 확인" ],
       "findings": [
         { "agent_id": "finance-tax-advisor", "score": 88, "verdict": "적합",
           "rationale": "취득세 포함 총 필요자금 8.42억으로 한도 내.",
@@ -302,22 +346,33 @@ X-Requested-With: XMLHttpRequest        ← 필수
           "confidence": 0.95 },
         { "agent_id": "valuation-trader", "score": 76, "verdict": "적정가 하단",
           "rationale": "최근 6개월 동일 타입 중위 14.0억 대비 호가 14.8억은 상단.",
-          "evidence": { "data_rows": 37, "period": "2026-01~2026-06" },
+          "evidence": [ { "claim": "중위 실거래가 1,400,000,000원",
+                          "source": "국토교통부 실거래가", "data_rows": 37 } ],
+          // 리스크는 **finding 안에** 들어간다(어느 에이전트가 말했는지가 근거의 일부다).
+          "risks": [ { "severity": "medium",
+                       "detail": "실거래는 신고까지 최대 30일이 걸려…" } ],
+          // 판단을 보류하면 verdict="판단 보류" + missing 에 사유가 들어온다(score=null).
+          "missing": [],
           "confidence": 0.80 }
-      ],
-      "risks": [
-        { "agent_id": "risk-auditor", "severity": "medium",
-          "detail": "용적률 249%로 재건축 사업성 낮음." }
       ] } ],
+
+  // --- 왜 이건 안 나왔나 (§5.2) ------------------------------------------
+  "excluded": [
+    { "complex_id": 2048, "complex_name": "○○아파트", "area_m2": 84.97,
+      "price_basis": "trade", "price_estimated": true,
+      "reason_code": "over_budget",
+      "reason": "예산 초과 (최근 실거래 중위 950,000,000원(추정) > 한도 850,000,000원)" } ],
+  "notes": [ "일부 후보는 현재 등록된 매물이 없어 최근 실거래 기준으로 세운 추정입니다…" ],
   "disclaimer": "투자 권유가 아니며 개인 판단을 돕는 참고 자료입니다." }
 ```
 
 **응답 설계 원칙**
-1. `findings`와 `risks`를 **분리**해 항상 함께 반환 — 장점만 나열하면 G2 위반
+1. 장점(`why`)과 단점(`why_not`)·`findings[].risks` 를 **항상 함께** 반환 — 장점만 나열하면 G2 위반
 2. 모든 finding에 `evidence` + `confidence`
 3. `dong_valuation.basis`/`confidence`로 **동별이 실측(trade_measured)인지 추정(listing_reported)인지 구조적으로 구분**. `building`은 특정 매물의 동 표기(호가 기준), `dong_valuation`은 단지 내 동별 실거래 편차(F4).
 4. `criteria_snapshot`으로 재현성 확보
 5. `price_basis`로 **호가인지 실거래 추정인지 구조적으로 구분**(아래 §5.1)
+6. `excluded[]`로 **추천되지 않은 후보와 그 사유**를 함께 반환(아래 §5.2)
 
 #### 5.1 `price_basis` — 호가와 실거래는 같은 숫자가 아니다 (2026-07-26 추가)
 
@@ -356,7 +411,65 @@ X-Requested-With: XMLHttpRequest        ← 필수
 **DB 매핑 주의** — `recommendation_item.est_price_krw` 컬럼은 기준가만 담는다.
 호가인지 추정인지는 **`payload.price_basis` 가 정본**이다. 컬럼만 보고 호가로 읽으면 안 된다.
 
-### `GET /recommendations/{job_id}/stream` — SSE
+#### 5.2 `excluded[]` — "왜 이건 안 나왔지"에 답한다 (2026-07-26 구현 반영)
+
+> **왜 생겼나.** 파이프라인은 예전부터 떨어뜨린 후보와 사유를 만들었지만, 러너가 `items` 만
+> 꺼내 저장해 **응답에 도달하지 못했다**(문서에도 없었다). 사용자가 자기 조건으로 추천을
+> 돌렸는데 아는 단지가 빠졌을 때 이유를 못 대면, 맞는 결과도 믿을 수 없다.
+> 추천 목록은 답의 절반이고 나머지 절반이 이것이다.
+
+| 필드 | 뜻 |
+|---|---|
+| `complex_id` · `complex_name` | 어느 단지인가. **이름을 반드시 함께 준다** — id 만으로는 화면에 쓸 수 없다 |
+| `area_m2` | 어느 면적대에서 떨어졌나(같은 단지도 면적대별로 판정이 다르다) |
+| `price_basis` · `price_estimated` | 그 판정이 호가 기준인지 실거래 **추정** 기준인지 |
+| `reason_code` | 기계가 읽는 축. 아래 4종 |
+| `reason` | 사람이 읽는 문장(금액·표본 수 포함) |
+| `total_score` | `below_rank_cutoff` 일 때만. `null` 이면 점수를 매길 근거가 없었다는 뜻 |
+| `reason_redacted` | 사유 문장에서 민감정보를 가렸을 때만 `true`(아래 개인정보 규약) |
+
+| `reason_code` | 언제 | 사용자에게 하는 말 |
+|---|---|---|
+| `no_price_evidence` | 활성 호가 없음 + 실거래 표본 부족 | 값을 말할 근거가 없어 판단하지 않았다 |
+| `over_budget` | 기준가 > 실구매 가능 금액 | 못 사는 집은 추천이 아니다 |
+| `avoided` | 사용자가 **기피**한 조건 해당(F5) | 가점 상쇄가 아니라 제외다 |
+| `below_rank_cutoff` | 분석은 통과했으나 상위 `top_n` 밖 | 조건은 맞지만 근거가 더 약했다 |
+
+**불변식** — 조회한 단지는 **추천이거나 제외**다. 말없이 사라지는 후보는 없다.
+파이프라인 안에서는 `len(items) + len(excluded) == 후보 수` 가 정확히 성립하고, 응답에는
+그 앞단(후보 조립)에서 떨어진 단지(`no_price_evidence`)가 더해진다 — 후보가 되기도 전에
+사라지던 쪽이 사용자 질문("우리 단지가 아예 안 보인다")에 오히려 더 가깝기 때문이다.
+크기는 유계다: 후보 상한 `MAX_CANDIDATES`(200) + 단지 조회 상한(50).
+
+**개인정보 규약 (SR4-2)** — `reason` 문장에는 **한도·초과분 같은 파생값만** 적는다.
+보유현금·연소득·기존대출 **원본 금액은 금지**다. 이 필드는 `recommendation_job.result_meta`
+에 **평문 jsonb** 로 저장되므로(migrations/010), 자산 3종의 컬럼 암호화(security.md §3)가
+사유 문장으로 무력화되면 안 된다. 러너가 저장 직전에 값 비교로 한 번 더 거르고,
+걸리면 문장만 안전한 문구로 바꾸고 `reason_redacted: true` 를 붙인다(사유 자체는 남긴다).
+
+**`notes[]`** — 결과 전체에 붙는 단서(추정가 포함 여부, 미구현 기능 고지, 프로필 미입력 등).
+`items` 가 비어 있을 때 **왜 비었는지**를 말하는 자리이기도 하다. 조회·후보 **상한에 걸려
+지역 전체를 보지 못한 경우**도 여기서 밝힌다(실측: 강남구 단지 506개 중 50개만 조회).
+
+**저장 위치** — `recommendation_job.result_meta jsonb`(010). `recommendation_item` 에는
+넣지 않는다 — 제외된 후보는 항목이 아니라서, 그 테이블에 섞이면 조회 필터 하나만 어긋나도
+**제외된 단지가 추천으로 둔갑한다.**
+
+**`top_n`** — 요청값을 실제로 지킨다(1~50, 기본 10). `below_rank_cutoff` 사유가 "상위 N건 밖"
+이라고 말하므로, 그 N 은 사용자가 요청한 값과 같아야 한다.
+
+**프론트 계약** — `excluded` 가 `null`/미포함이면 "이번 응답에 포함되지 않았습니다"로,
+빈 배열이면 "제외된 후보 없음"으로 **다르게** 표시한다. 둘은 다른 사실이다.
+`area_m2` 는 `null` 일 수 있다(`no_price_evidence` 는 면적대를 세우기 전에 떨어진 것이라
+어느 면적대인지가 없다). 0 이나 임의 면적으로 채워 표시하지 않는다.
+
+**실측 (2026-07-26 · 운영 데이터, 강남구 11680 · 예산 13.2억)**
+단지 조회 50 → 후보 89 → **추천 10 · 제외 83**
+(`over_budget` 44 · `below_rank_cutoff` 35 · `no_price_evidence` 4).
+제외 83건 전부 `complex_name`·`reason_code` 를 갖고 있었고,
+`recommendation_job.result_meta` 에 83건 그대로 저장·조회됐다.
+
+### `GET /recommendations/{job_id}/stream` — SSE **(미구현 · 2차)**
 ```
 event: progress
 data: {"done":2,"total":5,"current_agent":"location-analyst"}
@@ -391,6 +504,79 @@ data: {"item_count":10}
 
 ---
 
+## 6.9 관리자 — 가입 승인 (2026-07-26 추가)
+
+> 대상: `app_user.is_admin = true` **이면서** `status = 'approved'` 인 사용자.
+
+### 6.1 인가 규칙 (security.md §2.2 와 같은 강도)
+- 권한은 **요청 시점에 서버가 DB 에서** 판정한다(`deps.admin_user`).
+  **JWT 에 `admin`·`role`·`status` 클레임을 넣지 않는다** — 토큰에 실린 권한은 클라이언트의
+  주장이고, 서명이 유효해도 **강등된 뒤까지 유효**하다. (`admin=true` 를 실은 위조 토큰이
+  통하지 않음을 테스트가 고정한다.)
+- 승인되지 않은 관리자는 관리자가 아니다(`is_admin AND approved` 동시 충족).
+
+### 6.2 실패 응답 — **404 로 통일한다 (403 이 아니다)**
+관리자가 아닌 모든 접근(토큰 없음·만료·일반 사용자·강등된 관리자·잘못된 사용자 id)은
+**모르는 경로와 글자까지 동일한 404** 를 받는다.
+```json
+{ "detail": "Not Found" }
+```
+| 선택지 | 결과 |
+|---|---|
+| 403 | "여기 관리 기능이 있다"를 알려준다 → 인증 우회·파라미터 조작의 표적이 된다 |
+| **404 (채택)** | 관리자가 아닌 쪽에서는 **존재하지 않는 경로와 구분되지 않는다** |
+
+이 규약은 세 곳에서 함께 지켜져야 성립하며 전부 테스트로 고정돼 있다.
+1. 본문 형태를 우리 규약(`{"detail": {"code": ...}}`)이 아니라 FastAPI 기본 404 와 맞춘다.
+2. 인증 실패도 401 이 아니라 404 다(비인증 상태에서 401 이 나오면 그 자체가 존재 신호).
+3. 메서드 불일치 405 도 404 로 덮는다(`PUT /admin/users` → 405 면 존재가 드러난다).
+
+### 6.3 `GET /admin/users?status=pending&limit=100`
+```json
+{ "items": [
+    { "id": 12, "email": "me@example.com", "status": "pending", "is_admin": false,
+      "created_at": "2026-07-26T04:14:36Z",
+      "status_changed_at": null, "status_changed_by": null, "status_reason": null }
+  ],
+  "active_admins": 1 }
+```
+- `status` 는 `pending|approved|rejected` (생략 시 전체). 오래된 신청이 먼저 온다.
+- **비밀번호 해시·자산 금액은 응답에 없다.** 관리자는 가입 승인만 한다.
+
+### 6.4 `POST /admin/users/{user_id}/approve` · `POST /admin/users/{user_id}/reject`
+```json
+// reject 요청(선택)
+{ "reason": "본인 확인 불가" }
+// res 200 — 변경된 사용자
+{ "id": 12, "email": "...", "status": "approved", "is_admin": false,
+  "status_changed_at": "2026-07-26T05:00:00Z", "status_changed_by": 3, "status_reason": null }
+```
+- `reject` 는 **승인 회수**에도 쓴다(이미 승인된 계정 → `rejected`).
+- 거부 사유는 감사 기록으로만 남고 **로그인 응답에는 노출하지 않는다.**
+- 모든 변경은 `app_user.status_changed_*` + `user_status_event`(append-only)에 남는다:
+  누가(`actor_user_id`), 언제, 어떤 경로로(`actor`: `admin_api` | `cli` | `self`).
+
+### 6.5 마지막 관리자 보호 — 409 `LAST_ADMIN`
+승인된 관리자가 **0명이 되는 변경은 거부**한다(자기 자신을 거부/강등하는 경우 포함).
+관리자가 없으면 어떤 신규 가입도 승인할 수 없고, 복구하려면 서버 SSH 가 필요하다.
+검사는 라우터가 아니라 **리포지토리**가 한다 — API 와 CLI 두 경로 모두를 한 곳에서 막기 위해서다.
+
+### 6.6 첫 관리자(부트스트랩) — API 로는 만들 수 없다
+"첫 가입자를 자동 관리자"는 **쓰지 않는다.** 사이트가 이미 공개돼 있어 선점당한다.
+관리자 부여는 **서버에서 실행하는 CLI** 로만 한다(SSH 가 있어야 실행된다).
+```bash
+cd /opt/realestate/backend
+python scripts/manage_users.py --list                  # 대기자 확인
+python scripts/manage_users.py --approve <email>       # 승인
+python scripts/manage_users.py --grant-admin <email>   # 관리자 부여(승인된 계정만)
+python scripts/manage_users.py --history <email>       # 감사 이력
+```
+- 이 CLI 는 **비밀번호를 다루지 않는다**(계정 생성·재설정 기능 없음). 승인만 한다.
+- `--grant-admin` 은 승인되지 않은 계정을 거부한다 — 관리자 부여가 승인 절차를 건너뛰는
+  뒷문이 되지 않게 한다.
+
+---
+
 ## 7. 운영
 
 ### `GET /health`
@@ -410,7 +596,7 @@ data: {"item_count":10}
 | F3 매수 타이밍 | `GET /market/index`, `GET /policies`, `timing_signal` |
 | F4 동·층·타입 편차 | `GET /complexes/{id}/trades?group_by=`, `building.confidence` |
 | F5 선호/기피 | `PUT /me/preferences` |
-| F6 근거 제시 | `findings[].evidence`, `risks[]`, `disclaimer` |
+| F6 근거 제시 | `findings[].evidence`, `findings[].risks`, `why_not[]`, **`excluded[]`(§5.2)**, `disclaimer` |
 
 ---
 

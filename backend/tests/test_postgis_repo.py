@@ -25,7 +25,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
-from app.repositories.base import ProfileRecord
+from app.repositories.base import LastAdminError, ProfileRecord
 from app.repositories.postgis import PostgisRepository
 
 pytestmark = pytest.mark.needs_db
@@ -253,6 +253,96 @@ def test_이메일_중복은_ValueError로_바뀐다(repo):
     repo.create_user("dup@example.com", "h")
     with pytest.raises(ValueError):
         repo.create_user("DUP@example.com", "h")
+
+
+# --- 가입 승인 (009_user_approval.sql) -------------------------------------
+# ⚠️ 이 절은 **실 DB 에서만** 의미가 있다. 인메모리 구현은 파이썬 딕셔너리라
+#    CHECK 제약·FOR UPDATE 직렬화·자기참조 FK 를 검증하지 못한다.
+
+def test_가입은_DB_기본값으로_승인대기다(repo):
+    user = repo.create_user("pending@example.com", "h")
+
+    assert user.status == "pending"
+    assert user.is_admin is False
+    assert user.created_at is not None
+    # 조회 경로가 달라도 상태가 같아야 한다(한 쿼리에서만 status 가 빠지면 인가 결함).
+    assert repo.get_user(user.id).status == "pending"
+    assert repo.get_user_by_email("pending@example.com").status == "pending"
+
+
+def test_잘못된_상태값은_CHECK가_막는다(repo, engine):
+    user = repo.create_user("chk@example.com", "h")
+    with pytest.raises((IntegrityError, DBAPIError)):
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE app_user SET status = 'admin' WHERE id = :u"),
+                         {"u": user.id})
+
+
+def test_승인은_감사흔적과_이력을_함께_남긴다(repo):
+    admin = repo.create_user("admin@example.com", "h")
+    repo.set_user_status(admin.id, "approved", actor="cli")
+    repo.set_user_admin(admin.id, True, actor="cli")
+    target = repo.create_user("waiting@example.com", "h")
+
+    updated = repo.set_user_status(target.id, "approved", actor="admin_api",
+                                   actor_user_id=admin.id, reason="본인 확인 완료")
+
+    assert updated.status == "approved"
+    assert updated.status_changed_by == admin.id
+    assert updated.status_changed_at is not None
+    events = repo.status_events(target.id)
+    assert [e["event"] for e in events] == ["registered", "approved"]
+    assert events[-1]["actor"] == "admin_api" and events[-1]["actor_user_id"] == admin.id
+    assert repo.set_user_status(999999, "approved", actor="cli") is None
+
+
+def test_대기목록은_상태로_거르고_오래된_순이다(repo):
+    a = repo.create_user("a@example.com", "h")
+    b = repo.create_user("b@example.com", "h")
+    repo.set_user_status(a.id, "approved", actor="cli")
+
+    assert [u.email for u in repo.list_users(status="pending")] == ["b@example.com"]
+    assert [u.email for u in repo.list_users()] == ["a@example.com", "b@example.com"]
+    assert len(repo.list_users(limit=1)) == 1
+    assert repo.count_active_admins() == 0
+    repo.set_user_admin(a.id, True, actor="cli")
+    assert repo.count_active_admins() == 1
+    assert repo.count_active_admins() == len([u for u in repo.list_users() if u.is_admin
+                                              and u.status == "approved"])
+    assert b.id  # (사용)
+
+
+def test_마지막_관리자는_강등도_거부도_되지_않는다(repo):
+    admin = repo.create_user("solo@example.com", "h")
+    repo.set_user_status(admin.id, "approved", actor="cli")
+    repo.set_user_admin(admin.id, True, actor="cli")
+
+    with pytest.raises(LastAdminError):
+        repo.set_user_admin(admin.id, False, actor="cli")
+    with pytest.raises(LastAdminError):
+        repo.set_user_status(admin.id, "rejected", actor="cli")
+    assert repo.count_active_admins() == 1, "거절된 변경이 부분적으로라도 남으면 안 된다"
+
+    # 둘째 관리자가 생기면 첫째는 물러날 수 있다
+    second = repo.create_user("second@example.com", "h")
+    repo.set_user_status(second.id, "approved", actor="cli")
+    repo.set_user_admin(second.id, True, actor="cli")
+    assert repo.set_user_admin(admin.id, False, actor="cli").is_admin is False
+
+
+def test_승인자_계정이_지워져도_피승인자는_남는다(repo, engine):
+    """자기참조 FK 는 ON DELETE SET NULL — 감사 흔적은 잃어도 계정은 잃지 않는다."""
+    admin = repo.create_user("gone@example.com", "h")
+    repo.set_user_status(admin.id, "approved", actor="cli")
+    target = repo.create_user("kept@example.com", "h")
+    repo.set_user_status(target.id, "approved", actor="admin_api", actor_user_id=admin.id)
+
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM app_user WHERE id = :u"), {"u": admin.id})
+
+    kept = repo.get_user(target.id)
+    assert kept is not None and kept.status == "approved"
+    assert kept.status_changed_by is None
 
 
 def test_프로필은_암호문_그대로_왕복한다(repo):
@@ -677,6 +767,69 @@ def test_추천결과_저장과_조회_왕복(repo, engine):
         assert agents == ["valuation-trader"]
 
 
+def test_제외사유가_result_meta에_저장되고_그대로_돌아온다(repo, engine):
+    """010 — 제외된 후보는 recommendation_item 에 넣을 자리가 없다(항목이 아니다).
+
+    사유가 저장되지 않으면 `GET /recommendations/{job_id}` 가 "왜 이건 안 나왔지"에
+    답하지 못한다. 그게 이 제품에서 가장 비싼 침묵이다.
+    """
+    user = repo.create_user("meta@example.com", "h")
+    repo.create_job("rec_meta", user.id, {})
+    excluded = [
+        {"complex_id": 2048, "complex_name": "○○아파트", "area_m2": 84.97,
+         "price_basis": "trade", "price_estimated": True,
+         "reason_code": "over_budget",
+         "reason": "예산 초과 (최근 실거래 중위 950,000,000원(추정) > 한도 850,000,000원)"},
+        {"complex_id": 2049, "complex_name": "△△아파트", "area_m2": 59.9,
+         "price_basis": "trade", "reason_code": "no_price_evidence",
+         "reason": "가격 근거 없음 — 활성 호가가 없고 실거래 표본 부족"},
+    ]
+
+    repo.save_job_result("rec_meta", user.id, status="done", items=[],
+                         excluded=excluded, notes=["일부는 추정치입니다"])
+
+    job = repo.get_job("rec_meta", user.id)
+    assert job.excluded == excluded          # 한글·중첩 키가 그대로 왕복한다
+    assert job.notes == ["일부는 추정치입니다"]
+
+    # 정말 job 행에 붙었는가(항목 테이블을 오염시키지 않았는가).
+    with engine.connect() as conn:
+        row = conn.execute(text("""
+            SELECT jsonb_array_length(result_meta->'excluded') AS n,
+                   result_meta->'excluded'->0->>'reason_code' AS code,
+                   (SELECT count(*) FROM recommendation_item WHERE job_id='rec_meta') AS items
+            FROM recommendation_job WHERE id = 'rec_meta'
+        """)).one()
+    assert row.n == 2 and row.code == "over_budget"
+    assert row.items == 0, "제외된 후보가 recommendation_item 으로 새면 추천으로 둔갑한다"
+
+
+def test_재실행하면_이전_제외사유가_남지_않는다(repo):
+    """items 를 갈아끼우는 것과 같은 규칙 — 지난 실행의 사유가 섞이면 거짓 근거가 된다."""
+    user = repo.create_user("meta2@example.com", "h")
+    repo.create_job("rec_meta2", user.id, {})
+
+    repo.save_job_result("rec_meta2", user.id, status="done", items=[],
+                         excluded=[{"complex_id": 1, "reason": "예전 사유"}])
+    repo.save_job_result("rec_meta2", user.id, status="done", items=[],
+                         excluded=[{"complex_id": 2, "reason": "새 사유"}])
+
+    job = repo.get_job("rec_meta2", user.id)
+    assert [e["complex_id"] for e in job.excluded] == [2]
+
+
+def test_010_이전_행은_빈_목록으로_읽는다(repo, engine):
+    """result_meta 가 NULL 인 옛 작업도 조회가 깨지지 않는다(없는 걸 지어내지도 않는다)."""
+    user = repo.create_user("old@example.com", "h")
+    repo.create_job("rec_old", user.id, {})
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE recommendation_job SET result_meta = NULL "
+                          "WHERE id = 'rec_old'"))
+
+    job = repo.get_job("rec_old", user.id)
+    assert job.excluded == [] and job.notes == []
+
+
 def test_남의_작업에는_결과를_쓰지_못한다(repo):
     """IDOR — save_job_result 도 소유권을 다시 확인한다."""
     owner = repo.create_user("owner2@example.com", "h")
@@ -684,11 +837,14 @@ def test_남의_작업에는_결과를_쓰지_못한다(repo):
     repo.create_job("rec_idor", owner.id, {})
 
     repo.save_job_result("rec_idor", other.id, status="done",
-                         items=[{"complex": {"id": 1}, "total_score": 99}])
+                         items=[{"complex": {"id": 1}, "total_score": 99}],
+                         excluded=[{"complex_id": 1, "reason": "남의 결과"}])
 
     job = repo.get_job("rec_idor", owner.id)
     assert job.status == "queued"     # 남이 쓴 결과가 반영되지 않았다
     assert job.items == []
+    # 제외 사유도 마찬가지다 — 저장 경로가 늘어나면 IDOR 표면도 늘어난다.
+    assert job.excluded == []
 
 
 def test_결과_재저장은_이전_결과를_대체한다(repo, engine):

@@ -1,0 +1,379 @@
+/**
+ * 내 조건 — 이 제품의 **입력 쪽 절반** (F2·F5).
+ *
+ * 왜 이 화면이 지도보다 먼저인가
+ * ------------------------------
+ * 자산이 없으면 예산이 없고, 예산이 없으면 "내 조건에 맞는 매물"이라는 말 자체가 성립하지 않는다.
+ * 매물만 쭉 뜨는 화면은 지도 뷰어지 자문 도구가 아니다. 그래서 프로필이 비어 있으면
+ * 앱은 지도가 아니라 이 화면을 먼저 보여준다(App.tsx).
+ *
+ * 🔐 입력값은 개인 금융정보다. 메모리 상태로만 다루고 로그·저장소에 남기지 않는다(G3).
+ */
+import { useState } from "react";
+import { ApiException, type Preferences, type Profile } from "../api/client";
+import { NOTICE_TRUST } from "../lib/notices";
+import {
+  DEFAULT_WEIGHTS,
+  WEIGHT_KEYS,
+  WEIGHT_LABELS,
+  normalizeWeights,
+  type Weights,
+} from "../lib/preferences";
+import { MoneyField } from "./MoneyField";
+import "./ConditionsScreen.css";
+
+interface Props {
+  profile: Profile | null;
+  preferences: Preferences;
+  onSave: (profile: Profile, preferences: Preferences) => Promise<void>;
+  /** 이미 저장된 조건을 고치는 경우에만 닫기가 있다(최초 입력은 되돌아갈 곳이 없다). */
+  onClose?: () => void;
+}
+
+/** 역세권 거리 선택지 — 자유 입력보다 낫다. 300m·500m 는 걸어서 4~7분이라는 감각이 있다. */
+const SUBWAY_OPTIONS: Array<{ value: number | null; label: string }> = [
+  { value: null, label: "상관없음" },
+  { value: 300, label: "300m 이내" },
+  { value: 500, label: "500m 이내" },
+  { value: 1000, label: "1km 이내" },
+];
+
+const AVOID_ITEMS: Array<{ key: keyof Preferences["avoid"]; label: string; hint: string }> = [
+  { key: "first_floor", label: "1층", hint: "사생활·채광 문제로 환금성이 낮습니다" },
+  { key: "main_road_noise", label: "대로변 소음", hint: "간선도로 인접 동" },
+  {
+    key: "redevelopment_early_stage",
+    label: "재건축 초기 단계",
+    hint: "사업 기간·추가분담금 불확실성이 큽니다",
+  },
+];
+
+function toInt(v: string, min: number, max: number, fallback: number): number {
+  const n = Number.parseInt(v, 10);
+  if (Number.isNaN(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
+/** 빈 문자열 = 미입력(null). 0 과 구분한다. */
+function toNullableInt(v: string): number | null {
+  if (v.trim() === "") return null;
+  const n = Number.parseInt(v, 10);
+  return Number.isNaN(n) ? null : n;
+}
+
+export function ConditionsScreen({ profile, preferences, onSave, onClose }: Props) {
+  // 자산 — null 은 "아직 안 씀"이다. 0 으로 초기화하면 안 쓴 것과 0원이 구분되지 않는다.
+  const [cash, setCash] = useState<number | null>(profile?.cash_krw ?? null);
+  const [income, setIncome] = useState<number | null>(profile?.income_krw ?? null);
+  const [loan, setLoan] = useState<number | null>(profile?.existing_loan_krw ?? null);
+  const [ownedHouses, setOwnedHouses] = useState(profile?.owned_houses ?? 0);
+  const [householdSize, setHouseholdSize] = useState(profile?.household_size ?? 1);
+
+  const [prefer, setPrefer] = useState<Preferences["prefer"]>(preferences.prefer ?? {});
+  const [avoid, setAvoid] = useState<Preferences["avoid"]>(preferences.avoid ?? {});
+  const [weights, setWeights] = useState<Weights>(
+    Object.keys(preferences.weights ?? {}).length > 0 ? preferences.weights : DEFAULT_WEIGHTS,
+  );
+
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const cashOk = cash !== null;
+  const incomeOk = income !== null;
+  const canSubmit = cashOk && incomeOk && !busy;
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!canSubmit || cash === null || income === null) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await onSave(
+        {
+          cash_krw: cash,
+          income_krw: income,
+          existing_loan_krw: loan ?? 0,
+          owned_houses: ownedHouses,
+          household_size: householdSize,
+        },
+        { prefer, avoid, weights: normalizeWeights(weights) },
+      );
+    } catch (err) {
+      setError(
+        err instanceof ApiException
+          ? err.error.message || "저장하지 못했습니다."
+          : "네트워크 오류로 저장하지 못했습니다.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const normalized = normalizeWeights(weights);
+
+  return (
+    <main className="cond">
+      <form className="cond__form" onSubmit={submit} noValidate>
+        <header className="cond__header">
+          <h1 className="cond__title">내 조건</h1>
+          <p className="cond__lede">
+            {profile
+              ? "조건을 바꾸면 지도와 추천이 함께 바뀝니다."
+              : "자산을 입력해야 실구매 가능 금액과 추천을 계산할 수 있습니다."}
+          </p>
+        </header>
+
+        {/* 민감정보를 요구하기 **전에** 왜/어떻게 보관하는지 말한다(components.md §3.6) */}
+        <p className="cond__trust">{NOTICE_TRUST}</p>
+
+        <section className="cond__group" aria-labelledby="cond-assets">
+          <h2 className="cond__group-title" id="cond-assets">
+            자산
+          </h2>
+          <MoneyField
+            id="cond-cash"
+            label="보유 현금"
+            valueKrw={cash}
+            onChange={setCash}
+            hint="예금·주식 등 매수에 쓸 수 있는 돈"
+            error={!cashOk && busy ? "보유 현금을 입력해 주세요." : undefined}
+            required
+          />
+          <MoneyField
+            id="cond-income"
+            label="연 소득 (세전)"
+            valueKrw={income}
+            onChange={setIncome}
+            hint="DSR·DTI 한도 계산에 쓰입니다"
+            required
+          />
+          <MoneyField
+            id="cond-loan"
+            label="기존 대출 잔액"
+            valueKrw={loan}
+            onChange={setLoan}
+            hint="없으면 비워 두세요"
+          />
+
+          <div className="cond__row">
+            <label className="cond__label" htmlFor="cond-houses">
+              보유 주택 수
+            </label>
+            <input
+              id="cond-houses"
+              className="cond__number num"
+              type="number"
+              inputMode="numeric"
+              min={0}
+              max={100}
+              value={ownedHouses}
+              onChange={(e) => setOwnedHouses(toInt(e.target.value, 0, 100, 0))}
+            />
+          </div>
+
+          <div className="cond__row">
+            <label className="cond__label" htmlFor="cond-household">
+              가구원 수
+            </label>
+            <input
+              id="cond-household"
+              className="cond__number num"
+              type="number"
+              inputMode="numeric"
+              min={1}
+              max={20}
+              value={householdSize}
+              onChange={(e) => setHouseholdSize(toInt(e.target.value, 1, 20, 1))}
+            />
+          </div>
+        </section>
+
+        <section className="cond__group" aria-labelledby="cond-prefer">
+          <h2 className="cond__group-title" id="cond-prefer">
+            선호
+          </h2>
+
+          <div className="cond__row">
+            <label className="cond__label" htmlFor="cond-subway">
+              역세권
+            </label>
+            <select
+              id="cond-subway"
+              className="cond__select"
+              value={prefer.subway_within_m ?? ""}
+              onChange={(e) =>
+                setPrefer({ ...prefer, subway_within_m: toNullableInt(e.target.value) })
+              }
+            >
+              {SUBWAY_OPTIONS.map((o) => (
+                <option key={o.label} value={o.value ?? ""}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="cond__row">
+            <label className="cond__label" htmlFor="cond-built">
+              준공 연도 (이후)
+            </label>
+            <input
+              id="cond-built"
+              className="cond__number num"
+              type="number"
+              inputMode="numeric"
+              min={1900}
+              max={2100}
+              placeholder="상관없음"
+              value={prefer.built_after ?? ""}
+              onChange={(e) => setPrefer({ ...prefer, built_after: toNullableInt(e.target.value) })}
+            />
+          </div>
+
+          <div className="cond__row">
+            <label className="cond__label" htmlFor="cond-area-min">
+              전용면적 (㎡)
+            </label>
+            <div className="cond__range">
+              <input
+                id="cond-area-min"
+                className="cond__number num"
+                type="number"
+                inputMode="numeric"
+                min={0}
+                placeholder="최소"
+                value={prefer.area_min_m2 ?? ""}
+                onChange={(e) =>
+                  setPrefer({ ...prefer, area_min_m2: toNullableInt(e.target.value) })
+                }
+              />
+              <span aria-hidden="true">~</span>
+              <input
+                className="cond__number num"
+                type="number"
+                inputMode="numeric"
+                min={0}
+                placeholder="최대"
+                aria-label="전용면적 최대 (㎡)"
+                value={prefer.area_max_m2 ?? ""}
+                onChange={(e) =>
+                  setPrefer({ ...prefer, area_max_m2: toNullableInt(e.target.value) })
+                }
+              />
+            </div>
+          </div>
+
+          <div className="cond__row">
+            <label className="cond__label" htmlFor="cond-households">
+              최소 세대수
+            </label>
+            <input
+              id="cond-households"
+              className="cond__number num"
+              type="number"
+              inputMode="numeric"
+              min={0}
+              placeholder="상관없음"
+              value={prefer.min_households ?? ""}
+              onChange={(e) =>
+                setPrefer({ ...prefer, min_households: toNullableInt(e.target.value) })
+              }
+            />
+          </div>
+
+          <div className="cond__row">
+            <label className="cond__label" htmlFor="cond-school">
+              학군 중요도
+            </label>
+            <div className="cond__range">
+              <input
+                id="cond-school"
+                type="range"
+                min={0}
+                max={5}
+                step={1}
+                value={prefer.school_district ?? 0}
+                onChange={(e) =>
+                  setPrefer({ ...prefer, school_district: Number(e.target.value) })
+                }
+                aria-describedby="cond-school-value"
+              />
+              <span id="cond-school-value" className="cond__value num">
+                {prefer.school_district ?? 0} / 5
+              </span>
+            </div>
+          </div>
+        </section>
+
+        <section className="cond__group" aria-labelledby="cond-avoid">
+          <h2 className="cond__group-title" id="cond-avoid">
+            기피 (해당하면 추천에서 제외)
+          </h2>
+          {AVOID_ITEMS.map((item) => (
+            <div className="cond__check" key={item.key}>
+              <input
+                id={`cond-avoid-${item.key}`}
+                type="checkbox"
+                checked={Boolean(avoid[item.key])}
+                onChange={(e) => setAvoid({ ...avoid, [item.key]: e.target.checked })}
+              />
+              <label htmlFor={`cond-avoid-${item.key}`}>
+                <span className="cond__check-label">{item.label}</span>
+                <span className="cond__check-hint">{item.hint}</span>
+              </label>
+            </div>
+          ))}
+        </section>
+
+        <section className="cond__group" aria-labelledby="cond-weights">
+          <h2 className="cond__group-title" id="cond-weights">
+            무엇을 더 중요하게 볼까요
+          </h2>
+          <p className="cond__note">합계는 자동으로 맞춰집니다. 비율만 정하면 됩니다.</p>
+          {WEIGHT_KEYS.map((key) => (
+            <div className="cond__row" key={key}>
+              <label className="cond__label" htmlFor={`cond-w-${key}`}>
+                {WEIGHT_LABELS[key]}
+              </label>
+              <div className="cond__range">
+                <input
+                  id={`cond-w-${key}`}
+                  type="range"
+                  min={0}
+                  max={100}
+                  step={5}
+                  value={Math.round((weights[key] ?? 0) * 100)}
+                  onChange={(e) =>
+                    setWeights({ ...weights, [key]: Number(e.target.value) / 100 })
+                  }
+                  aria-describedby={`cond-w-${key}-value`}
+                />
+                <span id={`cond-w-${key}-value`} className="cond__value num">
+                  {Math.round((normalized[key] ?? 0) * 100)}%
+                </span>
+              </div>
+            </div>
+          ))}
+        </section>
+
+        {error && (
+          <p className="cond__error" role="alert">
+            {error}
+          </p>
+        )}
+
+        {/* 저장은 엄지 범위(하단 고정). safe-area 는 CSS 에서 처리. */}
+        <div className="cond__actions">
+          <button type="submit" className="cond__submit" disabled={!canSubmit}>
+            {busy ? "저장 중…" : profile ? "저장하고 다시 계산" : "저장하고 시작"}
+          </button>
+          {onClose && (
+            <button type="button" className="cond__cancel" onClick={onClose} disabled={busy}>
+              취소
+            </button>
+          )}
+        </div>
+      </form>
+    </main>
+  );
+}

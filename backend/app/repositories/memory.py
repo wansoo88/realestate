@@ -5,14 +5,17 @@ PostGIS 구현이 준비되기 전까지 API 계약을 검증하는 데 쓴다.
 """
 from __future__ import annotations
 
+import datetime as dt
 import itertools
 from typing import Any
 
 from app.domain.location.models import BuildingLocationFact, LocationFacts
 from app.domain.valuation.models import ListingRow, TradeRow
 from app.repositories.base import (
+    STATUS_APPROVED,
     ComplexSummary,
     JobRecord,
+    LastAdminError,
     ProfileRecord,
     UserRecord,
 )
@@ -24,6 +27,8 @@ class InMemoryRepository:
     def __init__(self) -> None:
         self._users: dict[int, UserRecord] = {}
         self._by_email: dict[str, int] = {}
+        #: 상태 변경 이력(append-only). PostGIS 의 `user_status_event` 에 대응한다.
+        self._status_events: list[dict[str, Any]] = []
         self._profiles: dict[int, ProfileRecord] = {}
         self._prefs: dict[int, dict[str, Any]] = {}
         self._complexes: list[ComplexSummary] = []
@@ -39,9 +44,17 @@ class InMemoryRepository:
         key = email.strip().lower()
         if key in self._by_email:
             raise ValueError("이미 등록된 이메일입니다")
-        user = UserRecord(id=next(self._ids), email=key, password_hash=password_hash)
+        # 상태 기본값은 UserRecord 가 'pending' 으로 갖는다(migrations/009 의 DEFAULT 와 동일).
+        # 여기서 approved 를 넣는 지름길을 만들지 않는다.
+        user = UserRecord(id=next(self._ids), email=key, password_hash=password_hash,
+                          created_at=dt.datetime.now(dt.timezone.utc))
         self._users[user.id] = user
         self._by_email[key] = user.id
+        self._status_events.append({
+            "user_id": user.id, "event": "registered", "actor": "self",
+            "actor_user_id": None, "reason": None,
+            "created_at": user.created_at,
+        })
         return user
 
     def get_user_by_email(self, email: str) -> UserRecord | None:
@@ -50,6 +63,65 @@ class InMemoryRepository:
 
     def get_user(self, user_id: int) -> UserRecord | None:
         return self._users.get(user_id)
+
+    # -- 사용자 승인 (관리자) ---------------------------------------------
+    def list_users(self, *, status: str | None = None,
+                   limit: int = 100) -> list[UserRecord]:
+        rows = [u for u in self._users.values() if status is None or u.status == status]
+        # 오래 기다린 사람이 위로. PostGIS 구현과 같은 정렬이어야 한다.
+        rows.sort(key=lambda u: (u.created_at or dt.datetime.min, u.id))
+        return rows[:limit]
+
+    def count_active_admins(self) -> int:
+        return sum(1 for u in self._users.values() if u.can_administer)
+
+    def _guard_last_admin(self, target: UserRecord, *, still_admin: bool) -> None:
+        """이 변경 뒤에도 승인된 관리자가 남는가. 안 남으면 거절한다."""
+        if not target.can_administer or still_admin:
+            return
+        others = sum(1 for u in self._users.values()
+                     if u.id != target.id and u.can_administer)
+        if others == 0:
+            raise LastAdminError(
+                "마지막 관리자입니다. 다른 관리자를 먼저 지정한 뒤에 바꾸세요")
+
+    def set_user_status(self, user_id: int, status: str, *, actor: str,
+                        actor_user_id: int | None = None,
+                        reason: str | None = None) -> UserRecord | None:
+        user = self._users.get(user_id)
+        if user is None:
+            return None
+        # 승인 취소·거부는 관리자 자격도 함께 잃게 한다(can_administer 가 approved 를 요구).
+        self._guard_last_admin(user, still_admin=(status == STATUS_APPROVED))
+        now = dt.datetime.now(dt.timezone.utc)
+        user.status = status
+        user.status_changed_at = now
+        user.status_changed_by = actor_user_id
+        user.status_reason = reason
+        self._status_events.append({
+            "user_id": user.id, "event": status, "actor": actor,
+            "actor_user_id": actor_user_id, "reason": reason, "created_at": now,
+        })
+        return user
+
+    def set_user_admin(self, user_id: int, is_admin: bool, *, actor: str,
+                       actor_user_id: int | None = None) -> UserRecord | None:
+        user = self._users.get(user_id)
+        if user is None:
+            return None
+        self._guard_last_admin(user, still_admin=is_admin)
+        user.is_admin = is_admin
+        self._status_events.append({
+            "user_id": user.id,
+            "event": "admin_granted" if is_admin else "admin_revoked",
+            "actor": actor, "actor_user_id": actor_user_id, "reason": None,
+            "created_at": dt.datetime.now(dt.timezone.utc),
+        })
+        return user
+
+    def status_events(self, user_id: int) -> list[dict[str, Any]]:
+        """감사 이력 조회 — 테스트·검증용(PostGIS 는 user_status_event 테이블)."""
+        return [e for e in self._status_events if e["user_id"] == user_id]
 
     # -- 프로필 -----------------------------------------------------------
     def get_profile(self, user_id: int) -> ProfileRecord | None:
@@ -127,13 +199,21 @@ class InMemoryRepository:
         return job
 
     def save_job_result(self, job_id: str, user_id: int, *, status: str,
-                        items: list[dict[str, Any]]) -> None:
-        """BackgroundTask 가 분석 결과를 되쓴다. 소유권을 다시 확인한다(IDOR)."""
+                        items: list[dict[str, Any]],
+                        excluded: list[dict[str, Any]] | None = None,
+                        notes: list[str] | None = None) -> None:
+        """BackgroundTask 가 분석 결과를 되쓴다. 소유권을 다시 확인한다(IDOR).
+
+        `excluded`(제외 후보와 사유)·`notes` 도 함께 남긴다 — PostGIS 구현과 **같은
+        응답**이 나와야 인메모리 테스트가 프로덕션을 대표한다.
+        """
         job = self._jobs.get(job_id)
         if job is None or job.user_id != user_id:
             return
         job.status = status
         job.items = list(items)
+        job.excluded = list(excluded or [])
+        job.notes = list(notes or [])
 
     # -- 추천 후보 조회 (BackgroundTask 러너용) ----------------------------
     # ⚠️ PostGIS 구현(re-arch)이 아래 3종을 같은 시그니처로 제공해야 프로덕션에서 동작한다.

@@ -1,0 +1,106 @@
+/* 실구매 가능 금액 — 금액이 주인공, 나머지는 캡션으로 눌러둔다. */
+
+.afford {
+  padding: var(--sp-2) 0 var(--sp-4);
+}
+
+.afford__caption {
+  margin: 0 0 var(--sp-1);
+  font-size: var(--fs-caption);
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+
+.afford__binding {
+  margin: var(--sp-2) 0 var(--sp-4);
+  font-size: var(--fs-footnote);
+  line-height: 1.5;
+}
+
+.afford__breakdown {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  gap: var(--sp-3);
+  margin: 0 0 var(--sp-4);
+}
+
+.afford__item dt {
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+}
+
+.afford__item dd {
+  margin: 2px 0 0;
+  font-size: var(--fs-footnote);
+  font-weight: 600;
+}
+
+.afford__list,
+.afford__evidence {
+  margin: 0;
+  padding: 0 0 0 var(--sp-4);
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.afford__evidence {
+  list-style: none;
+  padding-left: 0;
+}
+
+.afford__evidence-item {
+  padding: var(--sp-2) 0;
+  border-bottom: 0.5px solid var(--hairline);
+}
+
+.afford__evidence-item:last-child {
+  border-bottom: none;
+}
+
+.afford__claim {
+  display: block;
+  color: var(--text);
+  font-size: var(--fs-footnote);
+}
+
+.afford__source {
+  display: block;
+  margin-top: 2px;
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+}
+
+.afford__status,
+.afford__empty-text {
+  margin: var(--sp-4) 0;
+  font-size: var(--fs-footnote);
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.afford__error {
+  margin: var(--sp-3) 0;
+  padding: var(--sp-3);
+  border-radius: var(--r-card);
+  background: var(--badge-bg);
+  color: var(--danger-text);
+  font-size: var(--fs-footnote);
+}
+
+.afford__cta {
+  width: 100%;
+  min-height: 50px;
+  border-radius: var(--r-btn);
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: var(--fs-body);
+  font-weight: 600;
+}
+
+.afford__disclaimer {
+  margin: var(--sp-4) 0 0;
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+  line-height: 1.5;
+}

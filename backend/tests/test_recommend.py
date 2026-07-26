@@ -47,7 +47,16 @@ def _auth(token: str) -> dict[str, str]:
 
 
 def _login(client, email="a@b.co") -> str:
-    client.post("/api/v1/auth/register", json={"email": email, "password": PASSWORD})
+    """가입 → **승인** → 로그인.
+
+    가입 직후 계정은 `pending` 이라 로그인이 403 이다(관리자 승인제 · migrations/009).
+    테스트 편의를 위해 프로덕션 기본값을 approved 로 바꾸지 않는다 — 그러면 승인제가
+    통째로 무력화되고, 그 사실을 아무 테스트도 잡지 못한다. 여기서 **명시적으로** 승인한다.
+    """
+    r = client.post("/api/v1/auth/register", json={"email": email, "password": PASSWORD})
+    assert r.status_code == 201, r.text
+    user = client.repo.get_user_by_email(email)
+    client.repo.set_user_status(user.id, "approved", actor="cli")
     return client.post("/api/v1/auth/login",
                        json={"email": email, "password": PASSWORD}).json()["access_token"]
 
@@ -148,6 +157,77 @@ def test_예산초과_단지는_제외되고_사유가_남는다(client):
     body = _run(client, token, {"region_codes": [REGION]})
     assert body["status"] == "done"
     assert body["items"] == []          # 못 사는 집은 추천이 아니다
+
+    # ★ 여기가 요점: **왜** 안 나왔는지가 응답에 실려야 한다.
+    # 빈 items 만 주면 사용자는 데이터가 없는 줄 알고 결과 전체를 의심한다.
+    assert body["excluded"], "제외 사유가 응답에 없으면 '왜 이건 안 나왔지'에 답할 수 없다"
+    entry = body["excluded"][0]
+    assert entry["complex_id"] == 1
+    # complex_id 만 있으면 화면에 "단지 #1"이라고 밖에 못 쓴다 — 이름이 있어야 쓸모가 있다.
+    assert entry["complex_name"] == "테스트단지"
+    assert entry["reason_code"] == "over_budget"
+    assert "예산 초과" in entry["reason"]
+    assert entry["price_basis"] == "listing"
+
+
+def test_제외사유에_사용자_자산_원본금액이_없다(client):
+    """SR4-2 — 제외 사유는 평문으로 저장·전송된다. 자산 원본이 섞이면 안 된다.
+
+    한도(파생값)는 허용이고 보유현금·연소득 **원본**은 금지다. substring 이 아니라
+    금액 **값**으로 검사한다(정상 시세가 자산으로 오탐되지 않게).
+    """
+    from app.agents.base import extract_amounts
+
+    cash, income = 123_400_000, 87_600_000
+    token = _login(client)
+    _set_profile(client, token, cash=cash, income=income)
+    _seed_complex(client.repo, ask_oku=50.0)          # 예산 초과 → 사유 문장 생성
+
+    body = _run(client, token, {"region_codes": [REGION]})
+    assert body["excluded"]
+
+    blob = " ".join(str(e.get("reason", "")) for e in body["excluded"])
+    leaked = extract_amounts(blob) & {cash, income}
+    assert not leaked, f"제외 사유에 자산 원본이 들어갔다: {leaked}"
+
+
+def test_순위에서_잘린_후보도_사유와_함께_남는다(client):
+    """조건을 다 통과하고 11위라서 빠진 단지도 사용자에겐 '안 나온 후보'다."""
+    token = _login(client)
+    _set_profile(client, token)
+    for cid, ask in ((1, 7.0), (2, 7.2), (3, 7.4)):
+        _seed_complex(client.repo, complex_id=cid, ask_oku=ask)
+
+    body = _run(client, token, {"region_codes": [REGION], "top_n": 1})
+
+    assert len(body["items"]) == 1, "top_n 이 지켜지지 않으면 '상위 N건 밖'이 거짓말이 된다"
+    cut = [e for e in body["excluded"] if e["reason_code"] == "below_rank_cutoff"]
+    assert len(cut) == 2
+    assert all(e["complex_name"] for e in cut)
+    assert "상위 1건 밖" in cut[0]["reason"]
+    # 모든 후보는 추천이거나 제외다 — 말없이 사라지는 후보가 없어야 한다.
+    assert len(body["items"]) + len(body["excluded"]) == 3
+
+
+def test_제외가_없으면_빈_목록으로_내려간다(client):
+    """빈 목록과 '필드 없음'은 다른 뜻이다 — 프론트가 구분해 표시한다."""
+    token = _login(client)
+    _set_profile(client, token)
+    _seed_complex(client.repo, ask_oku=7.0)
+
+    body = _run(client, token, {"region_codes": [REGION]})
+    assert body["items"] and body["excluded"] == []
+    assert isinstance(body["notes"], list) and body["notes"]
+
+
+def test_프로필이_없으면_그_사실을_notes로_말한다(client):
+    """빈 결과에도 이유가 있다. '데이터가 없어서'와 '예산을 몰라서'는 다르다."""
+    token = _login(client)
+    _seed_complex(client.repo, ask_oku=7.0)          # 후보는 있는데 프로필이 없다
+
+    body = _run(client, token, {"region_codes": [REGION]})
+    assert body["items"] == []
+    assert any("자산" in n for n in body["notes"]), body["notes"]
 
 
 # ---------------------------------------------------------------------------
@@ -253,7 +333,12 @@ def test_실거래기준_예산초과는_추정치임을_사유에_남긴다(cli
 
 
 def test_실거래_표본이_부족하면_후보로_세우지_않는다(client):
-    """가격 근거가 없으면(호가 없음 + 표본 부족) 지어내지 않고 후보에서 뺀다."""
+    """가격 근거가 없으면(호가 없음 + 표본 부족) 지어내지 않고 후보에서 뺀다.
+
+    ★ 그러나 **말없이 빼지는 않는다.** 후보가 되기도 전에 떨어진 단지는 예전에
+    어디에도 남지 않아서, 사용자가 "우리 단지가 왜 아예 안 보이냐"고 물으면 답이 없었다
+    (실측: 강남구 조회 50개 단지 중 4개가 여기서 사라졌다).
+    """
     token = _login(client)
     _set_profile(client, token)
     _seed_trades_only(client.repo, price_oku=7.0, n=2)   # MIN_SAMPLE(5) 미만
@@ -261,6 +346,12 @@ def test_실거래_표본이_부족하면_후보로_세우지_않는다(client):
     body = _run(client, token, {"region_codes": [REGION]})
     assert body["status"] == "done"
     assert body["items"] == []
+
+    assert len(body["excluded"]) == 1
+    entry = body["excluded"][0]
+    assert entry["reason_code"] == "no_price_evidence"
+    assert entry["complex_name"] == "호가없는단지"
+    assert "실거래" in entry["reason"]
 
 
 def test_호가_단지와_실거래_단지가_섞여도_각각_제_근거를_쓴다(client):
@@ -354,6 +445,39 @@ def test_한_단지가_후보를_독식하지_않는다():
 
 
 # ---------------------------------------------------------------------------
+# 제외 사유의 마지막 그물 — 자산 원본이 문장으로 새는 경로 (SR4-2)
+# ---------------------------------------------------------------------------
+
+def test_사유에_자산원본이_섞이면_문장만_가리고_사유는_남긴다():
+    """미래에 누가 '보유현금 3억으로는 부족합니다' 같은 문구를 넣어도 여기서 잡힌다.
+
+    사유를 통째로 버리지 않는다 — 사용자는 여전히 '예산 초과'라는 답을 받아야 한다.
+    """
+    from app.agents.recommend import _strip_asset_amounts
+
+    entry = {"complex_id": 7, "complex_name": "○○아파트", "reason_code": "over_budget",
+             "reason": "예산 초과 (보유현금 300,000,000원으로는 부족)"}
+    out = _strip_asset_amounts([entry], [300_000_000])
+
+    assert "300,000,000" not in out[0]["reason"]
+    assert out[0]["reason_redacted"] is True
+    assert "예산 초과" in out[0]["reason"]          # 사유 자체는 살아 있다
+    assert out[0]["complex_name"] == "○○아파트"     # 화면에 필요한 정보도 그대로
+
+
+def test_정상_사유는_금액이_있어도_가리지_않는다():
+    """시세 13억이 자산 3억으로 오차단되면 사유가 전부 뭉개진다(값 비교, substring 아님)."""
+    from app.agents.recommend import _strip_asset_amounts
+
+    entry = {"complex_id": 7, "reason_code": "over_budget",
+             "reason": "예산 초과 (호가 1,300,000,000원 > 한도 850,000,000원)"}
+    out = _strip_asset_amounts([entry], [300_000_000])
+
+    assert out[0]["reason"] == entry["reason"]
+    assert "reason_redacted" not in out[0]
+
+
+# ---------------------------------------------------------------------------
 # IDOR — 남의 추천은 못 본다(백그라운드 저장도 소유권 검증)
 # ---------------------------------------------------------------------------
 
@@ -371,3 +495,52 @@ def test_남의_추천결과는_못본다(client):
                       headers=_auth(t1)).status_code == 200
     assert client.get(f"/api/v1/recommendations/{job_id}",
                       headers=_auth(t2)).status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# ★ JOB-1 회귀: 실패 상태값이 DB 제약과 어긋나면 job 이 영원히 멈춘다
+# ---------------------------------------------------------------------------
+
+def test_실패상태값이_DB제약에_들어있다():
+    """러너가 쓰는 실패 상태가 001_init.sql 의 CHECK 목록 안에 있어야 한다.
+
+    예전엔 러너가 'error' 를 썼는데 제약은 queued|running|done|failed 만 허용해
+    UPDATE 가 통째로 깨졌고, job 이 **'queued' 로 영원히 멈춰** 화면에 "분석 중…" 이
+    무한히 떴다. 실패가 실패로 보이지 않는 사고다.
+
+    문자열을 손으로 비교하지 않고 **마이그레이션 원문에서 허용 목록을 파싱**해 대조한다 —
+    스키마가 바뀌면 이 테스트가 같이 따라간다.
+    """
+    import re
+    from pathlib import Path
+
+    from app.agents.recommend import JOB_FAILED
+
+    sql = (Path(__file__).resolve().parents[1] / "migrations" / "001_init.sql").read_text(
+        encoding="utf-8")
+    # recommendation_job 의 status CHECK 절을 찾는다
+    m = re.search(r"recommendation_job\b.*?status\s+text[^,]*?CHECK\s*\(\s*status\s+IN\s*\(([^)]+)\)",
+                  sql, re.S | re.I)
+    assert m, "001_init.sql 에서 recommendation_job.status CHECK 를 찾지 못했습니다"
+    allowed = {v.strip().strip("'\"") for v in m.group(1).split(",")}
+
+    assert JOB_FAILED in allowed, (
+        f"러너의 실패 상태 {JOB_FAILED!r} 가 DB 제약 {sorted(allowed)} 에 없습니다 — "
+        "UPDATE 가 깨져 job 이 queued 로 멈춥니다"
+    )
+
+
+def test_실패하면_job이_failed로_남는다():
+    """예외가 나도 job 이 queued 에 머물지 않고 실패로 확정돼야 한다."""
+    from app.agents.recommend import JOB_FAILED, run_recommendation_job
+
+    class BoomRepo:
+        def __init__(self): self.saved = []
+        def get_profile(self, *a, **k): raise RuntimeError("boom")
+        def save_job_result(self, job_id, user_id, *, status, items, **kw):
+            self.saved.append(status)
+
+    repo = BoomRepo()
+    run_recommendation_job(repo=repo, settings=object(), job_id="rec_x",
+                           user_id=1, criteria={})
+    assert repo.saved == [JOB_FAILED], f"실패 시 상태가 {repo.saved} 로 남았습니다"

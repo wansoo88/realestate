@@ -2404,3 +2404,377 @@ SR15-4 는 "헤더를 붙였다"가 아니라 **"왜 이 출처인지"를 원본
 **사용자에게 올릴 것**: `SR19-1` — DEC-001 의 보완책 "카카오 JS 키 도메인 제한"은 **실측상 아무것도
 막지 않는다.** 위험 수용 결정 자체는 유효하지만(피해 상한 = 한도 소진), 결정의 근거 하나가 사실과
 다르므로 기록을 정정하고 콘솔 등록 상태를 재확인해야 한다.
+
+---
+
+## SR-020 · 2026-07-26 · **배포 직전 최종 — 가입 승인제(ADM-1/2) · 제외 사유 평문 저장(REC-3) · 수집(INGEST-3)** (security-reviewer, herdr re-review 대행)
+
+**판정: PASS** — **배포를 막을 보안 사유 없음.** 단 **선결 조건 1건(SR20-1, 취약점 아님)**을 반드시 지킬 것.
+대상: SR-019 이후 working tree 전체 — `migrations/009·010` · `app/api/**` · `app/repositories/**` · `app/core/security.py` · `scripts/manage_users.py` · 프론트 관리자 화면 · `app/ingest/**`
+재현: backend **727 tests / 0 failures / 63 skipped = 664 passed** · frontend **16 files / 190 passed** — 지시 수치 일치
+
+> 결론 요약: 이번 라운드의 핵심은 **새 인증 경로를 만들면서 기존 열거 취약점(SR10-1)까지 닫았다**는 것이다.
+> 주장을 믿지 않고 **직접 측정했다** — 없는 계정과 있는 계정의 응답 시간 차가 argon2 1회 비용의 **2.2%**
+> 까지 줄었고, 네 가지 실패 케이스의 응답은 바이트 단위로 같다. 권한 모델도 토큰에 권한을 싣지 않고
+> 웹에 권한 부여 경로 자체를 두지 않아 **상승 경로가 구조적으로 없다.**
+> 다만 **운영 DB에 009가 아직 적용돼 있지 않고**(실측), 서버에 손으로 넣은 임시 차단 블록이
+> **DEP-1 결함을 그대로 재현**하고 있다(라이브 실측). 둘 다 이번 배포 절차로 해소된다.
+
+---
+
+### 1) ★ 계정 열거(SR10-1) — **측정으로 닫힘을 확인**
+
+지시대로 "구조로 확인"에 그치지 않고 **직접 측정**했다(InMemory 리포지토리 + TestClient, N=25).
+
+#### 1-A. 응답 동일성 — 네 경우가 **완전히 같다**
+
+| 케이스 | 응답 |
+|---|---|
+| 없는 계정 + 아무 비밀번호 | `401 {"detail":{"code":"UNAUTHORIZED","message":"이메일 또는 비밀번호가 올바르지 않습니다"}}` |
+| 있는 계정(승인) + 틀린 비밀번호 | 동일 |
+| 있는 계정(**대기**) + 틀린 비밀번호 | 동일 |
+| 있는 계정(**거부**) + 틀린 비밀번호 | 동일 |
+
+상태코드·본문·헤더 집합까지 대조 → **완전 동일**. 승인 상태가 401 응답에 새지 않는다.
+
+#### 1-B. 타이밍 — 오라클이 실제로 사라졌다
+
+```
+없는 계정 + 아무 비번     median= 26.78ms   mean= 27.34   min= 26.20  max= 30.02
+있는(승인) + 틀린 비번    median= 27.25ms   mean= 27.33   min= 26.05  max= 29.76
+있는(대기) + 틀린 비번    median= 27.56ms   mean= 28.04
+있는(거부) + 틀린 비번    median= 27.13ms   mean= 27.63
+
+없는계정 vs 있는계정 중앙값 차 : 0.48ms
+argon2 해시 1회 실측 비용      : 21.59ms
+==> 차이는 argon2 1회 비용의 2.2%
+```
+
+이 수치의 의미: **수정 전이라면 이 자리에 약 22ms(=100%)의 차이**가 났다. 없는 계정은 argon2를
+아예 돌리지 않고 즉시 401을 냈기 때문이다. 지금은 없는 계정에도 같은 비용을 태워 그 신호가 사라졌다.
+0.48ms는 분포 폭(min~max 약 4ms) 안에 완전히 묻히는 크기다.
+
+#### 1-C. 구조도 맞다
+
+`dummy_password_hash()` 가 `hash_password()` 를 그대로 쓰므로 **파라미터가 같을 수밖에 없다**
+(별도 상수를 두었다면 파라미터가 갈라질 여지가 있었다). `functools.lru_cache(maxsize=1)` 로
+프로세스당 1회만 계산되고, 값은 `secrets.token_urlsafe(32)` 라 어떤 비밀번호와도 일치하지 않는다.
+
+검사 **순서**도 옳다 — `verify_password` 를 먼저 돌리고, 실패면 401. 승인 상태는 그 뒤에만 본다:
+
+| 올바른 비밀번호로 로그인 | 응답 |
+|---|---|
+| 승인됨 | `200` + access_token |
+| 대기 | `403 {"code":"PENDING_APPROVAL"}` |
+| 거부 | `403 {"code":"ACCOUNT_REJECTED"}` |
+
+403을 볼 수 있는 사람은 **이미 그 계정의 비밀번호를 아는 사람**뿐이라 열거로 이어지지 않는다.
+순서를 뒤집었다면 승인제가 오히려 "누가 가입 대기 중인지"를 알려주는 장치가 됐을 것이다.
+
+#### 1-D. 프론트도 구조로 보장한다
+
+`lib/authMessages.ts::loginFeedback` 이 **401을 가장 먼저** 분기하고 그 안에서
+**서버의 `code`·`message` 를 읽지도 않는다** — 단일 상수 `LOGIN_FAILED_MESSAGE` 로 끝낸다.
+뒤에 어떤 분기를 추가해도 401은 거기 닿지 못한다. 문구 규칙을 뷰에서 떼어내 한 파일로 모은 판단도 옳다
+(컴포넌트 안에 흩어 두면 다음 사람이 "친절하게" 세분화하다 구멍을 연다).
+
+#### 1-E. 잔여: `register` 의 409 `EMAIL_TAKEN` (SR20-4, low — **수용 가능**)
+
+가입 여부 오라클은 남는다. 그러나 수용 가능하다고 본다:
+- **가치 있는 오라클(로그인)은 닫혔다.** 남은 것은 "가입돼 있다"까지이고 그 이상은 알 수 없다.
+- **알아내도 쓸 수 없다** — 승인 없이는 로그인이 불가능하고, 관리자 부여 경로는 웹에 없다.
+- **속도 제한이 걸린다** — `location ~ ^/api/v1/auth/(login|register)$` → `re_auth` 1r/s · burst 5.
+- 대안(항상 202를 주고 메일로 통지)은 **메일 인프라가 없는 1~2인 서비스**에서 현실성이 없고,
+  중복 가입을 조용히 삼키면 사용자가 영문 모른 채 승인을 기다리게 된다.
+
+---
+
+### 2) 권한 모델 — **상승 경로가 구조적으로 없다**
+
+#### 2-A. 토큰에 권한이 없다 (실측)
+
+발급된 access 토큰을 디코드한 클레임: **`exp, iat, jti, sub, typ` 정확히 5개.**
+`is_admin`·`admin`·`role`·`roles`·`scope`·`status`·`perms` **0건**.
+→ 관리자 여부는 매 요청 DB에서 `is_admin AND status='approved'` 로 판정된다.
+**권한 회수가 즉시 반영**되고(토큰 재발급 대기 없음), 토큰 위조로 권한을 얻을 수도 없다.
+
+#### 2-B. 404 관문 — 7/7 전부 404 (실측)
+
+| 요청 | 응답 |
+|---|---|
+| 관리자 `GET /admin/users` | `200` |
+| 비관리자 `GET /admin/users` | **404** `{"detail":"Not Found"}` |
+| 비인증 `GET /admin/users` | **404** (401 아님) |
+| 잘못된 토큰 | **404** |
+| 비관리자 `POST /admin/users` (405 대상) | **404** |
+| 비관리자 `POST /admin/users/abc/status` (422 대상) | **404** |
+| **관리자** `POST /admin/users/abc/status` (422 대상) | **404** |
+
+`@router.api_route("/admin/{rest:path}")` 포괄 라우트가 정상 라우트 **뒤에** 놓여 405·422까지 전부
+404로 맞춘다. Starlette이 완전 일치를 먼저 찾으므로 정상 라우트를 가리지도 않는다.
+
+**이 선택이 옳은가 — 옳다.** 405는 그 자체로 "여기 라우트가 있다"는 신호이고, 401은 "인증하면 뭔가
+있다"는 신호다. 둘 다 관리 기능의 존재를 알려준다. 비용은 **관리자 본인의 오타도 404로 보인다**는 것
+(422 대신 404라 디버깅이 불친절)인데, 관리자가 1명인 운영 환경에서 감수할 만하다.
+
+#### 2-C. 마지막 관리자 보호 — 리포지토리에서 막는다 (실측)
+
+```
+활성 관리자 2명 → 1명 reject           : 200 (허용)
+활성 관리자 1명 → 마지막 reject 시도    : 409 {"code":"LAST_ADMIN"}
+리포지토리 직접 호출(라우터 우회)        : LastAdminError 발생 — 차단
+```
+라우터가 아니라 **API·CLI 공통 길목**에 두어 우회가 불가능하다. 그리고 이 409는 404로 덮지 않는데,
+**숨길 정보가 아니라 왜 안 되는지 알려줘야 하는 상황**이라 옳은 예외다.
+
+#### 2-D. 웹에 권한 부여 경로가 **없다**
+
+라우트 전수 확인 결과 `grant-admin` 계열 엔드포인트가 **존재하지 않는다.** 관리자 부여는
+`scripts/manage_users.py --grant-admin` 뿐이고 그건 **SSH가 있어야** 실행된다.
+"첫 가입자 자동 관리자"를 일부러 안 만든 판단도 옳다 — 사이트가 이미 공개돼 있어 선점 가능했다.
+마이그레이션에 특정 이메일을 박지 않은 것도 마찬가지다(개인 계정이 저장소에 남는다).
+
+#### 2-E. refresh — 7일 창이 실제로 닫힌다 (실측, https 클라이언트로 쿠키 왕복)
+
+| 시나리오 | 결과 |
+|---|---|
+| 승인 상태 refresh | `200` |
+| **rejected 로 바꾼 뒤** refresh | `401` + 쿠키 삭제 |
+| **pending 으로 바꾼 뒤** refresh | `401` + 쿠키 삭제 |
+
+삭제 헤더: `refresh_token=""; Max-Age=0; HttpOnly; Path=/api/v1/auth; SameSite=Strict; Secure`
+— 발급 때와 **속성이 일치**해서 실제로 지워진다(속성이 다르면 브라우저가 안 지운다).
+승인 취소가 최대 7일간 무력화되던 창이 닫혔다. 미승인자의 일반 API 접근도 `403 PENDING_APPROVAL`.
+
+#### 2-F. 관리자 응답에 민감정보가 없다 (실측)
+
+`GET /admin/users` 응답 키: **`id · email · status · is_admin · created_at · status_changed_at ·
+status_changed_by · status_reason`** — 8개뿐.
+`password_hash`·`argon2`·`cash_krw`·`income_krw`·`existing_loan` 등 검색 → **0건**.
+`AdminUserOut` 이 마지막 문 역할을 실제로 하고 있다.
+
+#### 2-G. CLI
+
+`scripts/manage_users.py` 는 **비밀번호를 전혀 다루지 않는다**(승인은 접근 권한이지 자격증명이 아니라는
+설계와 일치). `from _common import ...` 를 거치므로 로깅 억제·비밀 마스킹이 자동으로 걸린다(SR17-3 구조).
+
+---
+
+### 3) REC-3 — 제외 사유 평문 저장의 SR4-2 회귀
+
+#### 3-A. 그물 실측 — 7/7 탐지 · 오탐 0/2
+
+`_strip_asset_amounts` 에 자산 원본(현금 8억·소득 1.2억·대출 5천)을 **일곱 가지 표기**로 밀어 넣었다:
+
+| 넣은 형태 | 가려졌나 |
+|---|:--:|
+| 숫자 그대로 `800000000` | ✅ |
+| 콤마 `800,000,000` | ✅ |
+| 억 표기 `8억원` | ✅ |
+| 만원 표기 `80000만원` | ✅ |
+| 억+만원 혼합 `1억2000만원` | ✅ |
+| **한글 수사 `팔억원`** | ✅ |
+| 기존대출 원본 | ✅ |
+| *(정상)* 시세 `1,300,000,000원` | 통과 — 오차단 없음 |
+| *(정상)* 한도 파생값 `1,050,000,000원` | 통과 — 오차단 없음 |
+
+값 비교(`extract_amounts`) 방식이라 시세 13억을 자산 3억으로 오인해 가리는 일이 없다.
+걸리면 사유 **문장만** 안전한 문구로 바꾸고 `reason_code`·단지명은 남겨 사용자가 답을 잃지 않는다.
+
+#### 3-B. 1차 방어(구조)도 실재한다
+
+`AnalysisContext` 에 자산 원본이 없고, 사유를 만드는 `orchestrator` 는 원본을 아예 갖고 있지 않다.
+`excluded_record` 가 **고정 키 집합**만 만든다(`complex_id · complex_name · area_m2 · price_basis ·
+price_estimated · reason_code · reason`). 자유 문자열은 `reason` 과 DB에서 온 `complex_name` 뿐이다.
+
+#### 3-C. IDOR — 유지 (코드 확인)
+
+```sql
+-- 저장
+UPDATE recommendation_job SET status=:status, result_meta=CAST(:meta AS jsonb)
+ WHERE id = :job_id AND user_id = :user_id RETURNING id      -- 없으면 쓰지 않는다
+-- 조회
+SELECT id, user_id, criteria_snapshot, status, result_meta
+  FROM recommendation_job WHERE id = :job_id AND user_id = :user_id
+```
+둘 다 `user_id` 조건 유지 + 전부 바인드 파라미터. items 조회는 job 소유권 확인 **이후**라 안전.
+
+#### 3-D. 운영 DB 실측 — 평문 금액 컬럼 0
+
+`user_profile` 컬럼: `cash_krw_enc:bytea | existing_loan_krw_enc:bytea | income_krw_enc:bytea |
+household_size:smallint | owned_houses:smallint | updated_at | user_id` — **금액은 전부 bytea 암호문.**
+`recommendation_job` 은 현재 0행이라 실저장물 스캔은 대상이 없었다(담당자의 실행 스캔 결과를 대체하지 않는다).
+
+#### 3-E. 잔여 (SR20-3, low) — 그물의 사정거리가 문서보다 좁다
+
+1. **`reason` 한 필드만 본다.** 같은 dict의 다른 키에 금액을 넣으면 그대로 통과한다(실측: `complex_name`·
+   `note`·`detail`·`message` **4/4 유출**). 현재 `excluded_record` 가 고정 키만 만들어 실제 경로는 없지만,
+   함수 docstring은 "제외 사유에 자산이 섞였는지" 전반을 막는 것처럼 읽힌다.
+2. **`notes` 는 그물을 아예 통과하지 않는다** — `recommend.py:153-154` 가 `excluded` 만 필터링하고
+   `notes` 는 그대로 합쳐 같은 평문 컬럼에 넣는다. 현재 notes는 **전부 정적 문자열·상수**
+   (`CANDIDATE_COMPLEX_LIMIT`·`MAX_CANDIDATES`)라 안전하나, 검사받지 않는 경로가 하나 열려 있다.
+3. **`forbidden` 이 비면 조용히 no-op** 이다(`guarded` 가 비면 원본 그대로 반환).
+   같은 상황에서 `portfolio_summary` 는 **fail-loud** 로 막는데 여기는 아니다 — 비대칭이다.
+   프로필이 없으면 excluded도 비므로 현재 무해.
+
+→ 권고: `notes` 도 같은 그물에 태우고, 검사 대상 필드를 화이트리스트로 명시하고, `guarded` 가 비었는데
+excluded가 있으면 fail-loud. 셋 다 작은 수정이다.
+
+---
+
+### 4) ★ 배포 선결 조건 — **운영 DB에 009가 적용돼 있지 않다** (SR20-1)
+
+**취약점이 아니다. 그러나 이 순서를 어기면 서비스가 전면 장애가 난다.**
+
+운영 DB 실측(조회 전용):
+
+```
+app_user 실제 컬럼 : id, email, password_hash, created_at
+  status 컬럼       : 없음 (0)
+  user_status_event : 없음 (0)
+recommendation_job.result_meta : 있음  ← 010 은 적용됨
+```
+
+신규 코드의 `_USER_COLUMNS` 는 `status, is_admin, status_changed_at, status_changed_by, status_reason`
+를 SELECT한다. 009 없이 코드를 올리면 `get_user_by_email`(로그인)·`get_user_by_id`(토큰 검증)가
+**전부 실패 → 로그인·인증 전 경로 500.** 마이그레이션 파일 자신이 이 순서를 경고하고 있고,
+그 경고가 실제 상황과 일치함을 확인했다.
+
+방향은 **fail-closed**(무단 접근이 열리는 게 아니라 전부 막힘)라 보안 위험은 아니다. 다만:
+
+1. **반드시 `009 → 코드` 순서.**
+2. 009 적용 즉시 기존 계정이 전부 `pending` 이 된다 — 운영 DB의 **실사용자 1명(id=11,
+   2026-07-26 가입)** 이 로그인 불가 상태가 된다. 이건 의도된 동작이다(차단 이전에 선점된 계정을
+   자동 통과시키지 않는다). 복구는 PM이 CLI로:
+   `manage_users.py --list` → `--approve <email>` → `--grant-admin <email>`.
+3. **관리자를 지정하기 전까지는 아무도 승인할 수 없다** — CLI가 유일한 부트스트랩 경로다.
+   이 순서를 배포 절차에 못박아 둘 것.
+
+> ⚠️ 감사자는 **조회만** 했다. 실사용자 계정·상태를 건드리지 않았고 009도 적용하지 않았다.
+
+---
+
+### 5) 라이브 서버 상태 — 대체로 좋고, 임시 조치 1건이 DEP-1을 재현했다
+
+#### 5-A. 좋은 것 (실측)
+
+| 항목 | 결과 |
+|---|:--|
+| CSP | **강제**(Report-Only 0 · 강제 3). `/` 응답에 보안헤더 **5/5** — SR15-4 라이브 확인 |
+| DB 포트 | 5432 리스너 **0**, `realestate-db` Ports 공란 |
+| 임시 가입 차단 | `POST /auth/register` → **403** 동작 확인 |
+| 로그인 | 없는 계정 → **401** (구 코드지만 정상) |
+| 자산 암호화 | `user_profile` 금액 3종 전부 `bytea` |
+| 동거 서비스 | `itsmine-*`·`autobtc` **조회만** — 변경 0회 |
+
+#### 5-B. ★ SR20-2 (low) — TEMP-REG-BLOCK이 보안헤더 상속을 끊었다
+
+운영 nginx(`/etc/nginx/sites-available/realestate.utilverse.info:171-177`):
+
+```nginx
+# === TEMP-REG-BLOCK (2026-07-26) ===
+location = /api/v1/auth/register {
+    return 403 '{"error":{"code":"REGISTRATION_CLOSED", ...}}';
+    add_header Content-Type application/json always;    # ← 이 한 줄이 상속을 끊는다
+}
+```
+
+`add_header` 가 하나라도 있으면 상위 레벨 `add_header` 를 **전혀 상속하지 않는다** — 이 프로젝트가
+DEP-1로 이미 겪고, `test_deploy_config.py` 까지 만들어 막던 바로 그 규칙이다. 라이브 실측:
+
+```
+/api/v1/auth/register -> 보안헤더 0/5      ← CSP·HSTS·X-Frame-Options·nosniff·Referrer-Policy 전무
+/api/v1/auth/login    -> 보안헤더 9/5(중복 포함)
+/                     -> 보안헤더 5/5
+```
+
+덤으로 `content-type: application/octet-stream` 과 `application/json` 이 **둘 다** 실려 있고
+`nosniff` 가 없다.
+
+**영향은 낮다** — 고정 문자열 JSON이고 공격자 입력이 섞이지 않아 XSS 경로가 없다.
+**중요한 건 다른 데 있다**: 저장소의 정적 게이트(`test_deploy_config.py`)는 **서버에서 손으로 넣은
+블록을 볼 수 없다.** 막아 놓은 결함 유형이 우회 경로로 되살아났다.
+
+**해소는 이번 배포 그 자체다.** 이 블록을 제거하면 register가 정규 라우트
+(`location ~ ^/api/v1/auth/(login|register)$`)로 넘어가 **보안헤더도 rate limit(re_auth 1r/s·burst 5)도
+정상 적용**된다. 다만 제거를 잊으면 승인제가 무의미해지므로(가입 자체가 403) 절차에 못박을 것.
+※ nginx 위치 우선순위상 정확일치(`=`)가 정규식보다 앞서므로, **지금은 register가 rate limit도 안 받는다**
+(403이라 무해).
+
+---
+
+### 6) 프론트 관리자 화면 (ADM-2) — 클라이언트가 권한을 주장할 수 없다
+
+- **판정은 서버에만 있다**: `availability` 가 `probing → (200) available / (404) unavailable`.
+  **200을 실제로 받은 경우에만** 진입점을 켠다. "일단 메뉴를 띄우고 눌렀을 때 404"를 하지 않는다.
+- **모르면 숨긴다**: 네트워크 오류 등 404가 아닌 실패에서는
+  `setAvailability(prev => prev === "available" ? prev : "unavailable")` — 확인된 적 없으면 계속 숨김.
+  **fail-closed** 다.
+- **404를 "권한 없음"으로 표시하지 않는다** — 서버가 숨긴 것을 화면이 도로 알려주지 않는다.
+- **정제 함수가 문(門)이다**: `sanitizeAdminUser` 가 **허용 목록** 방식이라 매핑하지 않은 키는 전부 버려진다.
+  `SENSITIVE_KEYS`(자산 3종·`password_hash`·토큰 등)가 응답에 오면 `droppedSensitive` 로 화면에 알려
+  **백엔드 회귀가 조용히 지나가지 않는다.** 타당한 설계다 — 프론트가 백엔드의 마지막 회귀 탐지기가 된다.
+
+---
+
+### 7) 수집(INGEST-3 · GEO-8) · JOB-1
+
+- **SQL 안전성**: 저장소 전체 f-string SQL은 전부 `_USER_COLUMNS`(모듈 상수 컬럼 목록) 또는
+  `backup.complex_geom_pre_geo1`(리터럴) 삽입뿐. **사용자 입력이 들어가는 자리 0건.**
+  신규 `loader.py`·`geocode.py` 변경분에 문자열 조합 SQL 없음.
+- **G4 유지**: 신규 외부 호출 없음. rate limit·공공 API 전용 구조 무변경.
+- **JOB-1**: 실패 상태값을 DB CHECK(`queued|running|done|failed`)와 맞춘 수정. 보안 결함은 아니지만
+  **관점상 중요하다** — 고칠 만했다. 실패가 `queued` 로 남으면 화면에는 "분석 중…"이 무한히 떠서
+  **사고가 진행 중인 작업으로 위장**된다. 운영자가 "실패 0건"을 보고 안심하는 상태가 가장 위험하다.
+  이 프로젝트가 반복해서 지켜 온 원칙("조용한 실패 금지")과 같은 선상이며, 상태값을 상수로 묶고
+  DB 제약과 일치하는지 테스트로 고정한 방식도 적절하다.
+
+---
+
+### 8) DEC-001 / 카카오 JS 키 — **SR19-1 상태 그대로** (재확인 필요)
+
+사용자가 `https://realestate.utilverse.info` 를 등록했다고 했으나, **세 번째 측정에서도 결과가 같다**
+(12:44 · 12:51 · 15:46, 전부 동일):
+
+```
+referer 없음                              -> HTTP 200   (감사자 PC 에서 SDK 정상 수신)
+referer https://realestate.utilverse.info -> HTTP 401   domain mismatched
+referer https://realestate.utilverse.info/ -> HTTP 401
+```
+
+→ **등록이 반영되지 않았거나 다른 앱에 등록됐다.** 콘솔에서 앱 선택과 도메인 문자열을 재확인해야 한다.
+지도가 지금 뜨는 이유는 여전히 우리 nginx의 `Referrer-Policy: no-referrer` 덕분이며,
+그 결합이 문서화되지 않으면 나중에 Referrer-Policy를 "개선"하는 순간 지도가 죽는다.
+**배포 차단 사유는 아니다**(피해 상한이 DEC-001이 이미 수용한 "한도 소진"과 동일).
+
+---
+
+### 신규 발견 요약
+
+| ID | 심각도 | 제목 | 차단 |
+|---|:--:|---|:--:|
+| `SR20-1` | — (선결조건) | 운영 DB에 **009 미적용** — 코드를 먼저 올리면 로그인·토큰검증 전면 500(fail-closed). 적용 후 실사용자 승인·관리자 지정이 CLI로 필요 | **배포 순서 필수** |
+| `SR20-2` | low | 서버 TEMP-REG-BLOCK의 `add_header` 가 보안헤더 상속을 끊어 `/auth/register` 가 **0/5** (DEP-1 재현). 배포 시 블록 제거로 해소 | 비차단 |
+| `SR20-3` | low | `_strip_asset_amounts` 가 `reason` 한 필드만 검사 · **`notes` 는 미검사** · `forbidden` 이 비면 조용히 no-op(포트폴리오 경로는 fail-loud인데 비대칭) | 비차단 |
+| `SR20-4` | low | `register` 409 `EMAIL_TAKEN` 가입 여부 오라클 잔존 — **수용 가능**(로그인 오라클 폐쇄 · 승인 없이 무용 · 1r/s 제한 · 메일 인프라 부재) | 비차단 |
+| `SR19-1` | medium(유지) | 카카오 JS 키 도메인 제한 미작동 — 3회 측정 동일. 콘솔 재확인 필요 | 비차단 |
+
+### CLOSE 처리
+
+`SR10-1` **RESOLVED** — 계정 열거 타이밍 오라클. 응답 동일성 + 타이밍 실측(argon2 비용의 2.2%)으로 확인.
+승인제라는 새 기능을 붙이면서 **원래 있던 취약점까지 닫은** 사례다.
+
+### 판정
+
+**PASS — 배포를 막을 보안 사유 없음. `deploy_approved: true`**
+
+이번 변경은 공격 표면을 넓히지 않고 **좁혔다**. 새 인증 경로(승인제)를 추가하면서
+① 계정 열거를 측정 가능한 수준으로 닫았고 ② 토큰에 권한을 싣지 않아 위조·회수지연 문제를 없앴고
+③ 웹에 권한 부여 경로를 아예 두지 않았고 ④ 마지막 관리자 보호를 라우터가 아닌 공통 길목에 두었다.
+평문 컬럼(REC-3)을 새로 만들면서 값 비교 그물을 함께 놓은 것도 옳다(7/7 탐지·오탐 0).
+
+**배포 순서(반드시)**
+1. `009_user_approval.sql` 적용 → 2. 코드 배포 → 3. CLI로 실사용자 승인 + 관리자 지정 →
+4. nginx **TEMP-REG-BLOCK 제거** + `nginx -t` → reload → 5. `/auth/register` 보안헤더 5/5 재확인.
+
+**사용자에게 올릴 것**: SR19-1(카카오 JS 키 도메인 등록이 3회 측정 모두 미반영 — 콘솔 재확인).

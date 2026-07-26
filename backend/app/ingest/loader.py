@@ -36,32 +36,74 @@ from app.ingest.molit import SOURCE_NAME, MolitTrade
 RegionResolver = Callable[[str, str | None], str | None]
 
 
+def build_region_mapping(rows: "Sequence[Any]") -> dict[tuple[str, str], str]:
+    """region 행들 → (시군구5, MOLIT 법정동명) → 10자리 코드.
+
+    ⚠️ INGEST-3 — 읍·면 지역은 MOLIT 이 '읍면 + 리' 를 붙여 준다
+    ----------------------------------------------------------
+    MOLIT `umdNm` 은 동 지역에서는 '오남동' 처럼 한 토막이지만, 읍·면 지역에서는
+    **'오남읍 오남리'** 처럼 두 토막으로 온다. 읍면동 레벨(리 두 자리 '00')만 키로
+    쓰면 이 이름이 어디에도 걸리지 않아 `region_code` 가 통째로 NULL 이 된다 —
+    실측(2026-07-26): 신규 적재 9,009단지 중 1,009단지(11%)가 남양주·양평·가평·
+    파주·김포·화성·용인 처인 등 읍면 지역에서 NULL 이었고, 그 결과
+    (1) 시군구별 조회에서 사라지고 (2) 부동산원 매칭(법정동코드 기준)이 불가능해
+    주소 경로 지오코딩까지 막혔다. 조용한 유실이라 더 나쁘다.
+
+    그래서 리(里) 레벨도 키로 받되, **리 이름만으로는 절대 받지 않는다** —
+    같은 시군구 안에 '진접읍 금곡리'와 '금곡동'이 함께 있어 겹친다. 부모 읍·면
+    이름을 붙인 전체 이름('오남읍 오남리')만 키로 쓴다. 수도권 실측 1,537개 리 키가
+    전부 유일했지만, 유일하지 않으면 **추측하지 않고 키를 버린다**.
+    """
+    eupmyeon: dict[tuple[str, str], str] = {}
+    ri: dict[tuple[str, str], str | None] = {}      # None = 중복이라 못 쓰는 키
+    for r in rows:
+        code = (getattr(r, "code", "") or "").strip()
+        dong = (getattr(r, "dong", "") or "").strip()
+        if len(code) != 10 or not dong or code[5:8] == "000":
+            continue
+        if code[8:10] == "00":                       # 읍면동 레벨
+            eupmyeon.setdefault((code[:5], dong), code)
+            continue
+        # 리 레벨 — 부모 읍·면 이름은 region.sigungu 의 마지막 토막이다
+        # ('남양주시 오남읍' · '용인시 처인구 포곡읍').
+        parent = (getattr(r, "sigungu", "") or "").strip().rsplit(" ", 1)[-1]
+        if not parent.endswith(("읍", "면")) or " " in dong:
+            continue                                 # 모양이 예상과 다르면 쓰지 않는다
+        key = (code[:5], f"{parent} {dong}")
+        if key in ri and ri[key] != code:
+            ri[key] = None                           # 애매하면 버린다(엉뚱한 동에 붙지 않게)
+        else:
+            ri.setdefault(key, code)
+
+    mapping = dict(eupmyeon)
+    for key, code in ri.items():
+        if code is not None:
+            mapping.setdefault(key, code)            # 읍면동 키가 이기게 둔다
+    return mapping
+
+
 def make_db_region_resolver(engine: Any) -> RegionResolver:
     """`region` 테이블을 한 번 읽어 (시군구5, 법정동명) → 10자리 코드로 매핑한다.
 
     왜 미리 통째로 읽는가
     ---------------------
     적재 루프 안에서 단지마다 SELECT 하면 수만 번의 왕복이 된다. 수도권 법정동은
-    3천 건 규모라 메모리에 올려도 무시할 크기다(소형 VPS 라 이런 선택이 중요하다).
+    3천 건(리 포함 4.5천) 규모라 메모리에 올려도 무시할 크기다(소형 VPS 라 중요하다).
 
     ⚠️ 매핑되지 않으면 **추측하지 않고 None** 을 준다 — 틀린 지역코드는 틀린 지역
        통계를 낳고, complex.region_code 는 FK 라 없는 코드를 넣으면 적재가 통째로 깨진다.
-       읍면동 레벨(뒤 2자리 '00', 읍면동 3자리 ≠ '000')만 후보로 쓴다. 리(里) 레벨까지
-       넣으면 같은 이름이 겹쳐 엉뚱한 코드가 잡힌다.
+       키 구성 규칙은 `build_region_mapping` 참조(읍면동 + '읍면 리' 전체 이름).
     """
     from sqlalchemy import text
 
-    mapping: dict[tuple[str, str], str] = {}
     with engine.connect() as conn:
         rows = conn.execute(text("""
-            SELECT code, dong FROM region
+            SELECT code, sigungu, dong FROM region
             WHERE dong IS NOT NULL
               AND substr(code, 6, 3) <> '000'
-              AND substr(code, 9, 2) = '00'
             ORDER BY code
         """)).all()
-    for r in rows:
-        mapping.setdefault((r.code[:5], (r.dong or "").strip()), r.code)
+    mapping = build_region_mapping(rows)
 
     def resolve(sgg5: str, legal_dong: str | None) -> str | None:
         if not legal_dong:

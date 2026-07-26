@@ -1,0 +1,194 @@
+/* 내 조건 — iOS 설정앱식 inset grouped list. 모바일 퍼스트(360px 기준). */
+
+.cond {
+  height: 100%;
+  overflow-y: auto;
+  background: var(--bg-grouped);
+  -webkit-overflow-scrolling: touch;
+}
+
+.cond__form {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: var(--sp-5) var(--sp-4) calc(var(--sp-8) + env(safe-area-inset-bottom));
+}
+
+.cond__header {
+  margin-bottom: var(--sp-4);
+}
+
+.cond__title {
+  margin: 0 0 var(--sp-1);
+  font-size: var(--fs-large-title);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.cond__lede {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--fs-footnote);
+  line-height: 1.5;
+}
+
+.cond__trust {
+  margin: 0 0 var(--sp-4);
+  padding: var(--sp-3);
+  border-radius: var(--r-card);
+  background: var(--badge-bg);
+  color: var(--text-secondary);
+  font-size: var(--fs-caption);
+  line-height: 1.5;
+}
+
+.cond__group {
+  margin-bottom: var(--sp-6);
+  padding: var(--sp-2) var(--sp-4);
+  border-radius: var(--r-card);
+  background: var(--bg-elev);
+  box-shadow: var(--shadow-1);
+}
+
+.cond__group-title {
+  margin: var(--sp-3) 0 var(--sp-1);
+  font-size: var(--fs-footnote);
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.cond__note {
+  margin: 0 0 var(--sp-2);
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+}
+
+.cond__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  min-height: var(--touch-min);
+  padding: var(--sp-2) 0;
+  border-bottom: 0.5px solid var(--hairline);
+}
+
+.cond__row:last-child {
+  border-bottom: none;
+}
+
+.cond__label {
+  font-size: var(--fs-footnote);
+  color: var(--text-secondary);
+}
+
+.cond__number,
+.cond__select {
+  min-height: var(--touch-min);
+  min-width: 96px;
+  padding: 0 var(--sp-2);
+  border: none;
+  border-radius: var(--r-btn);
+  background: transparent;
+  color: var(--text);
+  font-size: var(--fs-body);
+  font-weight: 600;
+  text-align: right;
+}
+
+.cond__select {
+  text-align: left;
+}
+
+.cond__range {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.cond__range input[type="range"] {
+  width: 140px;
+  accent-color: var(--accent);
+}
+
+.cond__value {
+  min-width: 48px;
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+  text-align: right;
+}
+
+.cond__check {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  min-height: var(--touch-min);
+  padding: var(--sp-2) 0;
+  border-bottom: 0.5px solid var(--hairline);
+}
+
+.cond__check:last-child {
+  border-bottom: none;
+}
+
+.cond__check input {
+  width: 22px;
+  height: 22px;
+  margin-top: var(--sp-2);
+  accent-color: var(--accent);
+}
+
+.cond__check label {
+  display: block;
+  padding: var(--sp-2) 0;
+  cursor: pointer;
+}
+
+.cond__check-label {
+  display: block;
+  font-size: var(--fs-footnote);
+}
+
+.cond__check-hint {
+  display: block;
+  margin-top: 2px;
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+}
+
+.cond__error {
+  margin: 0 0 var(--sp-3);
+  padding: var(--sp-3);
+  border-radius: var(--r-card);
+  background: var(--badge-bg);
+  color: var(--danger-text);
+  font-size: var(--fs-footnote);
+}
+
+.cond__actions {
+  position: sticky;
+  bottom: 0;
+  padding: var(--sp-3) 0 calc(var(--sp-3) + env(safe-area-inset-bottom));
+  background: linear-gradient(to bottom, transparent, var(--bg-grouped) 40%);
+}
+
+.cond__submit {
+  width: 100%;
+  min-height: 50px;
+  border-radius: var(--r-btn);
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: var(--fs-body);
+  font-weight: 600;
+}
+
+.cond__submit:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.cond__cancel {
+  width: 100%;
+  margin-top: var(--sp-1);
+  color: var(--accent);
+  font-size: var(--fs-footnote);
+}

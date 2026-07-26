@@ -64,6 +64,20 @@ DELAY_RISK = Risk("medium", "실거래는 신고까지 최대 30일이 걸려 �
 PRICE_BASIS_LISTING = "listing"
 PRICE_BASIS_TRADE = "trade"
 
+# --- 제외 사유 (excluded) ---------------------------------------------------
+#
+# 이 제품의 신뢰는 **"왜 이건 안 나왔지"에 답하는 것**에 달려 있다. 추천 목록만 주면
+# 사용자는 자기가 아는 단지가 빠졌을 때 결과 전체를 의심한다. 그래서 떨어뜨린 후보를
+# 사유와 함께 남기고, 저장·조회 경로로 끝까지 실어 보낸다(api-spec.md §5.2).
+#
+# ⚠️ 사유 문장에 **사용자 자산 원본 금액을 적지 않는다**(security.md §6 · SR4-2).
+#    한도·초과분 같은 **파생값**까지가 허용선이다 — 원본 현금·소득은 애초에 이 계층에
+#    들어오지 않는다(AnalysisContext 가 파생값만 갖는다). 러너가 그 위에 그물을 하나 더 건다.
+EXCLUDED_NO_PRICE = "no_price_evidence"      # 호가 없음 + 실거래 표본 부족
+EXCLUDED_OVER_BUDGET = "over_budget"         # 예산 초과
+EXCLUDED_AVOIDED = "avoided"                 # 사용자가 기피한 조건에 해당(F5)
+EXCLUDED_RANK_CUTOFF = "below_rank_cutoff"   # 분석은 통과했지만 상위 N 밖
+
 #: 실거래 기준 후보에 붙는 표준 문구. UI 가 그대로 노출해도 되도록 완결형으로 둔다.
 TRADE_BASIS_NOTE = ("현재 등록된 매물이 없습니다 — 최근 실거래 기준 추정가입니다. "
                     "실제 매수 가능 가격은 다를 수 있습니다.")
@@ -515,6 +529,58 @@ def _avoid_tokens(avoid: dict[str, Any] | None) -> list[str]:
     return tokens
 
 
+def excluded_record(*, complex_id: int | None, complex_name: str | None,
+                    area_m2: float | None, price_basis: str | None,
+                    code: str, reason: str) -> dict[str, Any]:
+    """제외된 후보 1건의 **표준 모양**. 만드는 자리가 여럿이라 한 곳에 모아 둔다.
+
+    `complex_id` 만 남기면 화면은 "단지 #2048 제외"라고 밖에 못 쓰고, 그건 사용자에게
+    아무 답도 아니다("내가 아는 그 단지가 이건가?"). 단지명·면적·가격 근거를 같이 준다.
+
+    `reason_code` 는 기계가 읽는 축이다. 사유 문장에는 단지 사정(금액·표본 수)이 섞여
+    들어가 그대로 세면 전부 유니크해진다 — 사유별 분포를 내려면 코드가 필요하다.
+    문장(`reason`)은 사람용, 코드는 집계용이고 **둘 다 남긴다**.
+    """
+    return {
+        "complex_id": complex_id,
+        "complex_name": complex_name,
+        "area_m2": area_m2,
+        "price_basis": price_basis,
+        "price_estimated": (None if price_basis is None
+                            else price_basis != PRICE_BASIS_LISTING),
+        "reason_code": code,
+        "reason": reason,
+    }
+
+
+def excluded_entry(cand: Candidate, *, code: str, reason: str) -> dict[str, Any]:
+    """후보(Candidate)에서 제외 항목을 만든다."""
+    return excluded_record(
+        complex_id=cand.complex_id, complex_name=cand.complex_name,
+        area_m2=cand.area_m2, price_basis=cand.price_basis,
+        code=code, reason=reason)
+
+
+def _rank_cutoff_entry(item: dict[str, Any], top_n: int) -> dict[str, Any]:
+    """순위에서 잘린 후보 1건. 제외 사유 목록과 **같은 모양**으로 만든다.
+
+    점수가 없으면(`total_score is None`) "0점이라 밀렸다"가 아니라 **점수를 매길 근거가
+    없어서** 뒤로 간 것이다 — 그 차이를 문장에 그대로 적는다(0 과 null 을 섞지 않는다).
+    """
+    score = item.get("total_score")
+    tail = (f"점수 {score}" if score is not None
+            else "점수를 매길 근거(호가 갭·입지 실측)가 없어 뒤로 밀림")
+    entry = excluded_record(
+        complex_id=(item.get("complex") or {}).get("id"),
+        complex_name=(item.get("complex") or {}).get("name"),
+        area_m2=(item.get("unit_type") or {}).get("area_m2"),
+        price_basis=item.get("price_basis"),
+        code=EXCLUDED_RANK_CUTOFF,
+        reason=f"상위 {top_n}건 밖 — {tail}")
+    entry["total_score"] = score
+    return entry
+
+
 def _derive_forbidden(ctx: AnalysisContext) -> list[int]:
     """tripwire 검사값을 방어적으로 보강한다.
 
@@ -532,7 +598,16 @@ def _derive_forbidden(ctx: AnalysisContext) -> list[int]:
 
 def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
                      top_n: int = 10) -> dict[str, Any]:
-    """MVP 5종 파이프라인 실행. 반환값은 `/recommendations` 응답의 items."""
+    """MVP 5종 파이프라인 실행.
+
+    반환
+    ----
+    ``items``     상위 top_n 추천(순위 부여)
+    ``excluded``  **나머지 전부** — 하드 제외(가격근거·예산·기피) + 순위 컷.
+                  ``len(items) + len(excluded) == len(ctx.candidates)`` 가 성립한다.
+                  이 등식이 깨지면 어딘가에서 후보가 **말없이 사라진 것**이다.
+    ``notes``     결과 전체에 붙는 단서
+    """
     finance = finance_finding(ctx.affordability)
     budget = ctx.affordability.max_purchase_krw
     avoid_tokens = _avoid_tokens(ctx.avoid)
@@ -553,12 +628,10 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
         # 하드 제외 ⓪ — 가격 근거가 아예 없다(호가 없음 + 실거래 표본 부족).
         # 예산을 따질 수도, 적정가를 말할 수도 없다. 지어내지 않고 사유를 남긴다.
         if price is None:
-            excluded.append({
-                "complex_id": cand.complex_id,
-                "price_basis": basis,
-                "reason": ("가격 근거 없음 — 활성 호가가 없고 "
-                           + (band.reason or "실거래 표본 부족")),
-            })
+            excluded.append(excluded_entry(
+                cand, code=EXCLUDED_NO_PRICE,
+                reason=("가격 근거 없음 — 활성 호가가 없고 "
+                        + (band.reason or "실거래 표본 부족"))))
             continue
 
         # 하드 제외 ① — 아무리 점수가 높아도 못 사는 집은 추천이 아니다.
@@ -566,23 +639,20 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
         if budget and price > budget:
             label = (f"호가 {price:,}원" if basis == PRICE_BASIS_LISTING
                      else f"최근 실거래 중위 {price:,}원(추정)")
-            excluded.append({
-                "complex_id": cand.complex_id,
-                "price_basis": basis,
-                "price_estimated": basis != PRICE_BASIS_LISTING,
-                "reason": f"예산 초과 ({label} > 한도 {budget:,}원)",
-            })
+            # ⚠️ 여기 적히는 금액은 **후보 가격**과 **예산 한도(파생값)** 뿐이다.
+            #    보유현금·연소득 원본을 문장에 넣지 않는다(SR4-2).
+            excluded.append(excluded_entry(
+                cand, code=EXCLUDED_OVER_BUDGET,
+                reason=f"예산 초과 ({label} > 한도 {budget:,}원)"))
             continue
 
         # 하드 제외 ② — 기피 조건은 가점 상쇄가 아니라 제외다(F5).
         loc_assess = (evaluate_location(cand.location, avoid=avoid_tokens, as_of=ctx.as_of)
                       if cand.location is not None else None)
         if loc_assess is not None and loc_assess.excluded:
-            excluded.append({
-                "complex_id": cand.complex_id,
-                "price_basis": basis,
-                "reason": "; ".join(loc_assess.exclusion_reasons),
-            })
+            excluded.append(excluded_entry(
+                cand, code=EXCLUDED_AVOIDED,
+                reason="; ".join(loc_assess.exclusion_reasons)))
             continue
 
         valuation = valuation_finding(cand, ctx.as_of, band=band)
@@ -651,6 +721,13 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
     ), reverse=True)
     for rank, item in enumerate(items[:top_n], start=1):
         item["rank"] = rank
+
+    # 순위에서 잘린 후보도 **사용자 입장에서는 "안 나온 후보"** 다. 조건을 다 통과하고도
+    # 11위라서 빠진 단지를 아무 데도 안 남기면, 사용자는 그게 예산 때문인지 데이터가
+    # 없어서인지 알 수 없다. 그래서 잘린 것도 사유와 함께 남긴다 —
+    # 이로써 **모든 후보는 items 아니면 excluded 에 한 번씩 들어간다**(둘 다는 아니다).
+    for item in items[top_n:]:
+        excluded.append(_rank_cutoff_entry(item, top_n))
 
     notes = ["타이밍 분석(market-timing-analyst)은 2차 기능입니다.",
              "입지 분석은 데이터 수집 후 제공됩니다."]

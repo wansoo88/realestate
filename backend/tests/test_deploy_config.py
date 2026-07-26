@@ -204,3 +204,58 @@ def test_배포문서에_report_only_선행_절차가_있다():
     doc = DEPLOY_DOC.read_text(encoding="utf-8")
     assert "Content-Security-Policy-Report-Only" in doc
     assert "강제 전환" in doc
+
+
+# ---------------------------------------------------------------------------
+# ★ DEPLOY-1 회귀: 절차서가 새 마이그레이션을 빠뜨리면 배포가 로그인 장애를 낸다
+# ---------------------------------------------------------------------------
+
+def _deploy_md() -> str:
+    return (REPO_ROOT / "deploy" / "DEPLOY.md").read_text(encoding="utf-8")
+
+
+def test_절차서가_모든_마이그레이션을_언급한다():
+    """`migrations/*.sql` 이 늘어나면 DEPLOY.md 도 따라와야 한다.
+
+    initdb.d 자동 적용은 **빈 볼륨 첫 기동에만** 돈다. 실데이터가 든 운영 볼륨에서는
+    영원히 실행되지 않으므로, 새 마이그레이션은 손수 적용해야 한다. 절차서가 그걸
+    안 적으면 배포자가 코드만 올리고 → `app_user.status` 부재 → **인증 전 경로 500**
+    (CR-024 DEPLOY-1: 실제로 009·010 언급이 0건이었다).
+
+    검사 대상은 **가장 최근 마이그레이션**이다. 초기분(001~)은 빈 볼륨 첫 기동에 자동 적용돼
+    문서가 개별로 적을 이유가 없고, 실제 사고는 언제나 "새로 추가하고 절차서를 안 고침"에서 난다.
+    파일 목록에서 자동으로 뽑으므로 011 이 생기면 이 테스트가 먼저 알려준다.
+    """
+    md = _deploy_md()
+    migrations = sorted((REPO_ROOT / "backend" / "migrations").glob("[0-9]*.sql"))
+    assert migrations, "마이그레이션 파일을 찾지 못했습니다"
+
+    latest = migrations[-1]
+    number = latest.stem.split("_")[0]
+    assert number in md, (
+        f"최신 마이그레이션 {latest.name} 이 DEPLOY.md 에 없습니다. "
+        "initdb.d 자동 적용은 빈 볼륨에만 도므로, 손수 적용 절차(5-3b)에 추가해야 합니다 — "
+        "빠뜨리면 코드만 올라가 인증 경로가 500 이 됩니다."
+    )
+
+
+def test_절차서가_마이그레이션이_코드보다_먼저임을_명시한다():
+    """순서가 뒤바뀌면 서비스가 통째로 멈춘다. 그 사실이 문서에 있어야 한다."""
+    md = _deploy_md()
+    assert "코드보다 먼저" in md or "마이그레이션 → 코드" in md, \
+        "DEPLOY.md 에 '마이그레이션이 코드보다 먼저'라는 순서 경고가 없습니다"
+    assert "ON_ERROR_STOP" in md, \
+        "psql 적용 시 ON_ERROR_STOP=1 안내가 없습니다 — 실패가 성공으로 보입니다"
+
+
+def test_절차서가_관리자_부트스트랩_경로를_적는다():
+    """009 적용 즉시 모든 계정이 pending 이 된다. 관리자가 0명이면 웹으로는 복구 불가다.
+
+    CLI 는 **호스트에서** 돌아야 한다(API 컨테이너에 scripts/ 도 DATABASE_URL 도 없다).
+    그 사실이 문서에 없으면 소유자가 자기 서비스에서 영구히 잠긴다.
+    """
+    md = _deploy_md()
+    assert "manage_users.py" in md, "DEPLOY.md 에 관리자 부트스트랩 CLI 안내가 없습니다"
+    assert "--grant-admin" in md and "--approve" in md, "부트스트랩 명령이 불완전합니다"
+    assert "호스트" in md and "DATABASE_URL" in md, \
+        "CLI 를 어디서 어떻게 실행하는지(호스트 · DATABASE_URL)가 문서에 없습니다"

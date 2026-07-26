@@ -45,8 +45,10 @@ from app.domain.location.models import (
 )
 from app.domain.valuation.models import ListingRow, TradeRow
 from app.repositories.base import (
+    STATUS_APPROVED,
     ComplexSummary,
     JobRecord,
+    LastAdminError,
     ProfileRecord,
     UserRecord,
 )
@@ -191,6 +193,25 @@ def _norm_email(email: str) -> str:
     return email.strip().lower()
 
 
+#: 사용자 조회 컬럼. **한 곳에만 적는다** — 조회마다 따로 적으면 언젠가 한 쿼리에서만
+#: `status` 가 빠지고, 그 경로로 들어온 사용자는 기본값(pending)이 아니라 코드 기본값을
+#: 갖게 된다. 승인 여부가 조회 경로에 따라 달라지는 건 인가 결함이다.
+_USER_COLUMNS = """
+    id, email::text AS email, password_hash, status, is_admin,
+    created_at, status_changed_at, status_changed_by, status_reason
+"""
+
+
+def _to_user(row: Any) -> UserRecord:
+    return UserRecord(
+        id=row.id, email=row.email, password_hash=row.password_hash,
+        status=row.status, is_admin=row.is_admin, created_at=row.created_at,
+        status_changed_at=row.status_changed_at,
+        status_changed_by=row.status_changed_by,
+        status_reason=row.status_reason,
+    )
+
+
 class PostgisRepository:
     """UserRepository · ProfileRepository · MapRepository · JobRepository 구현.
 
@@ -207,45 +228,163 @@ class PostgisRepository:
     # -- 사용자 -----------------------------------------------------------
 
     def create_user(self, email: str, password_hash: str) -> UserRecord:
-        sql = text("""
+        """가입. **상태는 DB 기본값(pending)** 이다 — 여기서 status 를 넘기지 않는다.
+
+        승인 상태를 INSERT 파라미터로 받게 만들면 언젠가 호출부 하나가 'approved' 를
+        넘기고, 승인제는 그 경로로 조용히 무력화된다(migrations/009).
+        """
+        sql = text(f"""
             INSERT INTO app_user (email, password_hash)
             VALUES (:email, :password_hash)
-            RETURNING id, email::text AS email, password_hash
+            RETURNING {_USER_COLUMNS}
         """)
         try:
             with self._engine.begin() as conn:
                 row = conn.execute(
                     sql, {"email": _norm_email(email), "password_hash": password_hash}
                 ).one()
+                # 가입도 이력에 남긴다 — "언제 신청했고 언제 승인됐나"가 한 표에 보인다.
+                conn.execute(text("""
+                    INSERT INTO user_status_event (user_id, event, actor)
+                    VALUES (:uid, 'registered', 'self')
+                """), {"uid": row.id})
         except IntegrityError as exc:
             if _is_unique_violation(exc):
                 # 라우터가 409 로 바꾼다. 인메모리 구현과 같은 예외를 던져야
                 # 리포지토리를 갈아끼워도 API 동작이 바뀌지 않는다.
                 raise ValueError("이미 등록된 이메일입니다") from exc
             raise
-        return UserRecord(id=row.id, email=row.email, password_hash=row.password_hash)
+        return _to_user(row)
 
     def get_user_by_email(self, email: str) -> UserRecord | None:
-        sql = text("""
-            SELECT id, email::text AS email, password_hash
-            FROM app_user WHERE email = :email
-        """)
+        sql = text(f"SELECT {_USER_COLUMNS} FROM app_user WHERE email = :email")
         with self._engine.connect() as conn:
             row = conn.execute(sql, {"email": _norm_email(email)}).one_or_none()
-        if row is None:
-            return None
-        return UserRecord(id=row.id, email=row.email, password_hash=row.password_hash)
+        return None if row is None else _to_user(row)
 
     def get_user(self, user_id: int) -> UserRecord | None:
-        sql = text("""
-            SELECT id, email::text AS email, password_hash
-            FROM app_user WHERE id = :user_id
-        """)
+        sql = text(f"SELECT {_USER_COLUMNS} FROM app_user WHERE id = :user_id")
         with self._engine.connect() as conn:
             row = conn.execute(sql, {"user_id": user_id}).one_or_none()
-        if row is None:
-            return None
-        return UserRecord(id=row.id, email=row.email, password_hash=row.password_hash)
+        return None if row is None else _to_user(row)
+
+    # -- 사용자 승인 (관리자 · migrations/009) -----------------------------
+
+    def list_users(self, *, status: str | None = None,
+                   limit: int = 100) -> list[UserRecord]:
+        """대기/승인/거부 목록. **비밀번호 해시도 그대로 담겨 오지만** 라우터가
+        스키마로 걸러 낸다(schemas.AdminUserOut) — 여기서 컬럼을 줄이면 두 벌이 된다."""
+        sql = text(f"""
+            SELECT {_USER_COLUMNS}
+            FROM app_user
+            WHERE (CAST(:status AS text) IS NULL OR status = CAST(:status AS text))
+            ORDER BY created_at, id
+            LIMIT CAST(:limit AS int)
+        """)
+        with self._engine.connect() as conn:
+            rows = conn.execute(sql, {"status": status, "limit": limit}).all()
+        return [_to_user(r) for r in rows]
+
+    def count_active_admins(self) -> int:
+        sql = text("SELECT count(*) FROM app_user WHERE is_admin AND status = :approved")
+        with self._engine.connect() as conn:
+            return int(conn.execute(sql, {"approved": STATUS_APPROVED}).scalar_one())
+
+    def _lock_and_load(self, conn, user_id: int):
+        """대상 행을 잠그고 읽는다. 승인된 관리자 집합도 **id 순으로 함께 잠근다.**
+
+        왜 집합까지 잠그나: 관리자 A·B 를 동시에 강등하면 두 트랜잭션이 각자
+        "나 말고 1명 남아 있다"를 보고 둘 다 통과해 **관리자 0명**이 된다.
+        같은 순서로 같은 집합을 잠그면 두 트랜잭션이 직렬화되어 나중 것이 거절된다.
+        """
+        conn.execute(text("""
+            SELECT id FROM app_user
+            WHERE is_admin AND status = :approved
+            ORDER BY id
+            FOR UPDATE
+        """), {"approved": STATUS_APPROVED})
+        return conn.execute(
+            text(f"SELECT {_USER_COLUMNS} FROM app_user WHERE id = :uid FOR UPDATE"),
+            {"uid": user_id},
+        ).one_or_none()
+
+    @staticmethod
+    def _guard_last_admin(conn, row: Any, *, still_admin: bool) -> None:
+        was_admin = bool(row.is_admin) and row.status == STATUS_APPROVED
+        if not was_admin or still_admin:
+            return
+        remaining = int(conn.execute(text("""
+            SELECT count(*) FROM app_user
+            WHERE is_admin AND status = :approved AND id <> :uid
+        """), {"approved": STATUS_APPROVED, "uid": row.id}).scalar_one())
+        if remaining == 0:
+            raise LastAdminError(
+                "마지막 관리자입니다. 다른 관리자를 먼저 지정한 뒤에 바꾸세요")
+
+    def set_user_status(self, user_id: int, status: str, *, actor: str,
+                        actor_user_id: int | None = None,
+                        reason: str | None = None) -> UserRecord | None:
+        """상태 변경 + 감사 기록을 **한 트랜잭션**으로 한다.
+
+        둘을 나누면 "승인은 됐는데 누가 했는지 없는" 행이 생긴다 —
+        승인제에서 그건 기록이 없는 것과 같다.
+        """
+        with self._engine.begin() as conn:
+            row = self._lock_and_load(conn, user_id)
+            if row is None:
+                return None
+            # 거부·대기로 내리면 관리자 자격도 함께 잃는다(승인된 관리자만 관리자다).
+            self._guard_last_admin(conn, row, still_admin=(status == STATUS_APPROVED))
+            updated = conn.execute(text(f"""
+                UPDATE app_user
+                   SET status = :status,
+                       status_changed_at = now(),
+                       status_changed_by = :actor_uid,
+                       status_reason = :reason
+                 WHERE id = :uid
+                RETURNING {_USER_COLUMNS}
+            """), {"status": status, "actor_uid": actor_user_id,
+                   "reason": reason, "uid": user_id}).one()
+            conn.execute(text("""
+                INSERT INTO user_status_event
+                    (user_id, event, reason, actor, actor_user_id)
+                VALUES (:uid, :event, :reason, :actor, :actor_uid)
+            """), {"uid": user_id, "event": status, "reason": reason,
+                   "actor": actor, "actor_uid": actor_user_id})
+        return _to_user(updated)
+
+    def set_user_admin(self, user_id: int, is_admin: bool, *, actor: str,
+                       actor_user_id: int | None = None) -> UserRecord | None:
+        with self._engine.begin() as conn:
+            row = self._lock_and_load(conn, user_id)
+            if row is None:
+                return None
+            self._guard_last_admin(conn, row, still_admin=is_admin)
+            updated = conn.execute(text(f"""
+                UPDATE app_user SET is_admin = :is_admin
+                 WHERE id = :uid
+                RETURNING {_USER_COLUMNS}
+            """), {"is_admin": is_admin, "uid": user_id}).one()
+            conn.execute(text("""
+                INSERT INTO user_status_event (user_id, event, actor, actor_user_id)
+                VALUES (:uid, :event, :actor, :actor_uid)
+            """), {"uid": user_id,
+                   "event": "admin_granted" if is_admin else "admin_revoked",
+                   "actor": actor, "actor_uid": actor_user_id})
+        return _to_user(updated)
+
+    def status_events(self, user_id: int) -> list[dict[str, Any]]:
+        """감사 이력. 운영 확인용(CLI `--history`)."""
+        sql = text("""
+            SELECT event, reason, actor, actor_user_id, created_at
+            FROM user_status_event WHERE user_id = :uid
+            ORDER BY created_at, id
+        """)
+        with self._engine.connect() as conn:
+            rows = conn.execute(sql, {"uid": user_id}).all()
+        return [{"event": r.event, "reason": r.reason, "actor": r.actor,
+                 "actor_user_id": r.actor_user_id, "created_at": r.created_at}
+                for r in rows]
 
     # -- 프로필 (민감) -----------------------------------------------------
     # 금액 3종은 **암호문 bytea 로만** 오간다. 이 클래스는 평문을 본 적이 없다.
@@ -448,7 +587,7 @@ class PostgisRepository:
         `user_id` 를 WHERE 에서 빼는 순간 남의 추천 결과가 새어나간다.
         """
         job_sql = text("""
-            SELECT id, user_id, criteria_snapshot, status
+            SELECT id, user_id, criteria_snapshot, status, result_meta
             FROM recommendation_job
             WHERE id = :job_id AND user_id = :user_id
         """)
@@ -466,6 +605,7 @@ class PostgisRepository:
                 return None
             items = conn.execute(items_sql, {"job_id": job_id}).all()
 
+        meta = job.result_meta or {}
         return JobRecord(
             id=job.id,
             user_id=job.user_id,
@@ -475,6 +615,10 @@ class PostgisRepository:
             # 응답이 되도록. 정규화 컬럼만으로 되살리면 headline·why·why_not·
             # next_actions·risks 가 전부 사라져 리포트가 빈 껍데기가 된다.
             items=[_item_to_dict(it) for it in items],
+            # 제외 사유·notes 는 **항목이 아니라 실행의 결과**라 job 행에 붙어 있다(010).
+            # 010 이전 행은 NULL → 빈 목록. 그 실행에는 실제로 없었던 것이므로 지어내지 않는다.
+            excluded=list(meta.get("excluded") or []),
+            notes=list(meta.get("notes") or []),
         )
 
     # -- 지역코드 해석 (re-data 수집 로더용) -------------------------------
@@ -718,26 +862,38 @@ class PostgisRepository:
     # -- 추천 결과 저장 ----------------------------------------------------
 
     def save_job_result(self, job_id: str, user_id: int, *, status: str,
-                        items: list[dict[str, Any]]) -> None:
+                        items: list[dict[str, Any]],
+                        excluded: list[dict[str, Any]] | None = None,
+                        notes: list[str] | None = None) -> None:
         """분석 결과를 되쓴다.
 
         ⚠️ 소유권을 **여기서 다시 확인한다**(IDOR). 작업을 만든 사람과 결과를 쓰는
         사람이 같은지 UPDATE 의 WHERE 로 강제하고, 안 맞으면 조용히 아무것도 하지 않는다.
 
         저장 구조 (recommendation-execution.md §저장매핑)
-          items[i]            → recommendation_item 1행
-          items[i]["findings"] → agent_finding N행
-          items[i] 원본 JSON   → recommendation_item.payload (아래 주석 참조)
+          items[i]              → recommendation_item 1행
+          items[i]["findings"]  → agent_finding N행
+          items[i] 원본 JSON     → recommendation_item.payload (아래 주석 참조)
+          excluded · notes      → recommendation_job.result_meta (010)
+
+        제외 사유는 **항목이 아니다.** `recommendation_item` 에 rank NULL 로 끼워 넣으면
+        조회 쿼리에 딸려 나와 제외된 단지가 추천으로 둔갑할 수 있어, job 행에 붙인다.
         """
+        meta = {"excluded": list(excluded or []), "notes": list(notes or [])}
         with self._engine.begin() as conn:
             owned = conn.execute(text("""
                 UPDATE recommendation_job
                    SET status = :status,
                        completed_at = CASE WHEN :status IN ('done','failed')
-                                           THEN now() ELSE completed_at END
+                                           THEN now() ELSE completed_at END,
+                       result_meta = CAST(:meta AS jsonb)
                  WHERE id = :job_id AND user_id = :user_id
                 RETURNING id
-            """), {"job_id": job_id, "user_id": user_id, "status": status}).one_or_none()
+            """), {"job_id": job_id, "user_id": user_id, "status": status,
+                   # 재실행이면 이전 실행의 제외 사유를 남기지 않는다 —
+                   # items 를 통째로 갈아끼우는 것과 같은 트랜잭션·같은 규칙이다.
+                   "meta": json.dumps(meta, ensure_ascii=False, default=str),
+                   }).one_or_none()
 
             if owned is None:
                 # 남의 작업이거나 없는 작업. 결과를 쓰지 않는다.

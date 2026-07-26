@@ -18,6 +18,8 @@ export interface ApiError {
   code: string;
   message: string;
   problems?: string[];
+  /** 서버가 사유를 함께 줄 때만 채워진다(현재 로그인 403 에는 오지 않는다). */
+  reason?: string | null;
 }
 
 export class ApiException extends Error {
@@ -32,6 +34,34 @@ export interface TokenResponse {
   access_token: string;
   token_type: string;
   expires_in: number;
+}
+
+/**
+ * 가입 **접수** 응답 (201). 계정은 만들어지지만 `pending` 이라 아직 로그인할 수 없다.
+ * 그래서 가입 성공 후 자동 로그인을 이어 붙이면 안 된다 — 바로 403 을 받는다.
+ */
+export interface RegisterResponse {
+  user_id: number;
+  status: string;
+  message: string;
+}
+
+/** 승인되지 않은 계정에 서버가 주는 403 코드 (api-spec §1.5). */
+export type ApprovalCode = "PENDING_APPROVAL" | "ACCOUNT_REJECTED";
+
+export function isApprovalCode(code: string | undefined): code is ApprovalCode {
+  return code === "PENDING_APPROVAL" || code === "ACCOUNT_REJECTED";
+}
+
+/* ── 관리자 (가입 승인) ───────────────────────────────────────────────────
+ * ⚠️ 목록 항목을 `unknown` 으로 둔 것은 실수가 아니다.
+ * 서버가 실수로 자산·소득·해시를 흘리더라도 화면이 그걸 그대로 렌더할 수 없게,
+ * **반드시 `lib/adminUsers.sanitizeAdminUsers`(허용 목록)를 거치도록** 타입으로 강제한다. */
+
+export interface AdminUserListResponse {
+  items: unknown[];
+  /** 승인된 관리자 수 — 화면이 "마지막 관리자" 상황을 미리 설명할 수 있게 온다. */
+  active_admins?: number;
 }
 
 export interface ComplexItem {
@@ -63,13 +93,169 @@ export interface AffordabilityResponse {
   breakdown: {
     own_cash_krw: number;
     max_loan_krw: number;
-    binding_constraint: "LTV" | "DSR" | "DTI" | "CASH";
+    /** 서버가 실제로 내려주는 키(원 단위 한도). api-spec 초안의 `*_pct` 가 아니다. */
+    ltv_limit_krw?: number | null;
+    dsr_limit_krw?: number | null;
+    dti_limit_krw?: number | null;
+    absolute_cap_krw?: number | null;
+    binding_constraint: string;
   };
   acquisition_cost_krw: { tax: number; brokerage: number; registration: number; total: number };
   assumptions: string[];
   evidence: Array<{ claim: string; source: string; as_of?: string }>;
   warnings: string[];
   disclaimer: string;
+}
+
+/* ── 내 조건 (F2·F5) ─────────────────────────────────────────────────────
+ * 🔐 이 두 타입의 값은 **메모리에만** 산다. 저장소·URL·로그 어디에도 쓰지 않는다.
+ * (client.ts 상단 토큰 원칙과 같은 이유 — 개인 금융정보다) */
+
+export interface Profile {
+  cash_krw: number;
+  income_krw: number;
+  existing_loan_krw: number;
+  owned_houses: number;
+  household_size: number;
+  /** 서버가 돌려주지만 아직 저장하지 않는 값(0 고정). 화면은 읽기만 한다. */
+  existing_annual_repayment_krw?: number;
+  existing_annual_interest_krw?: number;
+}
+
+/** 서버 `PreferencesIn` 은 열린 dict 다. 우리가 실제로 쓰는 키만 타입으로 못박는다. */
+export interface Preferences {
+  prefer: {
+    school_district?: number | null;
+    subway_within_m?: number | null;
+    built_after?: number | null;
+    min_households?: number | null;
+    /** 지도 면적 필터. api-spec 예시엔 없지만 `prefer` 는 열린 dict 라 함께 보관한다. */
+    area_min_m2?: number | null;
+    area_max_m2?: number | null;
+  };
+  avoid: {
+    first_floor?: boolean;
+    main_road_noise?: boolean;
+    redevelopment_early_stage?: boolean;
+  };
+  weights: { price?: number; location?: number; value?: number; risk?: number };
+}
+
+/* ── 추천 (F1·F3·F6) ─────────────────────────────────────────────────── */
+
+export interface Evidence {
+  claim?: string;
+  source?: string;
+  as_of?: string | null;
+  source_url?: string | null;
+  data_rows?: number | null;
+}
+
+export interface RiskNote {
+  severity: string; // low | medium | high
+  detail: string;
+}
+
+export interface Finding {
+  agent_id: string;
+  verdict: string;
+  rationale: string;
+  evidence: Evidence[];
+  risks: RiskNote[];
+  /** 점수를 매길 근거가 없으면 null. **0 과 다르다.** */
+  score: number | null;
+  confidence: number;
+  basis: string | null;
+  /** 판단 보류 사유(데이터 부족). 비어 있지 않으면 이 finding 은 "모른다"는 뜻이다. */
+  missing: string[];
+}
+
+export interface PriceBand {
+  p25_krw: number;
+  median_krw: number;
+  p75_krw: number;
+  sample_size: number;
+  period_months: number;
+  expanded: boolean;
+  source: string;
+}
+
+export interface DongValuation {
+  available: boolean;
+  method: string;
+  basis?: string; // "trade_measured" 면 실측
+  confidence: number;
+  coverage_pct?: number | null;
+  period_months?: number | null;
+  reason?: string | null;
+  note?: string | null;
+  dongs?: Array<{
+    dong: string;
+    vs_complex_pct: number;
+    sample: number;
+    median_ppm_krw: number;
+  }>;
+}
+
+export interface RecommendationItem {
+  rank?: number;
+  complex: { id: number; name: string };
+  unit_type: { area_m2: number; type_name?: string | null } | null;
+  building: { id?: number | null; name?: string | null; confidence?: number; basis?: string } | null;
+  dong_valuation: DongValuation | null;
+  /** 이 후보의 가격이 **호가**인지 **실거래 추정**인지. 화면은 반드시 구분해 표시한다. */
+  price_basis: "listing" | "trade";
+  /** 호가. `price_basis === "trade"` 면 **null** — est 로 대체 표시 금지. */
+  ask_price_krw: number | null;
+  est_price_krw: number | null;
+  price_estimated: boolean;
+  price_note: string | null;
+  ask_gap_pct: number | null;
+  price_band: PriceBand | null;
+  /** null = "모른다". 0 으로 렌더링 금지. */
+  total_score: number | null;
+  score_basis: string | null;
+  timing_signal: string;
+  headline: string;
+  why: string[];
+  why_not: string[];
+  next_actions: string[];
+  findings: Finding[];
+}
+
+/** 왜 이 후보가 결과에 없는지. "왜 안 나왔지"에 답하는 자리다. */
+export interface ExcludedCandidate {
+  complex_id: number;
+  complex_name?: string | null;
+  price_basis?: string;
+  price_estimated?: boolean;
+  reason: string;
+}
+
+export interface RecommendationJob {
+  job_id: string;
+  status: string; // queued | running | done | error
+  criteria_snapshot?: Record<string, unknown> | null;
+  items: RecommendationItem[];
+  /** 서버가 아직 안 내려줄 수 있다(러너는 계산하지만 저장 경로가 없음). 없으면 표시하지 않는다. */
+  excluded?: ExcludedCandidate[] | null;
+  notes?: string[] | null;
+  progress?: { done: number; total: number; current_agent?: string | null } | null;
+  disclaimer?: string;
+}
+
+export interface RecommendationAccepted {
+  job_id: string;
+  status: string;
+  poll_url?: string;
+  note?: string;
+}
+
+export interface RecommendationRequest {
+  region_codes?: string[];
+  purpose?: "live" | "invest";
+  budget_override_krw?: number | null;
+  top_n?: number;
 }
 
 const BASE = "/api/v1";
@@ -147,6 +333,55 @@ function clearSession(): void {
 }
 
 /* ─────────────────────────────────────────────────────────────────────────
+ * 승인 상태 회수 알림
+ *
+ * 서버는 **매 요청** 승인 상태를 DB 에서 다시 본다(api-spec §1.5). 즉 세션 도중에도
+ * 승인이 회수되면 403 이 날아온다. 이걸 각 화면이 "요청 실패"로 뭉뚱그리면 사용자는
+ * 왜 갑자기 안 되는지 알 수 없다 — 여기서 한 번만 붙잡아 로그인 화면으로 넘긴다.
+ * ───────────────────────────────────────────────────────────────────────── */
+
+export interface AuthNotice {
+  code: ApprovalCode;
+  message: string;
+  /** 서버가 사유를 함께 줄 때만. 계약상 로그인 403 에는 오지 않는다(감사 기록 전용). */
+  reason?: string | null;
+}
+
+let authNotice: AuthNotice | null = null;
+
+/**
+ * 남아 있는 안내를 **읽기만** 한다(여러 번 읽어도 같은 값).
+ *
+ * ⚠️ "읽으면 비운다"로 만들지 마라. StrictMode 는 `useState` 초기화 함수를 두 번
+ * 호출하므로, 읽는 쪽이 소비까지 하면 **개발 모드에서만 안내가 사라진다**.
+ * 비우는 시점은 명시적으로 정한다: 로그인 성공 · 로그아웃 · 새 로그인 시도.
+ */
+export function getAuthNotice(): AuthNotice | null {
+  return authNotice;
+}
+
+export function setAuthNotice(notice: AuthNotice | null): void {
+  authNotice = notice;
+}
+
+export function clearAuthNotice(): void {
+  authNotice = null;
+}
+
+/**
+ * 승인 회수(403)면 세션을 정리하고 안내를 남긴다.
+ * @returns 이 예외를 승인 회수로 처리했는지
+ */
+function handleApprovalRevoked(e: unknown): boolean {
+  if (!(e instanceof ApiException) || e.status !== 403 || !isApprovalCode(e.error.code)) {
+    return false;
+  }
+  authNotice = { code: e.error.code, message: e.error.message, reason: e.error.reason ?? null };
+  clearSession(); // 남은 access 로 계속 두드려봐야 전부 403 이다
+  return true;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
  * 전송
  * ───────────────────────────────────────────────────────────────────────── */
 
@@ -215,6 +450,8 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   try {
     return await raw<T>(path, init);
   } catch (e) {
+    // 승인 회수는 재시도해도 결과가 같다 — refresh 도 401 이다. 그 자리에서 끝낸다.
+    if (handleApprovalRevoked(e)) throw e;
     if (!(e instanceof ApiException) || e.status !== 401) throw e;
 
     try {
@@ -227,6 +464,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     try {
       return await raw<T>(path, init);
     } catch (e2) {
+      if (handleApprovalRevoked(e2)) throw e2;
       if (e2 instanceof ApiException && e2.status === 401) clearSession();
       throw e2;
     }
@@ -263,6 +501,7 @@ export async function restoreSession(): Promise<boolean> {
  * 크로스탭: 쿠키는 탭끼리 공유되므로 다른 탭도 다음 refresh 에서 401 → 자동 로그아웃된다.
  */
 export async function logout(): Promise<void> {
+  authNotice = null; // 스스로 나가는 것이므로 승인 안내를 남기지 않는다
   try {
     await raw<void>("/auth/logout", {
       method: "POST",
@@ -288,12 +527,17 @@ export const api = {
       credentials: "include", // Set-Cookie(refresh) 수신
       body: JSON.stringify({ email, password }),
     });
+    authNotice = null; // 들어왔으면 옛 승인 안내는 지운다
     setAccessToken(t.access_token);
     return t;
   },
 
+  /**
+   * 가입 **신청**. 201 이어도 로그인은 아직 안 된다(`status: "pending"`).
+   * 여기에 자동 로그인을 이어 붙이지 마라 — 곧바로 403 을 받고 "가입은 됐는데 실패"로 보인다.
+   */
   register(email: string, password: string) {
-    return raw<{ user_id: number }>("/auth/register", {
+    return raw<RegisterResponse>("/auth/register", {
       method: "POST",
       body: JSON.stringify({ email, password }),
     });
@@ -303,10 +547,14 @@ export const api = {
     bbox: string;
     zoom: number;
     max_price_krw?: number;
+    area_min_m2?: number;
+    area_max_m2?: number;
     built_after?: number;
   }) {
     const q = new URLSearchParams({ bbox: params.bbox, zoom: String(params.zoom) });
     if (params.max_price_krw) q.set("max_price_krw", String(params.max_price_krw));
+    if (params.area_min_m2) q.set("area_min_m2", String(params.area_min_m2));
+    if (params.area_max_m2) q.set("area_max_m2", String(params.area_max_m2));
     if (params.built_after) q.set("built_after", String(params.built_after));
     return request<MapResponse>(`/map/complexes?${q}`);
   },
@@ -318,10 +566,72 @@ export const api = {
     });
   },
 
-  putProfile(body: Record<string, number>) {
-    return request<Record<string, number>>("/me/profile", {
+  /** 자산 미입력이면 404 `NOT_FOUND` 로 온다 — 이게 "조건 화면으로 유도" 신호다. */
+  getProfile() {
+    return request<Profile>("/me/profile");
+  },
+
+  putProfile(body: Profile) {
+    return request<Profile>("/me/profile", {
       method: "PUT",
       body: JSON.stringify(body),
+    });
+  },
+
+  /** 미저장이어도 200 + 빈 구조({prefer:{},avoid:{},weights:{}}) 로 온다. */
+  getPreferences() {
+    return request<Preferences>("/me/preferences");
+  },
+
+  putPreferences(body: Preferences) {
+    return request<Preferences>("/me/preferences", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    });
+  },
+
+  createRecommendation(body: RecommendationRequest) {
+    return request<RecommendationAccepted>("/recommendations", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  },
+
+  /**
+   * 추천 결과 폴링.
+   *
+   * `path` 는 **BASE(`/api/v1`) 이후의 경로**다. 서버가 준 `poll_url` 을 그대로 fetch 하지 않고
+   * `lib/recommendation.ts::resolvePollPath` 로 형식을 검증해 넘긴다 —
+   * 응답에 실린 URL 을 무검증으로 따라가면 그 순간 서버 응답이 요청 목적지를 정하게 된다.
+   */
+  recommendation(path: string) {
+    return request<RecommendationJob>(path);
+  },
+
+  /* ── 관리자 (가입 승인) ────────────────────────────────────────────────
+   * ⚠️ 관리자가 아니면 서버는 **403 이 아니라 404** 를 준다(api-spec §6.2).
+   * 관리 기능의 존재 자체를 숨기려는 의도적 설계다. 그러니 프론트도 404 를
+   * "권한 없음"이 아니라 **"그런 기능 없음"** 으로 조용히 처리해야 한다
+   * (useAdminUsers 가 그렇게 한다). 여기서는 그냥 통과시킨다. */
+
+  adminListUsers(params: { status?: string; limit?: number } = {}) {
+    const q = new URLSearchParams();
+    if (params.status) q.set("status", params.status);
+    q.set("limit", String(params.limit ?? 100));
+    return request<AdminUserListResponse>(`/admin/users?${q}`);
+  },
+
+  /** 승인/거부 응답은 **정제 전** 원본이다 — sanitizeAdminUser 를 반드시 통과시킨다. */
+  adminApproveUser(userId: number) {
+    return request<unknown>(`/admin/users/${encodeURIComponent(userId)}/approve`, {
+      method: "POST",
+    });
+  },
+
+  adminRejectUser(userId: number, reason: string | null) {
+    return request<unknown>(`/admin/users/${encodeURIComponent(userId)}/reject`, {
+      method: "POST",
+      body: JSON.stringify({ reason: reason && reason.trim() !== "" ? reason.trim() : null }),
     });
   },
 };

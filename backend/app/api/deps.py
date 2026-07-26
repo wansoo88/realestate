@@ -13,7 +13,7 @@ from fastapi import Depends, Header, HTTPException, Request, status
 from app.core.config import Settings, get_settings
 from app.core.security import decode_token, load_key
 from app.domain.rules.loader import RuleSet, RuleValidationError, load_rules
-from app.repositories.base import UserRecord
+from app.repositories.base import STATUS_REJECTED, UserRecord
 
 
 def get_repo(request: Request):
@@ -113,7 +113,71 @@ def current_user(
             status.HTTP_401_UNAUTHORIZED,
             detail={"code": "UNAUTHORIZED", "message": "유효하지 않은 토큰입니다"},
         )
+    # 승인 상태는 **매 요청 DB 에서 다시 본다** (토큰에 담지 않는다).
+    # 담아 두면 승인 취소·거부가 access 30분 · refresh 7일 동안 효력이 없다 —
+    # 서버측 토큰 폐기가 아직 없으므로(SR15-3) 이 재확인이 유일한 회수 수단이다.
+    if not user.is_approved:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail=unapproved_detail(user.status))
     return user
 
 
 CurrentUser = Annotated[UserRecord, Depends(current_user)]
+
+
+# ---------------------------------------------------------------------------
+# 가입 승인 (migrations/009)
+# ---------------------------------------------------------------------------
+
+def unapproved_detail(user_status: str) -> dict[str, str]:
+    """승인되지 않은 계정에 돌려줄 403 본문.
+
+    ⚠️ **비밀번호 검증을 통과한 뒤에만** 쓴다. 인증 전에 이 문구를 내보내면
+    "이 이메일은 가입돼 있다"를 알려주는 계정 열거 오라클이 된다(SR10-1).
+    """
+    if user_status == STATUS_REJECTED:
+        return {"code": "ACCOUNT_REJECTED",
+                "message": "가입이 승인되지 않았습니다. 관리자에게 문의하세요."}
+    return {"code": "PENDING_APPROVAL",
+            "message": "관리자 승인 대기 중입니다. 승인되면 로그인할 수 있습니다."}
+
+
+def admin_not_found() -> HTTPException:
+    """관리자 엔드포인트의 **존재 자체를 숨기는** 404.
+
+    왜 403 이 아니라 404 인가
+    -------------------------
+    403 은 "여기 뭔가 있는데 너는 못 본다"는 뜻이라, 일반 사용자에게 관리 기능의
+    경로·존재를 알려 준다. 공격자는 그 경로에 인증 우회·파라미터 조작을 집중한다.
+    404 로 답하면 관리자가 아닌 쪽에서는 **없는 주소와 구분되지 않는다.**
+
+    본문은 FastAPI 가 모르는 경로에 주는 것과 **글자까지 동일**하게 맞춘다
+    (`{"detail": "Not Found"}`). 우리 규약인 `{"detail": {"code": ...}}` 를 쓰면
+    형태가 달라서 그 자체로 "여기 라우트가 있다"는 신호가 된다.
+    """
+    return HTTPException(status.HTTP_404_NOT_FOUND)
+
+
+def admin_user(
+    settings: SettingsDep,
+    repo=Depends(get_repo),
+    authorization: Annotated[str | None, Header()] = None,
+) -> UserRecord:
+    """관리자 전용 관문. **서버가 DB 에서 `is_admin` 을 확인한다.**
+
+    토큰에 admin 클레임을 싣지 않는 이유: 클라이언트가 들고 다니는 값은 결국
+    클라이언트의 주장이고, 서명이 유효해도 **강등된 뒤에도 유효**하다.
+    권한은 요청 시점의 DB 가 답한다.
+
+    실패는 사유를 구분하지 않고 전부 같은 404 다 — 토큰 없음/만료/일반 사용자/
+    승인 대기 관리자 모두 동일. 구분하면 그 차이가 곧 정보다.
+    """
+    try:
+        user = current_user(settings=settings, repo=repo, authorization=authorization)
+    except HTTPException as exc:
+        raise admin_not_found() from exc
+    if not user.can_administer:
+        raise admin_not_found()
+    return user
+
+
+AdminUser = Annotated[UserRecord, Depends(admin_user)]

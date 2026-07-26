@@ -1,6 +1,7 @@
 """API 요청·응답 스키마."""
 from __future__ import annotations
 
+import datetime as dt
 from typing import Any
 
 from pydantic import BaseModel, EmailStr, Field
@@ -9,6 +10,17 @@ from pydantic import BaseModel, EmailStr, Field
 class RegisterIn(BaseModel):
     email: EmailStr
     password: str = Field(min_length=12, max_length=256)
+
+
+class RegisterOut(BaseModel):
+    """가입 접수 응답. 계정은 만들어졌지만 **아직 못 쓴다**는 것을 분명히 말한다.
+
+    "가입 완료"라고 하면 사용자는 곧바로 로그인을 시도하고 실패한다.
+    """
+
+    user_id: int
+    status: str
+    message: str
 
 
 class LoginIn(BaseModel):
@@ -64,6 +76,40 @@ class AffordabilityIn(BaseModel):
     annual_rate: float = Field(default=0.04, ge=0, le=0.3)
     years: int = Field(default=30, ge=1, le=50)
     apply_dti: bool = False
+
+
+# ---------------------------------------------------------------------------
+# 관리자 (가입 승인 · migrations/009)
+# ---------------------------------------------------------------------------
+
+class AdminUserOut(BaseModel):
+    """관리자에게 보여줄 사용자 요약.
+
+    ⚠️ **`password_hash` 를 여기 넣지 마라.** 리포지토리는 해시를 담아 오지만
+    이 스키마가 마지막 문이다. 오프라인 크래킹 재료를 API 로 흘리는 순간
+    Argon2 파라미터를 아무리 올려도 소용없다.
+    ⚠️ 자산·소득도 넣지 않는다 — 관리자는 **가입 승인만** 한다(security.md §3.1).
+    """
+
+    id: int
+    email: EmailStr
+    status: str
+    is_admin: bool
+    created_at: dt.datetime | None = None
+    status_changed_at: dt.datetime | None = None
+    status_changed_by: int | None = None
+    status_reason: str | None = None
+
+
+class AdminUserListOut(BaseModel):
+    items: list[AdminUserOut]
+    #: 승인된 관리자 수. 화면이 "마지막 관리자"를 미리 경고할 수 있게 준다.
+    active_admins: int
+
+
+class RejectIn(BaseModel):
+    #: 거부 사유. 감사 흔적으로 남는다(사용자에게 그대로 노출하지 않는다).
+    reason: str | None = Field(default=None, max_length=500)
 
 
 class RecommendationIn(BaseModel):

@@ -1,0 +1,222 @@
+/* 추천 리포트 카드 — 박스 대신 헤어라인 + 여백. 금액과 순위가 위계의 정점. */
+
+.report {
+  padding: var(--sp-4) 0;
+  border-bottom: 0.5px solid var(--hairline);
+}
+
+/* 실거래 추정 기준 후보는 호가 기준보다 **약한 시각 강도**로 (api-spec §5.1) */
+.report--est {
+  border-left: 2px dashed var(--hairline-strong);
+  padding-left: var(--sp-3);
+}
+
+.report__head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-2);
+}
+
+.report__rank {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--r-pill);
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: var(--fs-caption);
+  font-weight: 600;
+  font-family: var(--ff-num);
+}
+
+.report__title {
+  flex: 1;
+  min-width: 0;
+}
+
+.report__name {
+  margin: 0;
+  font-size: var(--fs-title);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.report__unit {
+  margin: 2px 0 0;
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+}
+
+.report__score {
+  flex: none;
+  font-size: var(--fs-footnote);
+  font-weight: 600;
+}
+
+/* 점수 없음 — 0점처럼 보이면 안 되므로 숫자 강조를 뺀다 */
+.report__score--unknown {
+  font-weight: 400;
+  color: var(--text-estimated);
+  font-size: var(--fs-caption);
+}
+
+.report__score-why,
+.report__price-note {
+  margin: var(--sp-1) 0 var(--sp-2);
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.report__price-note {
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-btn);
+  background: var(--badge-bg);
+}
+
+.report__ask,
+.report__band,
+.report__dong {
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.report__band-meta,
+.report__dong-detail,
+.report__evidence-src {
+  color: var(--text-estimated);
+}
+
+.report__dong {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.report__dong-label {
+  color: var(--text);
+}
+
+.report__dong--weak .report__dong-label {
+  color: var(--text-estimated);
+}
+
+.report__dongs {
+  margin: var(--sp-1) 0 0;
+  padding-left: var(--sp-5);
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+}
+
+.report__headline {
+  margin: var(--sp-3) 0;
+  font-size: var(--fs-footnote);
+  line-height: 1.6;
+}
+
+.report__pending {
+  margin: 0 0 var(--sp-3);
+  padding: 0;
+  list-style: none;
+}
+
+.report__pending-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) 0;
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+}
+
+.report__pending-badge {
+  border: 1px dashed var(--hairline-strong);
+}
+
+.report__pending-why {
+  flex-basis: 100%;
+  color: var(--text-estimated);
+}
+
+.report__list,
+.report__risks,
+.report__findings {
+  margin: 0;
+  padding-left: var(--sp-4);
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.report__risks,
+.report__findings {
+  list-style: none;
+  padding-left: 0;
+}
+
+.report__risk {
+  display: flex;
+  gap: var(--sp-2);
+  padding: var(--sp-2) 0 var(--sp-2) var(--sp-3);
+  border-left: 2px solid var(--warn);
+}
+
+.report__risk--low {
+  border-left-color: var(--hairline-strong);
+}
+
+.report__finding {
+  padding: var(--sp-2) 0;
+  border-bottom: 0.5px solid var(--hairline);
+}
+
+.report__finding:last-child {
+  border-bottom: none;
+}
+
+.report__finding-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-2);
+  margin: 0;
+  color: var(--text);
+  font-size: var(--fs-caption);
+  font-weight: 600;
+}
+
+.report__verdict {
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+
+.report__finding-score {
+  margin-left: auto;
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+
+.report__rationale,
+.report__evidence {
+  margin: var(--sp-1) 0 0;
+  line-height: 1.6;
+}
+
+.report__map-btn {
+  width: 100%;
+  margin-top: var(--sp-3);
+  min-height: var(--touch-min);
+  border-radius: var(--r-btn);
+  background: var(--accent-weak);
+  color: var(--accent);
+  font-size: var(--fs-footnote);
+  font-weight: 600;
+}

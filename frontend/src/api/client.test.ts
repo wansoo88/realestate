@@ -12,11 +12,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ApiException,
   api,
+  getAuthNotice,
   getAuthState,
   isAuthenticated,
   logout,
   restoreSession,
   setAccessToken,
+  setAuthNotice,
   subscribeAuth,
 } from "./client";
 
@@ -48,6 +50,7 @@ beforeEach(() => {
   fetchMock = vi.fn();
   globalThis.fetch = fetchMock as unknown as typeof fetch;
   setAccessToken(null); // 매 테스트 미인증에서 시작
+  setAuthNotice(null);
 });
 
 afterEach(() => {
@@ -225,6 +228,90 @@ describe("401 처리", () => {
   });
 });
 
+/**
+ * 승인 상태는 토큰에 담기지 않고 **매 요청 DB 에서 다시 읽힌다**(api-spec §1.5).
+ * 즉 세션 도중에도 승인이 회수될 수 있다. 그때 각 화면이 "요청 실패"로 뭉개면
+ * 사용자는 왜 갑자기 안 되는지 알 수 없다 — 클라이언트가 한 곳에서 처리한다.
+ */
+describe("세션 도중 승인 회수 (403)", () => {
+  it("PENDING_APPROVAL 이면 재시도 없이 세션을 끝내고 사유를 남긴다", async () => {
+    setAccessToken("a1");
+    fetchMock.mockResolvedValueOnce(
+      res(403, { detail: { code: "PENDING_APPROVAL", message: "승인 대기 중입니다" } }),
+    );
+
+    await expect(api.mapComplexes({ bbox: "1,2,3,4", zoom: 15 })).rejects.toBeInstanceOf(
+      ApiException,
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1); // refresh 해봐야 401 이다 — 두드리지 않는다
+    expect(isAuthenticated()).toBe(false);
+    expect(getAuthNotice()).toMatchObject({ code: "PENDING_APPROVAL" });
+    // 읽어도 사라지지 않는다 — StrictMode 는 초기화 함수를 두 번 부른다(개발에서만 안내가
+    // 사라지는 버그를 막는다).
+    expect(getAuthNotice()).toMatchObject({ code: "PENDING_APPROVAL" });
+  });
+
+  it("다시 로그인에 성공하면 안내가 사라진다", async () => {
+    setAuthNotice({ code: "PENDING_APPROVAL", message: "승인 대기" });
+    fetchMock.mockResolvedValueOnce(res(200, TOKENS("a1")));
+
+    await api.login("me@example.com", "password12345");
+
+    expect(getAuthNotice()).toBeNull();
+  });
+
+  it("ACCOUNT_REJECTED 도 같은 경로로 처리한다", async () => {
+    setAccessToken("a1");
+    fetchMock.mockResolvedValueOnce(
+      res(403, { detail: { code: "ACCOUNT_REJECTED", message: "거부됨" } }),
+    );
+
+    await expect(api.getProfile()).rejects.toBeInstanceOf(ApiException);
+
+    expect(isAuthenticated()).toBe(false);
+    expect(getAuthNotice()?.code).toBe("ACCOUNT_REJECTED");
+  });
+
+  it("승인과 무관한 403(CSRF)은 세션을 끊지 않는다", async () => {
+    setAccessToken("a1");
+    fetchMock.mockResolvedValueOnce(
+      res(403, { detail: { code: "CSRF_HEADER_REQUIRED", message: "헤더 필요" } }),
+    );
+
+    await expect(api.getProfile()).rejects.toBeInstanceOf(ApiException);
+
+    expect(isAuthenticated()).toBe(true); // 재시도할 수 있어야 한다
+    expect(getAuthNotice()).toBeNull();
+  });
+});
+
+describe("관리자 엔드포인트", () => {
+  it("404 를 그대로 올려보낸다 — refresh 로 되살리려 하지 않는다", async () => {
+    setAccessToken("a1");
+    fetchMock.mockResolvedValueOnce(res(404, { detail: "Not Found" }));
+
+    await expect(api.adminListUsers({ status: "pending" })).rejects.toMatchObject({ status: 404 });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(isAuthenticated()).toBe(true); // 관리자가 아닐 뿐, 로그인은 살아 있다
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/admin/users?status=pending&limit=100");
+  });
+
+  it("거부 사유가 비면 빈 문자열이 아니라 null 로 보낸다(감사 기록 오염 방지)", async () => {
+    setAccessToken("a1");
+    fetchMock.mockResolvedValue(res(200, { id: 12 }));
+
+    await api.adminRejectUser(12, "   ");
+    expect(JSON.parse(String(initOf(fetchMock.mock.calls[0]).body))).toEqual({ reason: null });
+
+    await api.adminRejectUser(12, "  본인 확인 불가  ");
+    expect(JSON.parse(String(initOf(fetchMock.mock.calls[1]).body))).toEqual({
+      reason: "본인 확인 불가",
+    });
+  });
+});
+
 describe("logout", () => {
   it("서버에 쿠키 삭제를 요청하고(CSRF 헤더 포함) 메모리를 비운다", async () => {
     setAccessToken("a1");
@@ -249,5 +336,16 @@ describe("logout", () => {
 
     await expect(logout()).resolves.toBeUndefined();
     expect(isAuthenticated()).toBe(false);
+  });
+
+  it("스스로 나갈 때는 승인 안내를 남기지 않는다", async () => {
+    setAuthNotice({ code: "PENDING_APPROVAL", message: "이전 안내" });
+    setAccessToken("a1");
+    fetchMock.mockResolvedValueOnce(res(204, null));
+
+    await logout();
+
+    // 로그인 화면에 뜬금없는 "승인 대기" 안내가 뜨면 안 된다
+    expect(getAuthNotice()).toBeNull();
   });
 });
