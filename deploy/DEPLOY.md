@@ -461,8 +461,12 @@ sed "s#<APP_ROOT>#/opt/realestate#g" /opt/realestate/deploy/nginx-realestate.con
 nginx -t && systemctl reload nginx     # ⚠️ 검사 실패 시 reload 하지 마라(동거 서비스가 같이 죽는다)
 
 # 확인: 가입이 403 이 아니라 정상 동작하고, 보안 헤더가 5종 다 붙는지
-curl -sI https://realestate.utilverse.info/api/v1/auth/register | \
-  grep -ciE "content-security-policy|strict-transport|x-frame|x-content|referrer"   # 5 기대
+# ⚠️ `curl -sI`(HEAD)로 재지 마라 — register 는 POST 전용이라 405 가 나고 그 경로엔 헤더가
+#    안 붙어서 **0/5 로 보인다**(실제로는 정상인데 장애로 오인한다. 배포 중 실제로 겪었다).
+#    반드시 **실사용 경로인 POST** 로 잰다.
+curl -sS -D - -o /dev/null -X POST https://realestate.utilverse.info/api/v1/auth/register \
+  -H 'Content-Type: application/json' -d '{"email":"x@gmail.com","password":"short"}' \
+  | grep -ciE "content-security-policy|strict-transport|x-frame|x-content|referrer"   # 5 이상 기대
 ```
 
 > 임시 블록의 `location` 안에 `add_header` 를 쓰면 **상위 헤더 상속이 끊겨** 그 경로만 보안 헤더가
