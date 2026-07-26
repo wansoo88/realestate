@@ -84,9 +84,31 @@ denylist 를 붙이기 전에는 이 값을 다시 늘리지 않는다.
 토큰에 `jti` 클레임은 이미 넣어 뒀으므로(`core/security.py`), 폐기 목록(Redis 또는 테이블) +
 로그아웃·비밀번호 변경 시 등록만 붙이면 된다. 그때까지의 잔여 위험은 §8 `R-09`.
 
-**후속 과제 SR15-4 (미구현 · 비차단)** — 프론트 CSP. `deploy/nginx-realestate.conf` 에
-`Content-Security-Policy` 가 없다. XSS 2선 방어이므로 프론트 배포와 함께 검증하며 넣는다
-(카카오맵 SDK 출처 허용 필요: `script-src 'self' https://dapi.kakao.com https://*.daumcdn.net`).
+**SR15-4 (해소 · 2026-07-26)** — 프론트 CSP. `deploy/nginx-realestate.conf` 에
+`Content-Security-Policy` 를 **보안헤더 5종의 하나로** 넣었다(server · 정적자산 ·
+`/index.html` 세 블록 모두 — `add_header` 는 상속되지 않는다).
+
+HttpOnly 쿠키(SR15-1)는 토큰의 **반출**만 막는다. XSS 가 그 탭 안에서
+`fetch('/api/...', {credentials:'include'})` 를 부르거나 `/auth/refresh` 를 직접 때리는
+**세션 라이딩**은 못 막는다 — CSP 가 그 마지막 층이다.
+
+```
+default-src 'self'; script-src 'self' https://dapi.kakao.com https://t1.daumcdn.net;
+style-src 'self' 'unsafe-inline'; img-src 'self' https://t1.daumcdn.net
+https://mts.daumcdn.net https://s1.daumcdn.net; connect-src 'self'; font-src 'self';
+object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'
+```
+
+출처는 **카카오맵 SDK v4.5.13 을 실제로 내려받아 URL 생성부를 읽고** 정했다.
+설계 단계에 적어 뒀던 `https://*.daumcdn.net` 와일드카드는 쓰지 않는다 — 실제로 필요한
+호스트는 `t1`(스크립트·마커) · `mts`(타일) · `s1`(빈 타일) 셋뿐이다.
+`style-src 'unsafe-inline'` 은 SDK 가 지도 판 배치에 `style.cssText` 와
+`setAttribute("style", ...)` 를 쓰기 때문에 불가피하다(script-src 는 그대로 조여 둔다).
+
+- 값은 `map $host $re_csp` 로 **한 곳에서만** 정의한다(세 블록의 값이 갈라질 수 없다).
+- 배포는 **Report-Only → 확인 → 강제** 순서다(DEPLOY.md §5-5(3)~(5)).
+- 누락 방지: DEPLOY.md §5-6 `check_headers()` 가 4경로에서 실검증하고,
+  `backend/tests/test_deploy_config.py` 가 커밋 시점에 정적으로 막는다.
 
 ### 2.2 인가 (IDOR 방지 — T6)
 **모든 사용자 자원 조회에 소유권 검증을 강제한다.**

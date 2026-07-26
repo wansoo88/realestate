@@ -1,52 +1,231 @@
 {
   "code_review": {
     "status": "passed",
-    "id": "CR-022",
+    "id": "CR-023",
     "date": "2026-07-26",
-    "at": "2026-07-26T14:20:00+09:00",
-    "scope": "CR-021 차단(GEO-3) 해소 재검증 + 비차단 이월분 처리 검증(GEO-4 차수가드 · GEO-5 교차검증 표본 · F4-1 파이프라인 호출부) + PM 의 test_script_hygiene.py 개편(SR18-3) 자기충족성 점검",
+    "at": "2026-07-26T18:10:00+09:00",
+    "deploy_ready": true,
+    "scope": "배포(G5) 직전 최종 코드리뷰 — CR18-7 마커 성능(id 기준 diff) · GEO-7 좌표 전수 재검증(sweep_name_geoms.py) · GEO-6 괄호 지번 규칙 · SR18-7 속도제한기 공유 · SR15-4 CSP/nginx 배포 절차 정확성 (49f602a 이후 미커밋 9 modified + 2 신규)",
     "reviewer": "code-reviewer (herdr re-review 대행)",
     "blocking": [],
     "resolved": [
-      "GEO-3",
-      "GEO-4",
-      "GEO-5",
-      "F4-1"
+      "GEO-6",
+      "GEO-7",
+      "SR18-7"
     ],
-    "notes": "PASS - 차단 0건. CR-021 의 차단 사유(GEO-3)가 해소됐고, 담당자 보고를 하나도 그대로 받지 않고 내 변이 8종 + 내 SQL 재측정으로 확인했다. 재현: backend pytest 558 passed / 54 skipped (junit tests=612 failures=0 errors=0 skipped=54) - 지시 수치와 일치, CR-021 대비 +19건. 감사 전후 md5 대조로 소스 무변경 확인(geocode.py c041b2c9 / orchestrator.py e63dbb22 / test_script_hygiene.py d9bb4f82). 서버 조회만, 운영 DB 쓰기 0회, 동거 실서비스 무접촉. [1. GEO-3/GEO-4 변이 재현] GEO3-M1(same_complex 의 different_reb_complex 2줄 삭제 = CR-021 차단 지점 원복) -> 9 failed KILLED. GEO3-M2(헬퍼 no-op 화) -> 9 KILLED. GEO3-M3(한쪽만 있어도 '다르다' 로 판정하는 과잉차단 방향) -> 2 KILLED - 부정증거를 넣을 때 흔한 반대방향 실수까지 테스트가 잡는다. different_reb_complex 는 '한쪽이라도 비면 모른다이지 다르다가 아니다' 를 지켜 미매칭 단지끼리 이름으로 붙던 정상경로를 막지 않는다(양방향 고정). GEO4-M1(name_matches 차수가드 삭제) -> 5 KILLED. GEO4-M2(place_core 대신 원문 place_name 으로 차수비교) -> SURVIVED 이나 name_phases 가 내부에서 strip_name_noise 를 거치므로 차이는 '부속시설 꼬리에 차수토큰이 든 경우' 뿐이고 실데이터에 그 형태가 없다 - 테스트 구멍이 아니라 관측 불가능한 등가변이로 판단. REG(unsafe_shared_ids 제거) -> 1 KILLED. [운영DB 재측정, 내 SQL] reb 모순 충돌 그룹 15 -> 0 / same_complex 와 REB 가 모순되는 쌍 98 -> 0 / 총 충돌 199 -> 169(78그룹) / 법정동교차 0 유지 / 시군구교차 0 / 확보 6303 = 96.41% 불변 / backup.complex_geom_geo3 40행. same_complex TRUE 쌍 409 -> 311 로 정확히 모순 98쌍만 제거됐고, 반드시 공유돼야 하는 같은 reb_id 쌍 3건은 3건 모두 TRUE 유지 - 수술이 정확하다. geom_source 는 kakao_address 가 1072 -> 1112 로 +40(무효화분 재확보). GEO-4 는 같은 법정동 차수상이 수락쌍 619(내 CR-021 측정 기준) -> 0, 같은 차수 쌍은 836쌍 계속 수락. [내 지적이 실제 오좌표였음이 확정] #7 대우디오빌은 옛 공유점에서 1110m 떨어진 곳으로 이동했고 #74 대우디오빌플러스는 0m(그 점의 진짜 주인). CR-021 은 '각 쌍에서 최소 하나는 틀렸다' 까지만 말할 수 있었는데 어느 쪽이 틀렸는지까지 확정됐다. 내가 B(5)로 남긴 #593 삼익양재빌라·#723 씨티빌도 무효화 후 재확보. 넷 다 kakao_address(법정동코드·본번·부번 대조를 통과한 최강 증거등급). [회귀테스트 교체 확인] test_운영DB_모순쌍들이_전부_다른_단지로_판정된다 가 운영DB 실사례 5쌍(장안현대홈타운/장안현대, 명수대현대/명수대, 우장산롯데캐슬/우장산롯데, 서초한신리빙타워/서초한신, 신금호두산위브/신금호)을 실제 reb_id 와 함께 파라미터로 돌린다 - 전부 이름 포함관계라 이름대조로는 못 막는 케이스. CR-021 이 '자기충족적' 이라 지적한 옛 테스트가 제대로 교체됐다. unsafe_shared_ids 도 #7/#74 실좌표로 '그룹 전체 지목' 과 '정당한 공유 불건드림' 을 양쪽 다 고정. [2. 남은 169건 태도 판정 = 적절] 3분류를 내 SQL 로 재현: 전원매칭 0그룹 / 일부매칭 7그룹 / 전원미매칭 71그룹 - 담당자 보고와 정확히 일치. GEO-3 이 반증한 것은 '199건 전부 옳다' 는 주장이었지 충돌의 존재가 아니었고, 지금은 근거 있는 것과 없는 것을 갈라 없는 쪽에 아무 주장도 하지 않는다 - 근거 강도를 사실대로 보고하는 것이 G2 이며 '형태만 바꾼 반복' 이 아니다. 부동산원이 판정할 수 있는 충돌(전원매칭)이 0그룹이라는 점도 중요하다. 다만 '주장하지 않는다' 가 '조사할 수 없다' 는 아니다 - 내가 169건을 전수 훑어 괄호 안 지번의 본번이 서로 다른 그룹 16개/37단지를 셌다(전부 reb 미매칭). 예: 화곡동 근상프리즘 본번[342,957,1076] 4단지 / 서초동 상지리츠빌 본번[4,10,1617] / 응암동 뉴월드 본번[402,403] / 방화동 통일 본번[479,597]. 반대로 삼환나띠르빌(1002-10)~(1002-22)·새롬(1164-12)~(1164-14)는 본번이 같고 부번만 달라 공유가 맞다 - 본번은 갈라야 할 것과 붙여야 할 것을 실제로 구분한다. 단 동궁리치웰문정(101)/(102) 처럼 괄호 숫자가 지번이 아니라 동번호인 경우가 섞여 있어(_PAREN_DONGS 가 맨숫자도 동으로 받음) 바로 규칙화하면 정상공유를 깬다 -> GEO-6(low). [3. 전수 스윕 판정 = later, 단 G5 전 필수] 지금이 아닌 이유: 코드 결함이 아니라 잔존 데이터 문제이고 채택경로는 이미 fail-closed 로 고쳐져 신규 좌표는 이 문제를 만들지 않는다(커밋 게이트가 막을 대상은 코드). 좌표가 아직 아무에게도 안 보인다(미배포·listing 0행·recommendation_item 0행·프론트에 추천 렌더링 경로 없음). 담당자의 자제가 기술적으로 옳다 - name_contains/name_fuzzy 매칭(22건)은 주소 쪽이 틀렸을 수 있어 일괄 NULL 이 오류를 심는다. 4530 호출은 0.25s 간격 20~25분이고 카카오 개인쿼터(10만/일) 안이라 급하지도 어렵지도 않다. 그래도 반드시 해야 하는 이유: 표본 8/319·7/320 = 약 2.2%, 모집단 4530 외삽 시 약 90건이 400m 초과이고 1km 급 오차의 실재는 #7(1110m)이 증명했다. 그 90건이 지금 geom_confidence='exact' 로 저장돼 확인된 좌표와 구분되지 않는다 - CR-021 B(5)와 같은 문제이며 그때 2건만 고쳤다 -> GEO-7 로 등재(G5 배포 전 필수). 스윕 설계 권고: (a)name_exact 5644건(매칭의 99.6%)만 1차 대상 - 매칭이 거의 확실하므로 400m 초과 시 이름경로를 의심하는 추론이 성립 (b)name_contains/name_fuzzy 22건은 자동판정 말고 사람 확인목록 (c)불일치는 주소좌표로 덮지 말고 무효화 후 주소경로 재확보(verify_address 통과분만 진입) (d)exact/variant 분리 보고. [4. GEO-5 CLOSED] variant 포함 재실행 결과가 내 지적을 수치로 입증 - exact p90 43~49m·400m이내 98.4~98.8% vs variant p90 184~185m·92.2~95.3%. variant 가 실제로 4배 나쁘고, 리포트가 둘을 합쳐 보고하지 않게 바뀐 것도 확인. '평균 2m' 로 묻히던 신호가 드러난다. [5. F4-1 RESOLVED] 두 호출부를 각각 따로 변이시켜 확인: orchestrator.py:251 원복 -> 1 failed(기존 테스트) / orchestrator.py:594 원복 -> 1 failed(신규 test_파이프라인도_밴드기간이_아니라_자체창을_쓴다). CR-021 이 SURVIVED 로 지목한 구멍이 닫혔고 두 호출부가 독립적으로 보호된다. [6. test_script_hygiene 자기충족성 = 아님] 검사기 함수를 직접 호출해 진짜 유출 12케이스를 심었다. 잡힘: 평문비번 / TEST_PASSWORD=<난수>(PM 이 고쳤다는 접두사 구멍 - 수정이 진짜다) / serviceKey= / MOLIT_API_KEY: / refresh_token=eyJ... / yaml db_password:. 통과(오탐 없음): password='***' / your-key-here / os.environ[...] / PASSWORD_ENV='VERIFY_TEST_PASSWORD'. AST 검사기도 심은 리터럴 2종 잡고 이름상수 2종 통과. 특정 값이 아니라 형태를 보므로 유출값을 저장소에 남기지 않고 새 비밀도 잡는다 - SR18-3 지적이 제대로 해소됐다. 남은 구멍 SEC-3(low): _SYNTHETIC 이 값 전체에 search() 라 값 안에 test·secret·example·fake·dummy 가 부분문자열로 들어가면 통째로 면제된다(값 안에 Test / Secret 이 섞인 진짜 비밀번호 2종이 둘 다 면제됨). 사람이 짓는 비밀번호에 Test·Secret 이 섞이는 건 흔하고 실제 사고(SR17-2)도 사람이 지은 비밀번호였다 -> fullmatch 로 좁히거나 마커가 값의 대부분일 때만 면제. 1차 방어(AST+런타임 생성)가 유효하므로 low.",
-    "tests": "backend pytest 558 passed / 54 skipped (junit tests=612 failures=0 errors=0 skipped=54) - 지시 수치 재현. 내 변이 8종: GEO3-M1 KILLED(9) · GEO3-M2 KILLED(9) · GEO3-M3 KILLED(2) · GEO4-M1 KILLED(5) · GEO4-M2 SURVIVED(등가변이) · unsafe_shared_ids 제거 KILLED(1) · F4-M1a KILLED(1) · F4-M1b KILLED(1, CR-021 에서 SURVIVED 했던 것). 변이 후 md5 3파일 원복 확인. 운영 DB 읽기전용 실측: complex 6538 / geom 6303(96.41%) / 충돌 78그룹 169단지 / 법정동교차 0 / 시군구교차 0 / reb 모순그룹 0 / 그룹분류 전원매칭 0·일부매칭 7·전원미매칭 71 / backup.complex_geom_geo3 40행 / #7 옛공유점에서 1110m 이동, #74 0m. 실단지 6538 함수 실행: same_complex 모순쌍 0(이전 98), TRUE 쌍 311(이전 409), 같은 reb_id 쌍 3/3 유지, name_matches 차수상이 수락 0(이전 619). 위생검사기 유출 12케이스 주입 - 10 정상 판정, 2 구멍(SEC-3). needs_db 54 는 미실행."
+    "geo6_cleanup": "later",
+    "notes": "PASS · 배포 가능. 재현: backend 607 passed/54 skipped(junit tests=661 failures=0 errors=0) · frontend typecheck 통과 · vitest 62 passed · npm run build 성공 — 지시 수치 전부 일치. 감사 변이 24종을 돌린 뒤 4파일 바이트 단위 원복 확인. 서버는 조회만, /etc/nginx 는 읽기 전용(수정·reload 0회). [1. CR18-7 PASS] 수치 정정이 맞는가 = 맞다. 담당자 말을 받지 않고 document.createElement/addEventListener 를 계수하는 테스트를 직접 짜서 실측: 마커 500개 -> 요소 1000 · 리스너 1000 · 오버레이 500(마커 1개 = div1+span1 = 2요소, 리스너 click+keydown 2개). 같은 목록 재조회 -> 요소 0 · 리스너 0 · 오버레이 0(19.2->0.79ms 의 기전 확인). 400겹침+400신규 -> 신규분 800요소만. 변이 10종 중 9 KILLED: 콜백상자 갱신제거(1) · 재사용안함=CR18-7원복(8) · 사라진마커 미정리=CR18-6(5) · 좌표순서 뒤집기=CR18-5(4) · panTo가드 제거=CR18-1(1) · patchLabelEl 을 innerHTML 로=XSS(1) · 중복키 방어제거(1) · className 미반영(1) · 군집좌표 미반영(1). 회귀금지 4종(CR18-1/18-5/18-6/XSS)이 전부 변이로 지켜짐을 확인. 재사용 경로도 textContent 전용이고 자식제거를 el.textContent='' 로 해 innerHTML 0건 — 최적화가 XSS 우회로가 되지 않았다. 생존 1건 MARK-1(low): detach 에서 keydown 만 안 떼도 안 깨진다(click 은 잡힌다). 오버레이가 setMap(null)로 떨어지면 GC 대상이라 실피해는 없으나 CR18-6 취지가 절반만 고정. 부수 MARK-2(low): patch() 가 yAnchor/xAnchor 를 반영 안 함(현재 키별 상수라 무해하나 MarkerSpec 에 필드가 있어 눈에 안 띈다). MARK-3(info): setZIndex?./setPosition?. 옵셔널 호출인데 성공여부와 무관하게 추적상태를 갱신(실 카카오 SDK 는 둘 다 제공하므로 운영 영향 0). [2. GEO-7 PASS 세 질문 전부] (1)69건이 임계 초과분만인가 = 그렇다. sweep_verdict 는 verify_address 통과 첫 후보에만 거리를 재고 distance>tolerance 일 때만 mismatch, 나머지는 agree/unverified/no_result 로 갈라 손대지 않는다. 변이: 전부 mismatch 로(KILLED 2) · 임계 400->5000(KILLED 3) · 후보0건인데 agree(KILLED 2). 69 = 적용 65(name_exact) + 미적용 4(contains/fuzzy)이고 backup.complex_geom_geo7 이 정확히 65행. (2)재확보가 검증 우회하지 않나 = 우회 안 한다. 좌표 출처가 verify_address 통과분뿐(법정동코드·본번·부번·산번지·수도권bbox)이고 ReplayGeocoder -> enrich_geom 으로 들어가 충돌게이트·same_complex 를 평소대로 탄다. 변이: verify_address 건너뜀(KILLED 1) · ReplayGeocoder 가 좌표 지어냄(KILLED 1) · APPLIABLE_METHODS 를 fuzzy 까지 넓힘(KILLED 1). 절차도 견고 — 백업·무효화가 한 트랜잭션, 점유표를 비운 뒤 다시 싣고, 대상을 반영시점에 DB 에서 재조회. --methods 는 스윕범위만 넓히고 반영범위는 상수가 막아 CLI 로 확대 불가. (3)확보율 유지가 진짜인가 = 직접 SQL 확인. geom 6303 불변(96.41%), kakao_address 1112->1177(+65), kakao_keyword 5191->5126(-65) — 65건이 이름경로에서 주소경로로 정확히 이동하고 총량 그대로. 충돌 169 / 법정동교차 0 / 부동산원모순 0 유지. 백업 pre_geo7 6303행 · geo7 65행으로 되돌릴 수 있다. [3. GEO-6 규칙 PASS · 정리 미룬 판단도 옳다] 내 CR-022 제안(본번 비교)이 실데이터로 반증됐다 — 뉴월드(402-42)와 (402-120)은 본번이 같은데도 다른 단지다. 담당자는 표기 전체(본번-부번)로 비교하고 부번0 표기흔들림((666)/(666-0))까지 정규화했다. 내 지적보다 정확하다. 부동산원 직접 조회로 근거 확인 — 삼환나띠르빌은 부동산원 기준 7개 단지이고 세대수가 전부 다르다(15/30/19/16/16/15/15). 주석·테스트가 사실과 달랐다는 정정이 옳다. 정상공유 무손상 확인: different_parcel 은 양쪽 다 있을 때만 판정(롯데캐슬 vs 롯데캐슬(1057-1) 은 안 갈린다), _PAREN_JIBUN 이 ^\\d+(-\\d+)?$ 라 (101동)·(10,11,25동) 동 목록은 안 본다. 변이 4종 전부 KILLED: different_parcel 분기삭제(8) · 본번만 비교=내 CR-022 제안(3, 반례가 테스트로 박혀 있다) · 한쪽만 있어도 다르다(2) · 괄호 안 동 표기를 지번으로 오인(3). 데이터 정리 미룬 판단 = 옳다. 새 규칙으로 내가 직접 재판정 -> 29그룹/70행(담당자 보고와 일치), 전부 부동산원 미매칭. 담당자 주장('괄호 포함 원문으로 매칭을 붙이면 지우는 대신 고칠 수 있다')의 전제가 참임을 확인 — 부동산원에 삼환나띠르빌(1002-7)~(1002-22)가 문자 그대로 있고, 우리 6행이 미매칭인 이유는 _strip_parens 가 괄호를 떼어 6행이 모두 '삼환나띠르빌'로 축약되고 부동산원 후보 7개도 똑같이 축약돼 ambiguous 로 매칭 포기되기 때문이다(match_complex 의 올바른 안전동작). 즉 괄호를 보존해 매칭하면 1:1 로 붙고 각자 지번주소로 정확한 좌표를 따로 받을 수 있다 — 지금 비우면 -1.11%(70/6303)를 잃고 되찾을 수 있었던 좌표를 버린다. 배포 차단 아닌 근거: 코드는 이미 옳고(변이 4종 KILLED) · 70행 전부 같은 법정동 안(교차 0) · 좌표를 쓰는 입지 데이터가 school_district/poi/road_segment/transit_plan/redevelopment/market_index 전부 0행이라 location_finding 이 항상 판단보류이고 좌표는 지도 핀과 F4 폴백에만 쓰인다 · 70행 중 최근36개월 거래 5건 이상은 23건 · backup 4종으로 되돌릴 수 있다. -> geo6_cleanup=later, GEO-8(medium)로 등재. 지금 비우는 선택지는 택하지 말 것. [4. SR18-7 PASS] build_geocoder 가 RateLimiter 를 하나만 만들어 두 백엔드에 공유하고 address_only 면 키워드를 NullPlaceSearch 로 둔다. 변이(주소 백엔드에 별도 limiter) -> KILLED 1. rate_limiter/backends 프로퍼티로 배선을 밖에서 검증 가능하게 한 것도 옳고 가짜 시계로 실대기 없이 회귀를 잡는다. [5. 배포 절차 PASS — 내가 서버에서 결합 검증] 서버 실측 nginx/1.18.0(Ubuntu) · --with-http_v2_module · OpenSSL 3.0.2. listen 443 ssl http2 는 1.18 문법으로 정확하고 http2 on 이 1.25.1+ 라는 진단도 맞다. 전 디렉티브를 1.18 기준으로 훑어 추가 비호환 0건(map·limit_req_zone·add_header always(1.7.5+)·try_files·중첩 location·proxy_intercept_errors·ssl_prefer_server_ciphers off·TLSv1.3+OpenSSL3.0.2 전부 지원). ⚠️ 담당자의 격리 검증으로는 못 잡는 위험이 있었다 — 1.18 에서 http2 는 소켓단위 옵션이라 같은 address:port 에 옵션이 다른 listen 이 있으면 duplicate listen options 로 nginx 가 통째로 안 뜨고 동거 실서비스까지 죽는다. 이 서버엔 listen 443 ssl(http2 없음) 서버블록이 4개 이미 있다(data·data.bak-visitlog·itsmine·stack). 그래서 /etc/nginx 를 전혀 건드리지 않고 /tmp 격리 prefix 에 활성 vhost 전부+conf.d 를 복사해 우리 설정과 함께 nginx -t 를 돌렸다(바인딩·reload 없음, 로그경로 격리) -> syntax is ok / test is successful. 경고 2건은 우리 것이 아니라 선재 문제(stack 의 duplicate MIME, .bak-visitlog 가 sites-enabled 에 남아 conflicting server name). 검증 후 임시 디렉터리 삭제, /etc/nginx 수정 0, systemctl is-active nginx = active 확인. 부수: 우리가 유일한 [::]:443 리스너가 되지만 서버에 글로벌 IPv6 주소가 없고 도메인에 실제 AAAA 도 없어(getent 결과는 IPv4 매핑) 실질 영향 없음. CSP map 구조 = 값이 갈라질 수 없다: 정의는 map 한 곳, 3블록이 전부 $re_csp 참조, test_csp_값은_한_곳에서만_정의된다 가 default-src 등장 1회와 참조 3회를 단언한다. 변이(/index.html 블록에서 CSP 제거) -> KILLED 2. CSP 값을 빌드 산출물과 대조: MapView.tsx 가 dapi.kakao.com/v2/maps/sdk.js?...libraries=clusterer 로 로더를 붙여 script-src 와 일치, dist 산출물의 data: URI 0건이라 img-src 에 data: 를 뺀 판단이 실제와 맞다, dist 가 참조하는 외부 오리진은 dapi.kakao.com 뿐. t1/mts/s1.daumcdn.net 은 SDK 런타임 호출이라 정적 확인 불가 — 그래서 Report-Only 선행 절차가 옳고 'unsafe-eval' 위반 1건이 정상이라는 사전 고지까지 있어 운영자가 놀라서 CSP 를 무력화하는 실수를 예방한다. 비차단 DEP-3(low): http2 버전 회귀가 테스트로 고정돼 있지 않다 — listen 443 ssl http2 를 http2 on 으로 되돌리는 변이가 SURVIVED. 배포를 통째로 막았을 바로 그 결함인데 그물이 없다. [총평] 변이 24종 중 21 KILLED, 생존 3건은 전부 low/info 이며 현재 동작에 결함이 없다. 배포 후 과제: GEO-8(medium) · DEP-3(low) · MARK-1(low) · MARK-2(low) · 기존 이월 SEC-3·REC-1. 운영 위생: sites-enabled/data.utilverse.info.bak-visitlog 가 활성 상태로 남아 conflicting server name 경고(선재, 우리와 무관하나 정리 권고).",
+    "tests": "backend pytest 607 passed / 54 skipped (junit tests=661 failures=0 errors=0) · frontend tsc --noEmit 통과 · vitest 62 passed (4 files) · npm run build 성공(js 162.84kB gzip 53.73kB) — 지시 수치 전부 재현. 내 변이 24종: 프론트 마커 10(9 KILLED, keydown 정리 1 생존) · 백엔드 GEO-6/GEO-7 10(10 KILLED) · SR18-7 1(KILLED) · nginx 설정 2(CSP 누락 KILLED, http2 버전회귀 생존) · 앵커미스 1. 변이 후 4파일 바이트 원복 확인. 독립 계수 테스트: 마커 500개 = 요소 1000 · addEventListener 1000 · 오버레이 500, 재조회 시 전부 0. 운영 DB 읽기전용 실측: complex 6538 / geom 6303(96.41% 불변) / kakao_address 1177(+65) / kakao_keyword 5126(-65) / 충돌 78그룹 169행 / 법정동교차 0 / 부동산원모순 0 / backup pre_geo7 6303행·geo7 65행 / 입지 6개 테이블 전부 0행 / GEO-6 재판정 29그룹 70행(거래5건이상 23). 서버 nginx 1.18.0 + http_v2_module + OpenSSL 3.0.2, 활성 vhost 전부와 결합한 nginx -t 격리 검증 통과(/etc/nginx 수정 0, reload 0, nginx active 유지). needs_db 54 는 미실행."
   },
   "security_review": {
     "status": "passed",
-    "id": "SR-018",
-    "at": "2026-07-26T10:05:23+09:00",
+    "id": "SR-019",
+    "at": "2026-07-26T13:05:00+09:00",
     "date": "2026-07-26",
-    "scope": "SR17-1/2/3 수정 재검증 + 카카오 REST 키 1회 노출 사고 조사 + 신규 코드(부동산원 reb.py·fetch_reb_complex_master·마이그레이션 007/008·주소 지오코딩·실거래 기준 추천) 보안 감사 - git log -1(5703bca) 이후 working tree 전체",
+    "scope": "G5 배포 직전 최종 보안리뷰 - SR15-4(CSP) 해소 재검증(deploy/nginx-realestate.conf · deploy/DEPLOY.md · backend/tests/test_deploy_config.py 신규) + SR18-3/SEC-3 수정 재확인 + DEC-001(키 재발급 미실시 위험수용) 배포 차단 여부 판단",
     "reviewer": "security-reviewer (herdr re-review 대행)",
     "blocking": [],
-    "g5_blockers": [
-      "SR15-4",
-      "SR18-3"
+    "deploy_approved": true,
+    "deploy_preconditions": [
+      "배포 직전 트리 동결 + 전체 테스트 그린 1회 재확인 — 리뷰 중 다른 작업이 들어와 스위트가 일시 red 였다(보안 사유 아님). 최종 확인 13:03 KST: 661 tests / 0 fail / 54 skip = 607 passed",
+      "GEO-7 은 CR-023 에서 '해소됨' 으로 정리됨 — 남은 코드리뷰 항목(GEO-8·DEP-3·MARK-1)은 전부 '배포 후 과제' 로 비차단"
     ],
-    "key_reissue_required": true,
-    "key_reissue_target": "KAKAO_REST_API_KEY - 재발급 필요(이번 노출 사고 대상. Authorization 헤더로 보낸 값이 카카오 오류 응답에 그대로 echo). KAKAO_JS_APP_KEY - 불필요(REST 키와 다른 값임을 해시로 확인, 이번 사고 미전송, 설계상 브라우저 공개 키 - 대신 콘솔 플랫폼 도메인 허용목록 확인 권고). MOLIT_API_KEY - SR-017 재발급 요청이 아직 미이행(.env mtime 2026-07-25 22:20 = SR-017 이전) -> 함께 처리 권고",
-    "notes": "PASS - 차단 0건. SR17-1·SR17-2·SR17-3 전부 RESOLVED(+SR17-4·SR17-6 함께 CLOSE). 재현: backend pytest RC=0 · junit tests=593 failures=0 errors=0 skipped=54 = 539 passed - 지시 수치 재현. [검증 방법] 초록불을 믿지 않고 부러뜨렸다: 마스킹 우회 입력 18종 · 변이 7종(M1~M6) · 커밋 대상 실값 스캔(로컬 224 + 서버 222 파일 x 비밀 6종 + URL 인코딩 변형) · 서버 조회전용 실측. [SR17-1 RESOLVED] mask_secrets 가 원문 '='·%3D·%253D·JSON/dict 표기·?key=·대문자·Authorization 헤더·카카오 echo 형태(wrong appKey(...))·평문 문장 속 리터럴을 전부 잡는다(18/18 유출 0). 값 종결 문자셋이 base64 문자(+ / = % - _)를 값 안에 남겨 부분노출 없음. 직접 httpx 호출은 저장소 전체에 4곳뿐이고 전수 확인: make_http_fetch(키 보유·masked_error from None) · geocode._httpx_get(카카오 키 헤더·동일 처리, 키 없이 실행해도 leaks False 실증) · llm.py(구조적 안전 - status 만 담고 본문·URL 미포함) · fetch_legal_dong_codes/fetch_reb_complex_master(무인증, 비밀 미보유). 신규 코드가 뚫는 우회로 없음 - reb.py 는 네트워크 0, 주소 지오코딩은 같은 _httpx_get 경유. 이중그물: runner._why() 와 verify_region_codes.probe() 가 service_key 리터럴로 재마스킹, render() 직전 문서 전체 재마스킹, install_log_masking 이 레코드 팩토리 + 핸들러 필터(exc_text traceback 포함). 루트 DEBUG 로 열고 httpx INFO 발생시켜도 LOGBUF LEAKS=False 실측. 변이 M5(%3D 지원 제거) -> test_masks_url_encoded_forms FAIL(테스트 실효). [SR17-2 RESOLVED] TEST_PASSWORD 제거·make_test_password 는 secrets.token_urlsafe(24) 1회용·미출력. purge_user 가 .invalid 아닌 주소를 engine 도달 전 SystemExit. 운영 DB 직접 조회: app_user 0행 · user_profile 0 · recommendation_job 0 (SR17-6 도 CLOSE). 백업은 저장소 밖 /root/realestate-backup/(디렉터리 700). 변이 M1(TEST_PASSWORD 재도입) -> 3개 테스트 동시 FAIL. [SR17-3 RESOLVED] _common.py:130 이 import 부작용으로 configure_logging() 실행 -> basicConfig + httpx/httpcore/urllib3/anthropic WARNING + install_log_masking. 스크립트 13/13 전수가 from _common import 경유. main.py·worker.py 도 install_log_masking 경유. 변이 M2(import 문 공백 1개 변형)·M3(import 시점 호출 주석처리) 둘 다 해당 테스트 FAIL. [2순위 카카오 키 - 흔적 0건, 그럼에도 재발급 YES] 키를 화면에 찍지 않고 변수로만 다뤄 스캔(원문+quote/quote_plus/unquote/소문자 hex 변형): 서버 /opt /root /home /tmp /var/tmp /var/log /etc /srv /var/lib/docker/containers -> /opt/realestate/.env 1건뿐(600 root:root). /root/.bash_history 0건이며 mtime 2026-07-02 - 비대화형 ssh 는 history 를 안 남기므로 '출력은 세션 기록에만 남았다'는 보고와 정합. journalctl -7d 0 · docker logs 0 · nginx 로그 0 · git rev-list --all 전 이력 0(3종 키 전부). 커밋 대상 파일 실값 대조 로컬 224/서버 222 파일 x 비밀 6종 -> 0건. region_code_verification.yaml 은 error:0, 키 흔적 0. 재발급 판단: REST 키는 우리 코드가 Authorization: KakaoAK <키> 로 보내고 카카오의 wrong appKey(<값>) format 은 보낸 값을 그대로 되돌려주는 오류이므로 화면에 찍힌 값 = REST 키. 서버 전용 비밀이고 도메인 제한 같은 보완통제가 없으며 노출면이 우리가 파기 확인 못 하는 세션 기록 -> 회전한다(비용 0). JS 키는 REST 키와 다른 값임을 sha256 으로 확인(js_eq_rest=NO), 이번 사고에 미전송, 설계상 브라우저 공개 키(frontend/dist 포함 - SR-013 정상 확인) -> 재발급 불필요, 대신 콘솔 플랫폼 도메인 허용목록 확인. 단 콘솔이 앱 단위로만 재발급하면 JS 키도 바뀌므로 frontend/.env 갱신 + 재빌드 필요. MOLIT 키는 SR-017 재발급 요청이 미이행(.env mtime 2026-07-25 22:20 < SR-017 00:20) -> 동시 처리 권고. 재발 방지는 코드가 아니라 절차다(우리 마스킹은 원격 셸 curl 출력을 못 덮는다): (1)원격 API 확인은 마스킹된 우리 스크립트로만 (2)부득이한 curl 은 -o /dev/null -w 상태코드만, 본문 필요시 sed 출력 필터 (3)키를 명령줄에 붙여넣지 말고 set -a; . .env; set +a 후 변수 참조 (4)키 회전 절차를 DEPLOY.md 체크리스트로. [3순위 신규 코드 전부 PASS] SSRF 불성립 - 메타 조회->다운로드 2단계를 타지만 URL 은 안 따라간다: META_URL·FILE_URL 하드코딩 상수이고 메타 응답에서 취하는 건 atchFileId·fileDetailSn 둘뿐이며 httpx params= 의 쿼리 값으로만 쓴다. zip slip 불성립 - 이 스크립트는 압축을 풀지 않고 응답 바이트를 out_dir/<상수 filename> 에 기록(아카이브 문자열이 경로에 들어가는 지점 0). 응답 위장 방어 - 헤더 필수 컬럼 불일치면 저장 안 함. 마이그레이션 007·008 전부 정적 DDL, 사용자 입력 0, 오히려 CHECK 제약으로 방어 증가(complex_reb_match_pair_chk 가 한쪽만 채우는 버그를 스키마로 차단). 신규 SQL 전수 text()+바인드, 문자열 포매팅 SQL 0건 - match_reb_complexes 대량 UPDATE 도 executemany 바인딩(:reb_id/:method/:id), f-string SQL 2곳은 둘 다 하드코딩 상수 식별자(backup.complex_geom_pre_geo1 · postgis _POIS_SQL). SR4-2 회귀 없음 - 변이 M6(finance_finding 에 usable_cash_krw 원본 주입) -> 파이프라인 프롬프트 테스트 2건 FAIL(PromptSafetyError), 실거래 기준 후보는 시세·면적·거래건수만 싣고 자산 유입 0. IDOR 유지 - get_job(job_id, user_id) 2인자 시그니처가 base/memory/postgis 동일. G4 rate limit - 카카오 호출 전부 limiter.wait() 선행(키워드 :481 · 주소 :539), 신규 외부호출 전부 공공/공식 API, HTML 스크래핑 0건. 서버 - 5432 리스너 없음(ss -tlnp), realestate-db-1 Ports 공란, compose 무변경(db·redis 에 ports: 없음, 유일 매핑 127.0.0.1:8013:8000), .env 600 root:root. itsmine-*/autobtc 는 조회만 - 중지·재시작·설정변경·삭제 0회. [신규 발견 8건 전부 비차단] SR18-3(medium, G5 전 필수) 유출 비밀번호가 test_script_hygiene.py:94 의 문자열 연결로 여전히 복원 가능 - 연결은 파싱 시점에 합쳐지므로 사람이 읽으면 값이 그대로 보이고, 쪼갠 이유는 오직 이 테스트 자신의 grep 에 안 걸리기 위해서다(검사기가 구조적으로 자기를 면제). 차단하지 않은 근거: SR17-2 의 차단 논거는 '동작하는 자격증명'이었는데 해당 계정이 운영 DB 에서 삭제됐음을 직접 조회로 확인 -> CWE-798 이 아니라 CWE-200 으로 강등, 남는 위험은 비밀번호 패턴 노출·재사용뿐. 사용자가 그 값을 다른 곳에 재사용한 적이 있다면 판정은 즉시 fail 로 뒤집힌다. SR18-1(low) raise ... from None 은 __context__ 를 끊지 않는다 - 실행 확인: __cause__=None·__suppress_context__=True 지만 __context__ 는 원문 키를 가진 HTTPStatusError 를 그대로 보유(체인 순회 LEAKS RAW=True). 표준 traceback/logging 은 존중하므로 실경로 유출 0(실측)이나 masking.py:167-168 의 '체인에서 끊는다' 주석은 사실이 아니어서 정정한다. SR18-2(low) mask_secrets 에 DSN 정규식 부재 - POSTGRES_PASSWORD 가 env 에 있을 때만 마스킹됨(env 없으면 DSN 비밀번호 평문 노출 실측). SR18-4(low) print() 는 마스킹 그물 밖 - 현재 예외 print 3곳은 전부 mask_secrets/마스킹된 타입 경유라 실해 0이나 보장이 구조가 아니라 관습. SR18-5(low) AST 비밀 리터럴 검사가 변이 6/6 미탐지(dict 값·튜플 값·문자열 연결·비규칙 변수명·f-string·kwarg) - 세 번째 변형이 정확히 SR18-3 에서 쓰인 우회 기법. SR18-6(low) fetch_reb_complex_master 응답 크기 상한 없음 + follow_redirects=True(SR17-5 동종, 대상은 더 큼). SR18-7(info) geocode_complexes._limiter() 가 키워드용·주소용 별개 인스턴스를 만들어 실효 간격 절반(최대 약 8req/s). SR18-8(info) backend/docs/03-build/.review-state.json 중복 게이트 파일(미추적 305B) - 커밋 전 삭제 권고. [유지] SR17-5 low · SR17-7 info · SR15-4(CSP, G5 차단) · SR15-3/R-09 low.",
+    "g5_blockers": [],
+    "key_reissue_required": false,
+    "key_reissue_target": "DEC-001 로 사용자가 재발급 없이 위험 수용(MOLIT · 카카오 REST). 보안리뷰는 이를 배포 차단 사유로 보지 않는다(조회 전용 · 최대 피해 일일 한도 소진 · 재검토 조건 기재). 단 보완책 중 '카카오 JS 키 허용 도메인 제한'은 실측상 무효 - SR19-1 참조.",
+    "notes": "PASS - 배포를 막을 보안 사유 없음. SR15-4 RESOLVED(+SR18-3 · SEC-3 RESOLVED). 재현: backend pytest 661 tests / 0 failures / 54 skipped = 607 passed - 지시 수치 일치. [검증 방법] 담당자의 'SDK 를 실제로 읽었다'는 주장을 내가 SDK 를 직접 내려받아 대조했다: kakao.js v4.5.13(104,277B) · clusterer 1.1.1(10,549B) · 로더 sdk.js(3,902B). [CSP 출처 6개 전부 원본 확인 - 추측 0건] 로더 원문 p={v3:t1.daumcdn.net/mapjsapi/js/main/4.5.13/kakao.js, clusterer:t1.daumcdn.net/mapjsapi/js/libs/clusterer/1.1.1/clusterer.js} -> script-src t1 정확. URI_FUNC.ROADMAP/ROADMAP_HD -> mts.daumcdn.net/api/v1/tile/ 정확. kakao.js 의 $e=...s1.daumcdn.net/dmaps/apis/ (빈타일) · pa/lc=...t1.daumcdn.net/mapjsapi/images/ 와 /localimg/localimages/07/mapjsapi/ (마커·컨트롤·로고 he=pa+m_bi_b.png) 정확. img 출처 3개는 실제 도달성까지 확인(전부 200 image/png). [unsafe-eval 제외 정확] kakao.js 전체에서 eval( 은 정확히 1건이고 그것이 try{eval(\"document.namespaces\")}catch{} - 상수 문자열이라 동적 실행 아니고 try/catch 안이라 차단돼도 지도 정상. new Function 0 · document.write 0(autoload=false). [connect-src 'self' 정확] XMLHttpRequest 3건 중 1건은 기능탐지, 2건은 같은 호출부(로드뷰 street_view 검색) -> 실제 호출부 1개이며 로드뷰 전용. clusterer.js 는 XHR·fetch 0건. [style-src unsafe-inline 필요성 실증] cssText 10건(그중 'left:0;top:0;width:100%;height:100%;touch-action:none' 은 주석 인용문과 문자 단위 일치) · setAttribute(\"style\") 2건(SVG 마커). [제외 출처가 옳게 제외됐나 - 반대방향 검사] ctt-image.kakao.com(교통) · map0~3.daumcdn.net(스카이뷰) · ssl.daumcdn.net(TUNNELING 분기, 기본 off) · rv/spi.map.kakao.com(로드뷰) 전부 미사용 기능. 코드에 MapTypeId·setMapTypeId·MapTypeControl 0건 확인. map.kakao.com 은 <a href> 라 CSP 대상 아님. -> 출처 목록은 과하지도 부족하지도 않다(최소권한 맞음). [절차 안전 - 서버 격리 실측] nginx 1.18.0 격리 인스턴스(임시 prefix·자체 pid/log·127.0.0.1:18443)로 직접 재현: 강제판·Report-Only판 둘 다 nginx -t 통과, Report-Only 치환 3건, 그리고 200/403/502 전 응답에 CSP 정확히 1개 + 보안헤더 5종 전부(always 실동작 실측). /etc/nginx 무변경·동거서비스 무변경·임시물 전량 삭제. 부트스트랩->certonly --webroot(--nginx 아님)->Report-Only->브라우저확인->원본재복사로 강제, 되돌림 2경로 확보. [테스트 변이 18종 중 16종 탐지] 좁히는 방향(지도 죽음)·와일드카드·unsafe 토큰·always 누락·변수참조 깨기·문서 절차 삭제까지 전부 탐지. 미탐지 2종은 둘 다 출처를 '추가'하는 방향(M11 script-src 에 cdn.jsdelivr.net, M12 img-src 에 data:) -> SR19-2. 변이에 쓴 2개 파일은 바이트 단위 원복 확인(LF 유지). [SR18-3/SEC-3 해소 확인] 유출값 저장소 전수 0건. 형태 기반 검사기에 진짜 유출 7종을 심어 6종 탐지 · 자리표시자 3종 정상 면제(오탐 0). SEC-3 fullmatch 회귀 2케이스(진짜 키에 test/sample 우연 포함) 모두 탐지. 놓친 1종은 산문 인용 형태(구분자 없음)이며 하필 SR17-2 의 원래 모습 -> SR19-3. 덤: 이 SR-019 초안이 예시 값을 그럴듯하게 적었다가 검사기에 내 리뷰 로그 2줄이 즉시 걸렸다 - 검사기가 리뷰어 문서에도 실제로 작동함이 실증됐다(해당 줄은 값 없는 서술로 수정). [지시 1번 답 - 정직하게] connect-src 'self' 는 세션 라이딩을 막지 못한다. 본체인 fetch('/api/v1/me/profile',{credentials:'include'}) 는 같은 오리진이라 CSP 가 허용한다. CSP 의 실제 기여는 script-src 에 unsafe-inline·unsafe-eval 이 둘 다 없어서 주입 코드가 애초에 실행되지 못하게 하는 것이다. 실행됐다고 가정하면 navigation(location.href/window.open)과 WebRTC 는 CSP 에 지시어 자체가 없어 여전히 열려 있다(사양 한계라 우리가 못 고침). 나머지 반출 경로(fetch/XHR/WS/sendBeacon/a-ping · CSS background url · @import · 폰트 · object/base/form/frame)는 전부 차단 확인. -> 주석·독스트링 표현 정정 권고(SR19-4). 실제 XSS 표면은 매우 좁다: 프론트 전체에 innerHTML·dangerouslySetInnerHTML·insertAdjacentHTML·eval·new Function·document.write 사용 0건이고 서버 문자열이 DOM 에 닿는 유일 경로가 textContent 다. [지시 2번 답] style-src 'unsafe-inline' 수용 가능 - CSS 주입의 실질 반출 경로(background url·@import·폰트)가 img-src/style-src/font-src 로 전부 닫혀 있고, 우리 코드가 스타일 문자열을 서버 데이터로 조립하는 지점 0건. [★SR19-1 medium - DEC-001 정정 필요] 카카오 JS 키 도메인 제한이 실효 없음을 실측(12:44·12:51 2회 동일): Referer 없음 -> HTTP 200(내 PC 에서 SDK 정상 수신) / Referer: https://realestate.utilverse.info/ -> HTTP 401 'domain mismatched! caller=...'. 즉 (a)등록 허용목록에 운영 도메인이 없고 (b)그런데도 지도가 뜨는 이유는 우리 nginx 의 Referrer-Policy: no-referrer 때문에 브라우저가 Referer 를 안 보내고 카카오가 그때는 통과시키기 때문이다. 결과: DEC-001 이 보완책으로 기록한 '허용 도메인 제한 완료'는 아무것도 막지 않으며(누구나 no-referrer 로 우리 키 사용 가능), 동시에 Referrer-Policy 를 나중에 '개선'하면 그 순간 지도가 죽는 숨은 결합이 생겼다. 배포 차단은 아님(피해 상한이 DEC-001 이 이미 수용한 '한도 소진'과 동일). [DEC-001 판단] 배포 차단 사유 아님 - 조회 전용 키, 최대 피해 일일 한도 소진, 사용자 명시 결정 + 재검토 조건 기재. 보완책 4개 중 3개(마스킹 · gitignore+600 · 위생 테스트)는 실동작 확인했고 1개(도메인 제한)만 SR19-1 로 무효. [배포 차단 보안 사유 없음] 보안 관련 190건 0 fail · 5432 리스너 0 · realestate-db-1 Ports 공란 · .env 600 root:root · 비밀값 커밋 유출 0건 · IDOR/SR4-2/필드암호화 무변경. 동거 서비스는 조회·격리검증만(중지·재시작·설정변경 0회). [비보안 관찰 2건] (1)리뷰 중 다른 작업(geocode.py·mapMarkers.ts, GEO-7 스윕)이 들어와 12:53 경 전체 스위트가 일시 red(1건->다른 2건)였다가 12:55 green 복귀. 보안 190건은 전 구간 0 fail. G5 는 '이 트리를 배포'하는 행위이므로 배포 직전 트리 동결 + 최종 그린 1회 확인 권고. (2)GEO-7(medium, G5 배포 전 필수)이 아직 OPEN - 좌표 정확성이라 보안 판정 대상 아니며 코드리뷰 소관. [SR19-5 info] libraries=clusterer 로 clusterer.js 를 받지만 MarkerClusterer 미사용(자체 클러스터링) - CSP 는 안 넓어지나 불필요한 외부 스크립트 1개. [최종 확인] 13:03 KST 전체 661 tests / 0 failures / 54 skipped = 607 passed 재확인. CR-023 passed·blocking 0 이며 GEO-7 은 '해소됨' 으로 정리됨(GEO-8·DEP-3·MARK-1 은 배포 후 과제). 따라서 보안·코드 양쪽 게이트에 열린 차단 항목이 없다.",
     "log": "docs/03-build/security-review-log.md",
-    "tests": "backend pytest RC=0 · junit tests=593 failures=0 errors=0 skipped=54 (=539 passed) - 지시 수치 재현. 변이 M1(TEST_PASSWORD 재도입)=3 FAIL / M2(_common import 파괴)=1 FAIL / M3(import 시점 configure_logging 제거)=1 FAIL / M4(AST 우회 6종)=0 FAIL(미탐지, SR18-5) / M5(마스킹 %3D 제거)=1 FAIL / M6(finding 에 자산원본 주입)=2 FAIL. 마스킹 반례 18종 유출 0. 변이 원복 후 593/0/54 동일성 확인 + git status 49행 동일.",
+    "tests": "backend pytest 661 tests / 0 failures / 0 errors / 54 skipped = 607 passed - 지시 수치 일치. 보안 관련 6개 모듈 190건 0 fail. CSP 변이 18종 중 16종 탐지(미탐지 M11·M12 = 출처 추가 방향). 위생 검사기 유출 7종 중 6종 탐지 · 자리표시자 3종 정상 면제. 서버 nginx 1.18.0 격리 인스턴스: 강제/Report-Only 양쪽 nginx -t 통과 + 200/403/502 전부 CSP 1개·보안헤더 5종. 카카오 SDK v4.5.13 원본 대조로 CSP 출처 6개 전수 검증.",
     "verified_resolved": [
-      "SR17-1",
-      "SR17-2",
-      "SR17-3",
-      "SR17-4",
-      "SR17-6"
+      "SR15-4",
+      "SR18-3",
+      "SEC-3"
     ]
   },
   "open_findings": [
     {
-      "id": "GEO-7",
+      "id": "SR19-1",
       "verdict": "OPEN",
       "severity": "medium",
-      "blocks": "G5 배포 전 필수 - 커밋 게이트(G1)는 막지 않음",
+      "blocks": "없음 - 배포 차단 아님. DEC-001 기록 정정 + 콘솔 재확인 필요(사용자 결정 근거였음)",
+      "found_by": "SR-019 (security-reviewer, herdr re-review 대행)",
+      "date_found": "2026-07-26",
+      "owner": "PM / 사용자",
+      "title": "카카오 JS 키 허용 도메인 제한이 실효가 없다 - 운영 도메인이 목록에 없고, no-referrer 요청은 그대로 통과",
+      "evidence": [
+        "실측 2회(12:44 · 12:51, 결과 동일). Referer 없음 -> HTTP 200 으로 SDK 본문 정상 수신(감사자 PC 에서)",
+        "Referer: https://realestate.utilverse.info/ -> HTTP 401 {\"errorType\":\"AccessDeniedError\",\"message\":\"domain mismatched! caller=https://realestate.utilverse.info. check out registered web domains.\"}",
+        "http:// 변형 · https://utilverse.info · http://localhost:5173 도 전부 401 -> 등록 허용목록에 운영 도메인이 없다",
+        "그런데도 지도는 뜬다: 우리 nginx 가 Referrer-Policy: no-referrer 를 주므로 브라우저가 SDK 요청에 Referer 를 싣지 않고, 카카오는 Referer 가 없으면 통과시킨다",
+        "결과(a): DEC-001 이 보완책으로 기록한 '카카오 JS 키 허용 도메인 제한 등록 완료'는 실제로 아무도 막지 않는다 - 누구나 no-referrer 로 우리 키를 쓸 수 있다(감사자가 실제로 200 수신)",
+        "결과(b): 숨은 결합 - 나중에 Referrer-Policy 를 strict-origin-when-cross-origin 등으로 '개선'하면 그 순간 지도가 죽는다. 인과를 아는 사람이 없으면 원인 추적이 매우 어렵다",
+        "피해 상한은 DEC-001 이 이미 수용한 '일일 호출 한도 소진'과 동일하며 우리 데이터·세션과 무관하다 -> 배포 차단은 아니다"
+      ],
+      "pass_conditions": [
+        "카카오 개발자 콘솔 웹 플랫폼 도메인에 https://realestate.utilverse.info 가 실제 등록됐는지 재확인(오타·다른 앱 등록 가능성)",
+        "등록 후에도 no-referrer 우회는 남으므로 DEC-001 의 보완책 목록에서 이 항목의 실효성을 하향 기재",
+        "Referrer-Policy 와 카카오맵 동작의 결합을 deploy/nginx-realestate.conf 주석에 1줄 남길 것"
+      ],
+      "note": "사용자가 이 보완책을 위험 수용의 근거 하나로 삼았으므로 사실관계를 정정해 알려야 한다. 결정 자체(재발급 안 함)는 여전히 합리적이다."
+    },
+    {
+      "id": "SR19-2",
+      "verdict": "OPEN",
+      "severity": "low",
+      "blocks": "없음 - 비차단",
+      "found_by": "SR-019 (security-reviewer, herdr re-review 대행)",
+      "date_found": "2026-07-26",
+      "owner": "re-arch",
+      "title": "test_deploy_config.py 가 CSP 출처를 '넓히는' 변경을 잡지 못한다 - 변이 18종 중 2종 미탐지",
+      "evidence": [
+        "M11: script-src 에 https://cdn.jsdelivr.net 추가 -> 15개 테스트 전부 초록(미탐지)",
+        "M12: img-src 에 data: 추가 -> 전부 초록(미탐지)",
+        "나머지 16종(출처 제거·와일드카드·unsafe-inline/eval 추가·always 누락·변수참조 깨기·default-src */connect-src * ·frame-ancestors 완화·base-uri 제거·object-src 완화·문서 절차 삭제)은 전부 탐지",
+        "원인: 테스트가 '필요한 출처가 있는가'만 단언하고 '집합이 정확한가'는 보지 않는다",
+        "방향성 문제다 - 좁히는 실수는 지도가 죽어 바로 드러나지만, 넓히는 변경은 조용히 방어만 샌다. script-src 가 이 CSP 의 핵심이라 더 위험하다"
+      ],
+      "pass_conditions": [
+        "지시어별 정확한 집합 일치 단언 추가 - 예: set(_directive('script-src')) == {\"'self'\", 'https://dapi.kakao.com', 'https://t1.daumcdn.net'}",
+        "img-src·connect-src·style-src 도 동일하게 집합으로 못박기"
+      ],
+      "note": "현재 값 자체는 정확하다(SDK 원본 대조로 검증). 값을 지키는 그물의 한쪽이 비어 있다는 뜻이다."
+    },
+    {
+      "id": "SR19-3",
+      "verdict": "OPEN",
+      "severity": "low",
+      "blocks": "없음 - 비차단",
+      "found_by": "SR-019 (security-reviewer, herdr re-review 대행)",
+      "date_found": "2026-07-26",
+      "owner": "re-data",
+      "title": "새 위생 검사기가 산문에 인용된 비밀을 놓친다 - 하필 SR17-2 의 원래 형태",
+      "evidence": [
+        "진짜 유출 7종을 문서에 심어 재현: 6종 탐지, 1종 미탐지",
+        "미탐지: \"계정 비밀번호는 `<유출값>` 였다\" 같은 산문 인용 - _SECRET_ASSIGN 이 '이름 [=:] 값' 구분자를 요구하는데 한국어 산문에는 그 구분자가 없다",
+        "SR17-2 사고가 정확히 이 형태였다(리뷰 로그가 결함을 설명하려고 평문 비밀번호를 인용)",
+        "즉 형태 기반으로 교체하면서 일반성은 얻고 원래 사례는 놓쳤다. 현재 실제 위반은 0건이라 비차단",
+        "긍정 확인: SEC-3(fullmatch) 수정은 실효 - 진짜 키에 test/sample 이 우연히 포함된 2케이스를 모두 잡는다. 자리표시자 3종은 정상 면제(오탐 0)",
+        "덤 실증: 이 SR-019 초안이 예시 값을 그럴듯하게 적었더니 검사기가 리뷰 로그 2줄을 즉시 잡았다 - 리뷰어 문서에도 실제로 작동한다"
+      ],
+      "pass_conditions": [
+        "형태 검사를 유지하되 알려진 유출값의 sha256 지문 목록을 함께 두고 대조(평문을 남기지 않으면서 특정 값도 잡힌다)",
+        "_SECRET_ASSIGN 에 한국어 키워드(비밀번호·인증키·비밀키) 추가"
+      ],
+      "note": "SR-018 이 권고한 '해시 지문' 방식을 형태 검사와 병행하면 두 형태가 모두 닫힌다."
+    },
+    {
+      "id": "SR19-4",
+      "verdict": "OPEN",
+      "severity": "info",
+      "blocks": "없음 - 비차단",
+      "found_by": "SR-019 (security-reviewer, herdr re-review 대행)",
+      "date_found": "2026-07-26",
+      "owner": "re-arch",
+      "title": "'CSP 가 세션 라이딩을 막는다'는 표현이 과하다 - 실제 기여는 주입 코드의 실행 차단이다",
+      "evidence": [
+        "세션 라이딩의 본체 fetch('/api/v1/me/profile',{credentials:'include'}) 는 같은 오리진이라 connect-src 'self' 가 허용한다 - CSP 로는 원리상 막을 수 없다",
+        "X-Requested-With 요구(SR-016)도 XSS 에는 무력하다(주입 스크립트가 헤더를 붙이면 그만) - 그건 고전 CSRF 방어다",
+        "CSP 의 실제 기여: script-src 에 'unsafe-inline'·'unsafe-eval' 이 둘 다 없어 인라인 스크립트·onerror 핸들러·javascript: URL·eval 이 애초에 실행되지 않는다",
+        "스크립트가 실행됐다고 가정하면 CSP 가 못 막는 반출 경로가 남는다: location.href/window.open 등 네비게이션(navigate-to 지시어가 표준에서 빠져 브라우저에 없음)과 WebRTC(지시어 자체가 없음)",
+        "차단되는 경로는 확인함: fetch/XHR/WebSocket/sendBeacon/a-ping · CSS background url · @import · 폰트 · object/embed · base 하이재킹 · 폼 탈취 · 프레임 삽입",
+        "표현이 문제인 이유: 'CSP 가 막는다'로 적어 두면 다음 사람이 CSP 를 믿고 다른 층(입력 이스케이프·최소권한 API)을 소홀히 한다"
+      ],
+      "pass_conditions": [
+        "deploy/nginx-realestate.conf 주석과 backend/tests/test_deploy_config.py 독스트링의 표현을 '주입 코드의 실행을 막아 세션 라이딩에 이르지 못하게 한다'로 정정"
+      ],
+      "note": "값을 고칠 필요는 없다(CSP 자체는 옳다). 기록의 정확도 문제이며, SR18-1 과 같은 종류다."
+    },
+    {
+      "id": "SR19-5",
+      "verdict": "OPEN",
+      "severity": "info",
+      "blocks": "없음 - 비차단",
+      "found_by": "SR-019 (security-reviewer, herdr re-review 대행)",
+      "date_found": "2026-07-26",
+      "owner": "re-arch",
+      "title": "libraries=clusterer 로 외부 스크립트를 받지만 MarkerClusterer 를 한 번도 쓰지 않는다",
+      "evidence": [
+        "frontend/src/components/MapView.tsx:38 이 &libraries=clusterer 로 로더를 부르고, 로더가 t1.daumcdn.net/mapjsapi/js/libs/clusterer/1.1.1/clusterer.js(10,549B)를 추가로 붙인다",
+        "저장소 전수 grep: 프론트에서 'clusterer' 언급은 이 로더 URL 1줄뿐 - MarkerClusterer 사용 0건(서버 level 기반 자체 클러스터링 + CustomOverlay 사용)",
+        "CSP 는 넓어지지 않는다(같은 t1.daumcdn.net 이라 script-src 변화 없음) - 그래서 info",
+        "다만 clusterer.js 에는 this._content.innerHTML = b.getText(i) 가 있다(클러스터 개수 텍스트). 우리가 안 쓰므로 도달 불가지만, 쓰지 않는 코드를 실행 컨텍스트에 올려 둘 이유는 없다"
+      ],
+      "pass_conditions": [
+        "MapView.tsx 의 로더 URL 에서 &libraries=clusterer 제거(자체 클러스터링을 계속 쓸 경우)"
+      ],
+      "note": "성능·공격표면 양쪽에서 작은 이득. 나중에 MarkerClusterer 를 실제로 도입하면 되돌리면 된다."
+    },
+    {
+      "id": "GEO-8",
+      "verdict": "OPEN",
+      "severity": "medium",
+      "blocks": "없음 - 배포 후 과제",
+      "found_by": "CR-023 (code-reviewer, herdr re-review 대행)",
+      "date_found": "2026-07-26",
+      "owner": "re-data",
+      "title": "GEO-6 새 규칙에서 걸리는 70행 - 지우지 말고 '괄호 보존 매칭'으로 고칠 것",
+      "evidence": [
+        "새 different_parcel 규칙으로 현재 DB 를 재판정하면 29그룹 / 70행이 걸린다(내가 직접 재판정, 담당자 보고와 일치). 전부 부동산원 미매칭이라 코드가 판정할 근거가 없던 부류다",
+        "지금 비우면 확보율이 -1.11%(70/6,303) 영구 하락한다 — 그런데 되찾을 수 있는 좌표다",
+        "전제 확인(직접 조회): 부동산원에 '삼환나띠르빌(1002-7)' ~ '(1002-22)' 가 문자 그대로 있고 각각 별개 단지고유번호·세대수(15/30/19/16/16/15/15)를 가진다",
+        "우리 6행이 미매칭인 원인도 확정: _strip_parens 가 괄호를 떼어 6행이 모두 '삼환나띠르빌'로 축약되고, 같은 법정동의 부동산원 후보 7개도 똑같이 축약돼 후보 7개 = ambiguous -> 매칭 포기(match_complex 의 올바른 안전동작)",
+        "따라서 괄호를 보존해 매칭하면 1:1 로 붙고, 각자의 지번주소로 정확한 좌표를 따로 받을 수 있다 — 지우는 대신 고치는 경로가 실재한다",
+        "배포를 막지 않는 근거: 70행 전부 같은 법정동 안(법정동 교차 0 · 부동산원 모순 0) · 코드는 이미 옳아 새 좌표는 이 문제를 만들지 않는다 · 70행 중 최근 36개월 거래 5건 이상은 23건 · backup.complex_geom_* 4종으로 되돌릴 수 있다",
+        "결정적으로 좌표를 소비하는 입지 데이터가 아직 한 행도 없다 — school_district·poi·road_segment·transit_plan·redevelopment·market_index 전부 0행이라 location_finding 은 항상 '판단 보류'이고, 좌표는 현재 지도 핀과 F4 폴백에만 쓰인다"
+      ],
+      "pass_conditions": [
+        "(1) 매칭 단계에서 괄호 지번을 보존한 원문으로도 대조해 1:1 매칭을 붙인다(현재 comparable_names 는 괄호를 떼어 ambiguous 를 만든다)",
+        "(2) 매칭이 붙은 행은 주소 경로로 각자의 좌표를 재확보한다 — verify_address 를 통과한 것만",
+        "(3) 그래도 안 붙는 행만 마지막에 무효화 검토. 순서를 지킬 것(고치기 -> 지우기)",
+        "(4) 처리 후 ingest_report 에 '같은 점 · 다른 괄호 지번' 건수를 0 으로 확인"
+      ],
+      "note": "담당자가 '지우는 대신 고칠 수 있다'며 PM 판단으로 넘긴 것은 옳다. 감사자가 전제(부동산원에 괄호 이름이 존재)를 직접 조회로 확인했고, 지금 비우는 선택지는 택하지 말 것을 권고한다."
+    },
+    {
+      "id": "DEP-3",
+      "verdict": "OPEN",
+      "severity": "low",
+      "blocks": "없음 - 배포 후 과제",
+      "found_by": "CR-023 (code-reviewer, herdr re-review 대행)",
+      "date_found": "2026-07-26",
+      "owner": "re-arch",
+      "title": "nginx 리슨 문법 버전 회귀가 테스트로 고정돼 있지 않다 - 배포를 통째로 막았을 결함인데 그물이 없다",
+      "evidence": [
+        "변이: `listen 443 ssl http2;` 를 `listen 443 ssl;` + `http2 on;`(nginx 1.25.1+ 문법)으로 되돌림 -> 전체 테스트 0 failed, SURVIVED",
+        "서버 호스트 nginx 는 1.18.0(Ubuntu)이라 `http2 on;` 은 `unknown directive` 로 nginx -t 가 실패하고 배포 절차가 §5-5(3)에서 막힌다 — 담당자가 배포 전에 실제로 겪고 고친 결함이다",
+        "test_deploy_config.py 는 CSP·보안헤더·중괄호 균형은 촘촘히 보지만 listen 디렉티브는 보지 않는다",
+        "현재 설정 파일 자체는 올바르다(1.18 문법). 결함이 아니라 회귀 방지망의 공백이다"
+      ],
+      "pass_conditions": [
+        "`http2 on;` 이 나타나지 않고 `listen ... ssl http2` 형태가 쓰였음을 단언하는 테스트 1건 추가(서버 nginx 1.18 근거를 주석으로)",
+        "가능하면 호스트 nginx 버전을 DEPLOY.md 사전점검 항목으로 명시해 1.25+ 로 올릴 때 함께 바꾸도록 유도"
+      ],
+      "note": "감사자는 /etc/nginx 를 건드리지 않고 /tmp 격리 prefix 에 활성 vhost 전부를 복사해 결합 nginx -t 를 통과시켰다 — 격리 단독 검증만으로는 duplicate listen options 위험을 못 잡는다는 점도 함께 기록한다."
+    },
+    {
+      "id": "MARK-1",
+      "verdict": "OPEN",
+      "severity": "low",
+      "blocks": "없음 - 배포 후 과제",
+      "found_by": "CR-023 (code-reviewer, herdr re-review 대행)",
+      "date_found": "2026-07-26",
+      "owner": "frontend-react",
+      "title": "detach 의 keydown 리스너 제거가 테스트로 고정돼 있지 않다 (CR18-6 절반)",
+      "evidence": [
+        "변이: detach() 에서 removeEventListener('keydown', ...) 만 제거 -> 30개 마커 테스트 0 failed, SURVIVED. click 쪽을 제거하면 잡힌다",
+        "오버레이가 setMap(null) 로 지도에서 떨어지면 요소가 GC 대상이 되므로 실제 누수 피해는 크지 않다",
+        "그러나 CR18-6('리스너를 명시적으로 정리한다')의 취지가 절반만 고정돼 있어, 나중에 요소를 재사용하는 최적화가 들어오면 실제 누수가 된다"
+      ],
+      "pass_conditions": [
+        "detach 후 keydown(Enter/Space) 이벤트를 발사해 콜백이 불리지 않음을 단언하는 테스트 1건"
+      ],
+      "note": "부수 관찰 MARK-2(low): patch() 가 yAnchor/xAnchor 를 반영하지 않는다 — 현재 단지 1.35·군집 0.5 로 키별 상수라 무해하나, MarkerSpec 에 필드가 있어 나중에 조건부로 바꾸면 조용히 무시된다. MARK-3(info): setZIndex?./setPosition?. 이 옵셔널 호출인데 호출 성공과 무관하게 추적 상태를 갱신해, 메서드 없는 SDK 에서는 '반영했다고 기록만' 남는다(실 카카오 CustomOverlay 는 둘 다 제공하므로 운영 영향 없음)."
+    },
+    {
+      "id": "GEO-7",
+      "verdict": "RESOLVED",
+      "severity": "medium",
+      "blocks": "없음 - 해소됨",
       "found_by": "CR-022 (code-reviewer, herdr re-review 대행)",
       "date_found": "2026-07-26",
       "owner": "re-data",
@@ -66,13 +245,16 @@
         "(3) 불일치 건은 주소 좌표로 덮지 말고 무효화 후 주소 경로로 재확보 - verify_address 를 통과한 것만 들어가게 한다(GEO-3 정리와 같은 절차)",
         "(4) 결과를 exact/variant 로 나눠 보고(GEO-5 에서 이미 그렇게 바뀜)"
       ],
-      "note": "판정: 지금이 아니라 후속(later). 다만 '언젠가'가 아니라 G5 배포 전 필수로 못 박는다 - 결정 규칙을 먼저 정하고 돌릴 것."
+      "note": "판정: 지금이 아니라 후속(later). 다만 '언젠가'가 아니라 G5 배포 전 필수로 못 박는다 - 결정 규칙을 먼저 정하고 돌릴 것.",
+      "resolved_by": "CR-023 (code-reviewer, herdr re-review 대행)",
+      "date_resolved": "2026-07-26",
+      "resolution": "4,530건 전수 스윕 -> 불일치 69건(내 추정 90) -> name_exact 65건만 무효화 후 주소 재확보 65/65 성공. 세 검증 항목 전부 확인: (1)임계 초과분만 걸린다(변이 3종 KILLED) (2)재확보가 검증을 우회하지 않는다 — 좌표 출처가 verify_address 통과분뿐이고 enrich_geom 의 충돌게이트·same_complex 를 다시 탄다(변이 3종 KILLED) (3)확보율 96.41% 불변을 직접 SQL 로 확인, kakao_address +65 / kakao_keyword -65 로 정확히 이동하고 충돌 169·법정동교차 0·부동산원모순 0 유지. APPLIABLE_METHODS 상수가 name_contains/name_fuzzy 반영을 코드로 막아 CLI 로도 못 넓힌다. 백업 pre_geo7 6303행·geo7 65행으로 복구 가능."
     },
     {
       "id": "GEO-6",
-      "verdict": "OPEN",
+      "verdict": "RESOLVED (규칙) · 데이터 정리는 GEO-8 로 승계",
       "severity": "low",
-      "blocks": "없음 - 비차단",
+      "blocks": "없음 - 배포를 막지 않음",
       "found_by": "CR-022 (code-reviewer, herdr re-review 대행)",
       "date_found": "2026-07-26",
       "owner": "re-data",
@@ -89,53 +271,10 @@
         "괄호 안 숫자가 지번인지 동 번호인지 먼저 가른 뒤(부동산원 주소를 아는 이웃 단지와 대조하거나 자릿수·범위 휴리스틱) 본번 상이 시 공유를 막을 것",
         "16그룹 37단지를 조사 대상 목록으로 남기고 결과를 ingest_report 에 노출"
       ],
-      "note": "담당자가 '남은 169건이 전부 옳다고 주장하지 않는다' 고 한 태도는 적절하다. 이 항목은 그 미주장 영역에 아직 쓰지 않은 근거(괄호 안 본번)가 하나 남아 있다는 뜻이며, 주장을 뒤집으라는 요구가 아니다."
-    },
-    {
-      "id": "SEC-3",
-      "verdict": "OPEN",
-      "severity": "low",
-      "blocks": "없음 - 비차단",
-      "found_by": "CR-022 (code-reviewer, herdr re-review 대행)",
-      "date_found": "2026-07-26",
-      "owner": "PM / re-arch",
-      "title": "위생 검사기의 _SYNTHETIC 예외가 부분 문자열 일치라 진짜 비밀을 면제한다",
-      "evidence": [
-        "tests/test_script_hygiene.py 의 _SYNTHETIC 이 값 전체에 대해 search() 를 쓴다 - 값 안 아무데나 test·secret·example·fake·dummy·placeholder 가 부분 문자열로 들어 있으면 통째로 면제된다",
-        "직접 주입해 확인: password = \"Str0ngTestPassw0rd99\" -> 면제(통과) / password = \"MySecretRealValue123\" -> 면제(통과). 둘 다 진짜 비밀이면 잡혀야 한다",
-        "사람이 짓는 비밀번호에 Test·Secret 이 섞이는 것은 흔하고, 실제 사고(SR17-2)도 사람이 지은 비밀번호였다",
-        "나머지 10개 케이스는 정상 판정 - 검사기 자체는 자기충족적이지 않고 SR18-3 의 지적(값을 조각내 저장소에 남기고 자기 자신을 면제)은 제대로 해소됐다",
-        "1차 방어(AST 리터럴 검사 + 런타임 비밀번호 생성)가 유효하므로 이건 심층 방어의 그물이다"
-      ],
-      "pass_conditions": [
-        "_SYNTHETIC 을 값 전체 일치(fullmatch)로 좁히거나, 마커가 값의 대부분을 차지할 때만 면제하도록 조건을 강화",
-        "위 2개 케이스를 회귀 테스트로 고정(진짜 비밀인데 단어가 섞인 값이 잡히는지)"
-      ],
-      "note": "보안 원장(SR) 소관 항목과 겹칠 수 있다 - 코드리뷰에서 발견했으므로 여기 기록하되 처리 주체는 PM 이 정한다. security_review 키는 이 라운드에서 건드리지 않았다."
-    },
-    {
-      "id": "SR18-3",
-      "verdict": "OPEN",
-      "severity": "medium",
-      "blocks": "없음 - 비차단(G5 배포 전 필수 · push 전 권고). 해당 값을 다른 곳에 재사용했다면 즉시 차단으로 승격",
-      "found_by": "SR-018 (security-reviewer, herdr re-review 대행)",
-      "date_found": "2026-07-26",
-      "owner": "re-data",
-      "title": "SR17-2 로 유출된 비밀번호가 아직 커밋 대상 파일에서 복원된다 - 검사기가 구조적으로 자기를 면제한다",
-      "evidence": [
-        "backend/tests/test_script_hygiene.py:94 가 유출 비밀번호를 두 조각의 문자열 연결로 적어 둔다 - 연결은 파싱 시점에 합쳐지므로 이 줄을 읽는 사람에게 값은 그대로 보인다",
-        "쪼갠 이유는 오직 이 테스트 자신의 스캔(.py 도 대상에 포함)에 걸리지 않기 위해서다 - 검사기가 자기를 면제하는 구조",
-        "origin 은 공개 저장소(github.com/wansoo88/realestate)이고 커밋 이력은 되돌릴 수 없다",
-        "완화(차단하지 않은 근거): SR17-2 의 차단 논거는 '동작하는 자격증명'이었는데 그 계정이 없다 - 운영 DB 직접 조회 결과 app_user 0행·user_profile 0·recommendation_job 0. 인증 표면이 사라져 CWE-798 -> CWE-200(정보노출)으로 강등",
-        "남는 실질 위험: 비밀번호 패턴 노출과 그 값의 재사용 가능성",
-        "관련: 같은 우회 기법(문자열 연결)이 SR18-5 의 AST 검사 미탐지 변형 3번과 동일하다"
-      ],
-      "pass_conditions": [
-        "값을 파일에 적지 말고 금지값의 sha256 지문만 커밋 - 파일 안의 토큰을 훑어 지문이 일치하면 FAIL(자기면제가 사라진다)",
-        "또는 금지값을 미추적 파일/환경변수에서 읽는다",
-        "사용자 확인: 이 비밀번호를 다른 서비스에 재사용한 적이 있는가 - 있으면 해당 서비스 비밀번호도 변경"
-      ],
-      "note": "차단 판단을 일부러 남긴다: 계정이 살아 있었다면 SR17-2 와 동일하게 high·차단이었다. 삭제가 확인돼 강등한 것이므로, 계정 재생성이나 값 재사용이 있으면 판정이 뒤집힌다."
+      "note": "담당자가 '남은 169건이 전부 옳다고 주장하지 않는다' 고 한 태도는 적절하다. 이 항목은 그 미주장 영역에 아직 쓰지 않은 근거(괄호 안 본번)가 하나 남아 있다는 뜻이며, 주장을 뒤집으라는 요구가 아니다.",
+      "resolved_by": "CR-023 (code-reviewer, herdr re-review 대행)",
+      "date_resolved": "2026-07-26",
+      "resolution": "괄호 안 지번 표기 전체(본번-부번)가 양쪽에 있고 다르면 다른 단지로 판정(different_parcel). 부동산원 마스터가 근거 — 삼환나띠르빌은 7개 단지이고 세대수가 전부 다르다. 내가 CR-022 에서 제안한 '본번 비교'는 뉴월드(402-42) vs (402-120)로 반증됐고, 담당자가 더 정확한 규칙으로 바꾼 뒤 그 반례를 테스트로 박았다. 변이 4종 전부 KILLED(분기삭제 8 · 본번만비교 3 · 한쪽만있어도 2 · 동표기 오인 3). 정상 공유는 깨지지 않는다 — 양쪽 다 있을 때만 판정하고 동 목록 표기는 보지 않는다. 데이터 70행 정리는 '지우지 말고 괄호 보존 매칭으로 고친다'가 옳아 GEO-8 로 승계한다."
     },
     {
       "id": "SR18-1",
@@ -241,9 +380,9 @@
     },
     {
       "id": "SR18-7",
-      "verdict": "OPEN",
+      "verdict": "RESOLVED",
       "severity": "info",
-      "blocks": "없음 - 비차단",
+      "blocks": "없음 - 해소됨",
       "found_by": "SR-018 (security-reviewer, herdr re-review 대행)",
       "date_found": "2026-07-26",
       "owner": "re-data",
@@ -256,7 +395,10 @@
       "pass_conditions": [
         "RateLimiter 인스턴스 1개를 두 검색기가 공유하도록 변경(또는 지오코더 계층에서 1회만 wait)"
       ],
-      "note": "G4(rate limit 준수) 자체는 지켜진다 - 모든 호출 앞에 wait 가 있다. 간격의 의미가 절반이 되는 것이 문제다."
+      "note": "G4(rate limit 준수) 자체는 지켜진다 - 모든 호출 앞에 wait 가 있다. 간격의 의미가 절반이 되는 것이 문제다.",
+      "resolved_by": "CR-023 (code-reviewer, herdr re-review 대행)",
+      "date_resolved": "2026-07-26",
+      "resolution": "build_geocoder() 가 RateLimiter 를 하나만 만들어 키워드·주소 백엔드에 공유한다. 변이(주소 백엔드에 별도 limiter 생성) -> KILLED 1 로 회귀가 고정됨을 직접 확인. address_only 면 키워드 백엔드를 NullPlaceSearch 로 두어 쿼터를 낭비하지 않는다. rate_limiter/backends 프로퍼티로 배선을 외부에서 검증 가능하게 했고 가짜 시계로 실대기 없이 테스트한다. ※ 이 항목은 SR 원장에도 등재돼 있으나 code_review 는 코드 배선 관점만 판정했다 — security_review 키는 건드리지 않았다."
     },
     {
       "id": "SR18-8",
@@ -552,10 +694,62 @@
         "한계 정직 기재: 고정 지연은 평균은 맞추나 분산이 다르다(Argon2 는 부하에 흔들리고 고정 지연은 안 흔들림). 정밀 측정에는 구분 여지가 남아 완전 해소는 아니다"
       ],
       "ledger_correction": "security-review-log.md:135 의 '계정 열거 ✅ 차단' 판정을 '⚠️ 부분'으로 정정했다. 근거 테스트가 응답 본문·상태코드만 비교했고 타이밍과 register 409 를 보지 않은 과잉 주장이었다(내가 쓴 판정)."
+    }
+  ],
+  "resolved_findings": [
+    {
+      "id": "SEC-3",
+      "verdict": "RESOLVED",
+      "severity": "low",
+      "blocks": "없음 - 비차단",
+      "found_by": "CR-022 (code-reviewer, herdr re-review 대행)",
+      "date_found": "2026-07-26",
+      "owner": "PM / re-arch",
+      "title": "위생 검사기의 _SYNTHETIC 예외가 부분 문자열 일치라 진짜 비밀을 면제한다",
+      "evidence": [
+        "tests/test_script_hygiene.py 의 _SYNTHETIC 이 값 전체에 대해 search() 를 쓴다 - 값 안 아무데나 test·secret·example·fake·dummy·placeholder 가 부분 문자열로 들어 있으면 통째로 면제된다",
+        "직접 주입해 확인: password = \"Str0ngTestPassw0rd99\" -> 면제(통과) / password = \"MySecretRealValue123\" -> 면제(통과). 둘 다 진짜 비밀이면 잡혀야 한다",
+        "사람이 짓는 비밀번호에 Test·Secret 이 섞이는 것은 흔하고, 실제 사고(SR17-2)도 사람이 지은 비밀번호였다",
+        "나머지 10개 케이스는 정상 판정 - 검사기 자체는 자기충족적이지 않고 SR18-3 의 지적(값을 조각내 저장소에 남기고 자기 자신을 면제)은 제대로 해소됐다",
+        "1차 방어(AST 리터럴 검사 + 런타임 비밀번호 생성)가 유효하므로 이건 심층 방어의 그물이다"
+      ],
+      "pass_conditions": [
+        "_SYNTHETIC 을 값 전체 일치(fullmatch)로 좁히거나, 마커가 값의 대부분을 차지할 때만 면제하도록 조건을 강화",
+        "위 2개 케이스를 회귀 테스트로 고정(진짜 비밀인데 단어가 섞인 값이 잡히는지)"
+      ],
+      "note": "보안 원장(SR) 소관 항목과 겹칠 수 있다 - 코드리뷰에서 발견했으므로 여기 기록하되 처리 주체는 PM 이 정한다. security_review 키는 이 라운드에서 건드리지 않았다.",
+      "resolved_by": "SR-019 (security-reviewer, herdr re-review 대행)",
+      "date_resolved": "2026-07-26"
+    },
+    {
+      "id": "SR18-3",
+      "verdict": "RESOLVED",
+      "severity": "medium",
+      "blocks": "없음 - 비차단(G5 배포 전 필수 · push 전 권고). 해당 값을 다른 곳에 재사용했다면 즉시 차단으로 승격",
+      "found_by": "SR-018 (security-reviewer, herdr re-review 대행)",
+      "date_found": "2026-07-26",
+      "owner": "re-data",
+      "title": "SR17-2 로 유출된 비밀번호가 아직 커밋 대상 파일에서 복원된다 - 검사기가 구조적으로 자기를 면제한다",
+      "evidence": [
+        "backend/tests/test_script_hygiene.py:94 가 유출 비밀번호를 두 조각의 문자열 연결로 적어 둔다 - 연결은 파싱 시점에 합쳐지므로 이 줄을 읽는 사람에게 값은 그대로 보인다",
+        "쪼갠 이유는 오직 이 테스트 자신의 스캔(.py 도 대상에 포함)에 걸리지 않기 위해서다 - 검사기가 자기를 면제하는 구조",
+        "origin 은 공개 저장소(github.com/wansoo88/realestate)이고 커밋 이력은 되돌릴 수 없다",
+        "완화(차단하지 않은 근거): SR17-2 의 차단 논거는 '동작하는 자격증명'이었는데 그 계정이 없다 - 운영 DB 직접 조회 결과 app_user 0행·user_profile 0·recommendation_job 0. 인증 표면이 사라져 CWE-798 -> CWE-200(정보노출)으로 강등",
+        "남는 실질 위험: 비밀번호 패턴 노출과 그 값의 재사용 가능성",
+        "관련: 같은 우회 기법(문자열 연결)이 SR18-5 의 AST 검사 미탐지 변형 3번과 동일하다"
+      ],
+      "pass_conditions": [
+        "값을 파일에 적지 말고 금지값의 sha256 지문만 커밋 - 파일 안의 토큰을 훑어 지문이 일치하면 FAIL(자기면제가 사라진다)",
+        "또는 금지값을 미추적 파일/환경변수에서 읽는다",
+        "사용자 확인: 이 비밀번호를 다른 서비스에 재사용한 적이 있는가 - 있으면 해당 서비스 비밀번호도 변경"
+      ],
+      "note": "차단 판단을 일부러 남긴다: 계정이 살아 있었다면 SR17-2 와 동일하게 high·차단이었다. 삭제가 확인돼 강등한 것이므로, 계정 재생성이나 값 재사용이 있으면 판정이 뒤집힌다.",
+      "resolved_by": "SR-019 (security-reviewer, herdr re-review 대행)",
+      "date_resolved": "2026-07-26"
     },
     {
       "id": "SR15-4",
-      "verdict": "OPEN",
+      "verdict": "RESOLVED",
       "severity": "medium",
       "blocks": "커밋 게이트 아님 · G5 배포 절차의 차단 조건",
       "found_by": "SR-015 (SR15-1 통과조건 (B)-a 로 지목) -> SR-016 에서 독립 항목으로 승격",
@@ -573,10 +767,10 @@
         "지도가 깨지면 Content-Security-Policy-Report-Only 로 먼저 올리고 관측 후 강제 전환 허용 ('완벽한 CSP 아니면 안 넣는다'가 최악)",
         "최소안: default-src 'self'; script-src 'self' https://dapi.kakao.com https://*.daumcdn.net; img-src 'self' data: https://*.daumcdn.net https://*.kakaocdn.net; connect-src 'self' https://dapi.kakao.com; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
       ],
-      "note": "커밋을 막지 않는다(배포 시점 통제). security.md 2.1 '후속 과제 SR15-4' 에 팀이 스스로 기재한 계획과 일치하며, 본 판정은 그 계획에 '배포 체크리스트로 고정한다'는 강제력만 더한 것이다."
-    }
-  ],
-  "resolved_findings": [
+      "note": "커밋을 막지 않는다(배포 시점 통제). security.md 2.1 '후속 과제 SR15-4' 에 팀이 스스로 기재한 계획과 일치하며, 본 판정은 그 계획에 '배포 체크리스트로 고정한다'는 강제력만 더한 것이다.",
+      "resolved_by": "SR-019 (security-reviewer, herdr re-review 대행)",
+      "date_resolved": "2026-07-26"
+    },
     {
       "id": "SR17-1",
       "verdict": "RESOLVED",
@@ -1270,5 +1464,29 @@
       "CR18-7 — CustomOverlay 최대 500개를 diff 없이 전량 재생성. 실데이터가 들어오면 밀집지역 zoom>=13 에서 수백 개가 한 화면에 나온다. 통과선: id 기준 재사용 / 표시 상한 150~200 + 'N개 더' / 임계 초과 시 dot 강등 / 실측 프레임타임 첨부"
     ],
     "note": "코드리뷰 관점의 3단계 차단 항목(FE-1·FE-2)이 모두 해소됐다. 최종 3단계 완성 판정은 security_review(SR-015 라운드) 결과와 함께 내려야 한다 — 그쪽은 security-reviewer 소관이며 이 판정이 대신하지 않는다."
-  }
+  },
+  "decisions": [
+    {
+      "id": "DEC-001",
+      "date": "2026-07-26",
+      "topic": "노출된 API 키(MOLIT · 카카오 REST) 재발급 여부",
+      "decision": "재발급하지 않고 위험을 수용(accepted)",
+      "decided_by": "사용자",
+      "context": [
+        "MOLIT 키: 대화에 평문 입력됨(2026-07-25)",
+        "카카오 REST 키: 카카오 오류 응답('wrong appKey(...) format')이 우리가 보낸 키를 그대로 되돌려줘 에이전트 세션 출력에 1회 노출(2026-07-26)",
+        "SR-018 전수 스캔 결과 서버·저장소·git 이력에 흔적 0건 — 노출면은 로컬 대화 기록으로 한정",
+        "두 키 모두 조회 전용이며 금전·개인정보 유출 경로 아님. 최대 피해는 일일 호출 한도 소진"
+      ],
+      "residual_risk": "타인이 키를 사용하면 일일 한도가 소진되고 수집 배치가 실패한다. 그 실패가 '거래 없음'과 혼동되면 안 되므로 ingest_log 의 실패 기록으로 구분한다.",
+      "compensating_controls": [
+        "app/core/masking.py — 예외·로그·생성 문서 전 경로에서 키 마스킹(SR17-1, 실동작 확인)",
+        ".env gitignore + 서버 파일 권한 600(실동작 확인)",
+        "tests/test_script_hygiene.py — 커밋 대상에 비밀값이 들어가면 테스트 실패(실동작 확인: 리뷰어 문서 2줄을 실제로 반려)",
+        "⚠️ [정정 2026-07-26 · SR19-1] 카카오 JS 키 도메인 제한은 **현재 실효가 없다**. 실측: Referer 없음 → HTTP 200(누구나 사용 가능) / Referer=https://realestate.utilverse.info/ → 401 'domain mismatched'. 즉 허용목록에 운영 도메인이 반영되지 않았고, 우리 지도가 뜨는 이유는 nginx 의 Referrer-Policy: no-referrer 때문이다. → 사용자 콘솔 재확인 필요(키가 속한 앱에 등록됐는지). 숨은 결합: Referrer-Policy 를 나중에 '개선'하면 그 순간 지도가 죽는다."
+      ],
+      "revisit_if": "한도 소진·비정상 호출이 관측되거나, 키에 조회 외 권한이 추가되면 즉시 재발급한다.",
+      "status": "유효 — 단, 보완책 4번(도메인 제한)은 미작동 상태로 정정됨(SR19-1)"
+    }
+  ]
 }

@@ -203,6 +203,46 @@ docker compose -f docker-compose.deploy.yml logs api | tail -50
 > 이어지는 `certbot --nginx` 도 깨진 설정을 파싱하다 실패해 **절차가 막힌다.**
 > 그래서 HTTP 전용 부트스트랩 블록으로 먼저 발급받는다.
 
+**(0) 사전 문법검사 — 서버 상태를 전혀 바꾸지 않고 `nginx -t` 를 돌린다** (선택이지만 권장)
+
+`/etc/nginx` 를 건드리기 전에 **격리된 곳에서** 같은 nginx 바이너리로 문법을 본다.
+여기서 통과하면 (3)에서 실패할 이유가 거의 없다 — 실패는 곧 동거 서비스 위험이다.
+
+```bash
+T=$(mktemp -d); mkdir -p "$T/logs" "$T/cert"
+# 인증서는 문법검사용 자가서명이면 된다(실제 발급물과 무관, $T 안에서만 산다)
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=test" \
+  -keyout "$T/cert/privkey.pem" -out "$T/cert/fullchain.pem" 2>/dev/null
+
+sed -e "s|<APP_ROOT>|$(pwd)|g" \
+    -e "s|/etc/letsencrypt/live/realestate.utilverse.info|$T/cert|g" \
+    deploy/nginx-realestate.conf > "$T/realestate.conf"
+
+# error_log 는 main 컨텍스트에 둔다 — `-e` 옵션은 nginx 1.19.5+ 라 1.18 에서는 못 쓴다
+cat > "$T/nginx.conf" <<EOF
+error_log $T/logs/error.log;
+events {}
+http {
+    include $T/realestate.conf;
+}
+EOF
+
+nginx -t -c "$T/nginx.conf" -p "$T" -g "pid $T/nginx.pid;"
+rm -rf "$T"
+```
+> `-c/-p` 와 `$T` 안의 `error_log`·`pid` 로 설정·경로·로그·PID 를 전부 `$T` 로 돌리므로
+> **`/etc/nginx` 와 실행 중인 nginx 는 손대지 않는다.**
+> `syntax is ok / test is successful` 이 나와야 한다.
+> CSP 값은 `map` 으로 한 번만 정의되므로, 이 검사가 통과하면 세 블록의 값은 자동으로 같다.
+>
+> **이 검사가 실제로 결함을 하나 잡았다(2026-07-26).** 설정에 `http2 on;` 이 있었는데
+> 그 문법은 nginx 1.25.1+ 이고 이 서버는 **1.18.0** 이다. 그대로 (3)에 갔으면
+> `unknown directive "http2"` 로 절차가 막혔을 것이다 — 지금은 `listen ... ssl http2` 다.
+> 서버 nginx 버전은 `nginx -v` 로 확인한다.
+>
+> Report-Only 변형도 같은 방법으로 미리 검사할 수 있다(§5-5(3) 의 sed 를 `$T/realestate.conf`
+> 에 적용한 뒤 `nginx -t` 를 한 번 더).
+
 **(1) 부트스트랩 블록 배치 — HTTP 전용, 인증서 참조 없음**
 ```bash
 sudo mkdir -p /var/www/certbot
@@ -221,12 +261,26 @@ sudo ls -l /etc/letsencrypt/live/realestate.utilverse.info/fullchain.pem   # 존
 > **자동으로 고쳐 쓴다.** 동거 서비스 설정이 있는 서버에서 자동 수정은 위험하다.
 > `certonly` 는 인증서만 받고 설정은 건드리지 않는다.
 
-**(3) 본 설정으로 교체**
+**(3) 본 설정으로 교체 — 단, CSP 는 `Report-Only` 로 먼저 올린다 (SR15-4)**
+
+> ⚠️ **왜 두 단계인가.** CSP 를 잘못 좁히면 **지도가 죽는다.** 그런데 화면만 보면
+> "지도가 안 보인다"까지만 알 수 있고 원인은 못 찾는다(타일 이미지가 막힌 건지,
+> SDK 스크립트가 막힌 건지, 인라인 스타일이 막힌 건지). `Report-Only` 는
+> **막지 않고 위반만 보고**하므로, 지도가 정상 동작하는 상태에서 "무엇이 걸리는지"를
+> 먼저 눈으로 확인할 수 있다. 확인이 끝난 뒤 (5)에서 강제로 바꾼다.
+
 ```bash
 sudo cp deploy/nginx-realestate.conf /etc/nginx/sites-available/realestate.conf
 sudo sed -i "s|<APP_ROOT>|$(pwd)|g" /etc/nginx/sites-available/realestate.conf
 grep -n '<APP_ROOT>' /etc/nginx/sites-available/realestate.conf && \
   echo "치환 안 된 자리가 남았다 — 진행 금지"
+
+# CSP 만 Report-Only 로 바꾼다. 저장소 파일은 '강제'가 기본값이고,
+# 여기서 이름만 바꿔 붙인다 — 되돌릴 때는 (5)에서 원본을 다시 복사하면 된다.
+sudo sed -i 's/add_header Content-Security-Policy /add_header Content-Security-Policy-Report-Only /' \
+  /etc/nginx/sites-available/realestate.conf
+grep -c 'Content-Security-Policy-Report-Only' /etc/nginx/sites-available/realestate.conf
+# → 3 이어야 한다 (server · 정적자산 · /index.html). 3 이 아니면 진행 금지.
 
 # ⚠️ 반드시 문법 검사부터. 실패한 채 reload 하면 **동거 서비스까지 같이 죽는다.**
 sudo nginx -t
@@ -235,7 +289,44 @@ sudo nginx -t
 sudo systemctl reload nginx
 ```
 
-**(4) 자동 갱신 확인**
+**(4) Report-Only 확인 — 지도가 살아 있는가 · 무엇이 걸리는가**
+
+```bash
+# 헤더가 Report-Only 로 나오는지 (값은 길다 — 잘라서 본다)
+curl -sI https://realestate.utilverse.info/ | grep -i 'content-security-policy'
+```
+
+그다음 **데스크톱 브라우저로 실제 사이트를 연다.** DevTools 콘솔에서 확인한다:
+
+| 보이는 것 | 뜻 | 조치 |
+|---|---|---|
+| 지도가 뜨고 타일·마커가 정상 | 출처가 맞다 | (5) 로 진행 |
+| `Refused to ... because it violates ... "script-src"` 등 위반 | 빠뜨린 출처가 있다 | **강제 전환하지 말고** 위반에 찍힌 호스트를 PM 에 보고 |
+| `Refused to evaluate a string as JavaScript`(eval) 1건 | **정상이다** | 카카오 SDK 의 `try{eval("document.namespaces")}catch{}` (IE VML 감지). 차단돼도 지도는 동작한다. ⚠️ 이걸 보고 `'unsafe-eval'` 을 넣으면 CSP 의 핵심 방어가 무너진다 |
+
+> (선택) `style-src` 의 `'unsafe-inline'` 이 정말 필요한지 재보고 싶으면, **Report-Only
+> 상태에서만** 그 토큰을 빼고 reload 한 뒤 콘솔에 style 위반이 찍히는지 본다.
+> 위반이 없다면 빼도 된다. **강제 상태에서는 시험하지 말 것** — 그 순간 지도가 깨진다.
+>
+> 수집기(report-uri)를 두지 않은 이유: 받을 엔드포인트가 없고, nginx 는 `return 204`
+> 로는 **요청 본문을 읽지 않아** 위반 내용을 로그로 남기지 못한다. 본문을 파일로
+> 남기는 옵션(`client_body_in_file_only`)은 디스크가 87% 찬 이 서버에서 위험하다.
+> 1인 서비스라 **브라우저 콘솔 확인이 더 정확하고 싸다.**
+
+**(5) CSP 강제 전환 — 확인이 끝난 뒤에만**
+
+```bash
+# 저장소 원본을 다시 복사한다(원본이 '강제' 상태다 — sed 를 되돌리지 않는다)
+sudo cp deploy/nginx-realestate.conf /etc/nginx/sites-available/realestate.conf
+sudo sed -i "s|<APP_ROOT>|$(pwd)|g" /etc/nginx/sites-available/realestate.conf
+grep -c 'Content-Security-Policy-Report-Only' /etc/nginx/sites-available/realestate.conf
+# → 0 이어야 한다(강제). 0 이 아니면 진행 금지.
+
+sudo nginx -t && sudo systemctl reload nginx
+```
+전환 직후 **지도를 다시 한 번 연다.** 여기서 깨지면 (3)으로 되돌린다(Report-Only 재적용).
+
+**(6) 자동 갱신 확인**
 ```bash
 sudo certbot renew --dry-run
 ```
@@ -257,7 +348,7 @@ sudo nginx -t && sudo systemctl reload nginx
 curl -fsS https://realestate.utilverse.info/api/v1/health   # {"status":"ok","role":"api"}
 ```
 
-**(2) 보안헤더 — 4종이 전부 나와야 한다 (DEP-1 회귀 검사)**
+**(2) 보안헤더 — 5종이 전부 나와야 한다 (DEP-1 · SR15-4 회귀 검사)**
 
 `add_header` 는 상속되지 않으므로 **경로마다** 확인한다. 아래는 하나라도 빠지면
 `[실패]` 를 찍는다 — grep 결과를 눈으로 보고 넘기지 말 것(그렇게 해서 놓쳤던 항목이다).
@@ -268,7 +359,8 @@ check_headers() {
   out=$(curl -sI "$url")
   echo "  --- $url"
   for h in strict-transport-security x-frame-options \
-           x-content-type-options referrer-policy; do
+           x-content-type-options referrer-policy \
+           content-security-policy; do
     if grep -qi "^$h:" <<<"$out"; then echo "    [OK]   $h"
     else                               echo "    [실패] $h 없음"; fi
   done
@@ -283,7 +375,18 @@ ASSET=$(curl -s "$BASE/" | grep -oE '/assets/[^"]+\.js' | head -1)
 [ -n "$ASSET" ] && check_headers "$BASE$ASSET"
 ```
 `[실패]` 가 하나라도 있으면 **DEP-1 회귀**다. `nginx-realestate.conf` 에서 해당
-location 에 보안헤더 4종이 다시 적혀 있는지 확인한다.
+location 에 보안헤더 5종이 다시 적혀 있는지 확인한다.
+
+> ⚠️ `content-security-policy` 검사는 **강제 전환(§5-5(5)) 후에** 통과한다.
+> Report-Only 단계에서는 헤더 이름이 `content-security-policy-report-only` 라
+> 여기서 `[실패]` 로 찍히는 게 **정상**이다 — 그 상태로 §7 인수인계에 들어가지 말 것.
+> 값까지 보고 싶으면:
+> ```bash
+> curl -sI https://realestate.utilverse.info/index.html | \
+>   grep -i '^content-security-policy:' | tr ';' '\n'
+> ```
+> `script-src` 에 `'unsafe-eval'` 이나 `*` 가 보이면 **누가 손으로 넣은 것**이다 —
+> 저장소 원본에는 없다(`backend/tests/test_deploy_config.py` 가 막는다).
 
 **(3) 캐시 정책**
 ```bash
@@ -336,6 +439,7 @@ docker compose -f docker-compose.deploy.yml down -v    # ⚠️ realestate-pgdat
 | itsmine | **중지됨** — 다시 쓰려면 `resume-itsmine.sh`, 단 메모리가 다시 부족해진다 |
 | 추천 기능 | 202 만 반환, 완료되지 않음 (worker 미구현) |
 | 수집 데이터 | 없음 — 지도에 단지가 안 보인다. 실데이터 적재는 2차 |
+| CSP | **강제(enforce)** — §5-5(5)까지 마쳤을 때. Report-Only 로 남겨 두면 방어가 0 이다. `check_headers()` 로 확인 |
 | 세율 | `config/tax_rules.yaml` 마운트. 바뀌면 파일 교체 후 `docker compose restart api` |
 | 백업 | **미설정** — `pg_dump` 정기 백업이 없다. 2차 과제 |
 
@@ -350,4 +454,6 @@ docker compose -f docker-compose.deploy.yml down -v    # ⚠️ realestate-pgdat
 | 로그인이 503 `BUSY` | Argon2 동시 한도 | 정상 동작(SR8-1/8-2). 잦으면 `ARGON2_CONCURRENCY` 조정 — **단 메모리 재계산 먼저** |
 | nginx reload 실패 | `limit_req_zone` 이름 충돌 | `nginx -t` 메시지 확인. zone 이름 `re_api`/`re_auth` 를 다른 이름으로 |
 | 지도에 단지가 없음 | 수집 데이터 없음 | 정상 — 실데이터 적재는 2차 |
+| 지도가 아예 안 뜸 / 타일이 빈칸 | CSP 가 출처를 막음 | 브라우저 콘솔의 `Refused to load ...` 에 찍힌 호스트를 확인. **임시로 `*` 를 넣지 말고** §5-5(3)의 Report-Only 로 되돌린 뒤 PM 보고 |
+| 콘솔에 `Refused to evaluate a string as JavaScript` 1건 | 카카오 SDK 의 IE 감지용 `eval` | **정상.** try/catch 안이라 지도는 동작한다. `'unsafe-eval'` 을 넣지 말 것 |
 | db OOM-kill | 상한 192MB 초과 | `docker inspect realestate-db --format '{{.State.OOMKilled}}'`. PM 보고 후 조정 |

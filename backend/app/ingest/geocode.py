@@ -49,7 +49,8 @@ GEO-1 수정 후 미확보 1,307건의 사유는 검증불합격 749 + 검색0�
    '탑마을(경남)1'·'탑마을(기산)1' 이 같은 이름이 되어 한 점에 뭉친다(야탑동 실측).
 5. **좌표 충돌 차단** — 이미 다른 단지가 쓰는 점은 재사용하지 않는다(enrich_geom).
    단, MOLIT 이름 오염으로 한 단지가 여러 행으로 갈라진 경우
-   ('삼환나띠르빌(1002-10)' ~ '(1002-22)')는 같은 점을 **공유로 허용**하고 따로 센다.
+   ('대치우성아파트1동,2동' ~ '대치우성')는 같은 점을 **공유로 허용**하고 따로 센다.
+   ⚠️ 괄호 안 **지번**('(1002-10)')은 갈라진 이름이 아니라 **다른 단지**다 — GEO-6 참조.
 
 원칙은 그대로다 — **틀린 좌표는 좌표 없음보다 나쁘다.** 확보율이 떨어지더라도
 검증을 통과하지 못한 좌표는 넣지 않는다. 못 찾은 건 '정보 없음'으로 보인다.
@@ -503,6 +504,12 @@ class KakaoPlaceSearch:
         self._size = size
         self._limiter = rate_limiter or RateLimiter(min_interval_sec=0.3, jitter_sec=0.2)
 
+    @property
+    def rate_limiter(self) -> RateLimiter:
+        """속도 제한기. 키워드·주소 백엔드가 **같은 인스턴스를 공유해야** 실효 간격이
+        설정값대로 지켜진다(SR18-7). 호출부가 그걸 지켰는지 밖에서 확인할 수 있게 연다."""
+        return self._limiter
+
     def search(self, query: str) -> list[Place]:
         if not query.strip():
             return []
@@ -560,6 +567,11 @@ class KakaoAddressSearch:
         self._get = http_get
         self._size = size
         self._limiter = rate_limiter or RateLimiter(min_interval_sec=0.3, jitter_sec=0.2)
+
+    @property
+    def rate_limiter(self) -> RateLimiter:
+        """SR18-7 — 키워드 백엔드와 **같은 인스턴스**여야 한다. `KakaoPlaceSearch` 참조."""
+        return self._limiter
 
     def search(self, address: str) -> list[AddressHit]:
         if not address.strip():
@@ -628,6 +640,15 @@ class VerifiedGeocoder:
         #: 진단용 — 어느 경로로 확보/실패했는지. 'address' / 'keyword'
         self.last_path: str = ""
 
+    @property
+    def backends(self) -> tuple[PlaceSearch, AddressSearch]:
+        """(키워드, 주소) 백엔드. 배선이 맞는지 밖에서 확인할 수 있게 연다.
+
+        특히 **둘이 같은 속도 제한기를 쓰는지**(SR18-7)를 테스트가 확인한다 —
+        따로 만들면 카카오 실효 호출 간격이 설정값의 절반이 된다.
+        """
+        return self._search, self._address
+
     def _by_address(self, target: GeoTarget) -> tuple[GeoFix | None, bool]:
         """(좌표, 후보를 하나라도 봤는가)."""
         hits = self._address.search(target.address)
@@ -690,12 +711,67 @@ def name_phases(name: str) -> frozenset[str]:
 _phases = name_phases
 
 
+#: 괄호 안이 **지번 표기**인 토막: '(963)' '(1002-10)' '(1057-0)'.
+#: '동'이 들어간 것은 제외한다 — '(101동)' '(10,11,25동)' 은 **한 단지의 동 목록**이다.
+_PAREN_JIBUN = re.compile(r"^[\d]+(?:-[\d]+)?$")
+
+
+def paren_jibun(name: str) -> frozenset[str]:
+    """이름의 괄호 안 **지번 표기**들. 다르면 다른 단지다 (CR-022 GEO-6).
+
+    ⚠️ 2026-07-26 실측으로 뒤집힌 판단
+    ------------------------------------
+    이 모듈은 원래 '삼환나띠르빌(1002-10)' ~ '(1002-22)' 를 "지번만 다른 **한 단지**"로
+    보고 좌표 공유를 허용했다. 부동산원 마스터가 그걸 반증한다 — 그 표기들은
+    **각각 별개의 단지고유번호**를 가진 서로 다른 단지다:
+
+        11650100249289 삼환나띠르빌(1002-7)   15세대
+        11650100003082 삼환나띠르빌(1002-8)   30세대
+        11650100050186 삼환나띠르빌(1002-9)   19세대
+        11650100050187 삼환나띠르빌(1002-10)  16세대   ← '한 단지'가 아니다
+        ...
+
+    괄호 안 지번은 MOLIT 이 지어낸 표기가 아니라 **공시가격 단지명 표기 그대로**다
+    (부동산원 `name_price` 가 문자 하나까지 같다). 즉 이건 잡음이 아니라 **식별자**다.
+    좌표를 공유하던 16개 그룹/37단지를 전수 대조한 결과 **전부** 부동산원에서 서로 다른
+    단지로 확인됐다(뉴월드 402-42/402-120, 근상프리즘 4건, 광남캐스빌, 우성 23/1058 …).
+
+    본번만 비교하면 안 되는 이유도 같은 데이터가 보여준다 — '뉴월드(402-42)' 와
+    '뉴월드(402-120)' 는 **본번이 같은데도 다른 단지**다. 그래서 부번까지 포함한
+    **표기 전체**로 비교한다. 부번 0 은 '(666)'/'(666-0)' 두 표기가 섞이므로 정규화한다.
+    """
+    out: set[str] = set()
+    for m in _PAREN_GROUP.finditer(name or ""):
+        inner = m.group(1).strip().replace(" ", "")
+        if not _PAREN_JIBUN.match(inner):
+            continue                       # 동 목록·시공사·차수 표기는 여기서 보지 않는다
+        main, _, sub = inner.partition("-")
+        out.add(main if sub in ("", "0") else inner)
+    return frozenset(out)
+
+
+def different_parcel(a: GeoTarget, b: GeoTarget) -> bool:
+    """양쪽 다 괄호 지번 표기가 있고 **서로 다른가** — 다른 단지라는 증거.
+
+    한쪽이 비어 있으면 "모른다"이지 "다르다"가 아니다(different_reb_complex 와 같은 규약).
+    '롯데캐슬' 과 '롯데캐슬(1057-1)' 은 여기서 갈리지 않는다 — 앞의 것이 어느 지번인지
+    모르기 때문이다.
+    """
+    pa, pb = paren_jibun(a.name), paren_jibun(b.name)
+    return bool(pa) and bool(pb) and pa != pb
+
+
 def same_complex(a: GeoTarget, b: GeoTarget) -> bool:
     """두 행이 **같은 단지가 이름만 갈라진 것**인가(MOLIT 이름 오염).
 
-    '삼환나띠르빌(1002-10)' ~ '(1002-22)' 은 지번만 다른 한 단지다 — 같은 좌표가 맞다.
+    '대치우성아파트1동,2동' 과 '대치우성' 은 동 나열만 다른 한 단지다 — 같은 좌표가 맞다.
     반면 '탑마을(경남)1' 과 '탑마을(기산)1' 은 시공사가 다른 **다른 단지**다.
     _strip_parens 가 시공사·단지·차수 표기를 남기므로 여기서 갈린다.
+
+    ⚠️ 2026-07-26 CR-022 GEO-6 — 괄호 안 **지번**은 잡음이 아니라 식별자다
+       예전 주석은 '삼환나띠르빌(1002-10)' ~ '(1002-22)' 를 "지번만 다른 한 단지"라고
+       적어 두고 좌표 공유를 허용했는데, 부동산원 마스터가 그걸 반증했다 —
+       그 표기들은 각각 별개의 단지고유번호를 가진 **서로 다른 단지**다(paren_jibun).
 
     ⚠️ 여기서는 유사도(퍼지) 매칭을 쓰지 않는다. 좌표를 **공유시켜 주는** 판정이라
        느슨하면 곧바로 오좌표가 된다 — 이름이 같거나 한쪽을 통째로 품을 때만 인정한다.
@@ -714,6 +790,8 @@ def same_complex(a: GeoTarget, b: GeoTarget) -> bool:
         return True                               # 부동산원 단지고유번호가 같다 — 확정
     if different_reb_complex(a, b):
         return False                              # 부동산원이 다른 단지라고 말한다 — 확정
+    if different_parcel(a, b):
+        return False                              # 괄호 안 지번이 다르다(GEO-6) — 확정
     if (a.legal_dong or "").strip() != (b.legal_dong or "").strip():
         return False                              # 법정동이 다르면 같은 단지일 수 없다
     if _phases(a.name) != _phases(b.name):
@@ -777,6 +855,141 @@ def _pairs(items: list[tuple[int, GeoTarget]]):
     for i in range(len(items)):
         for j in range(i + 1, len(items)):
             yield items[i], items[j]
+
+
+# ---------------------------------------------------------------------------
+# 이름 경로 좌표 재검사 (CR-022 GEO-7)
+# ---------------------------------------------------------------------------
+#
+# 무엇이 남아 있었나
+# ------------------
+# GEO-1~GEO-4 로 "다른 단지와 **완전히 같은 점**"은 걷어냈다. 하지만 충돌 게이트는
+# 좌표가 소수점 6자리까지 같을 때만 도는 방어라, 카카오가 **옆 단지의 다른 출입구**나
+# 같은 이름의 다른 건물을 주면 몇백 m 어긋난 채 조용히 들어간다.
+# 표본 진단(319·320건)에서 이름 경로 좌표의 **약 2%가 주소 경로와 400m 넘게** 어긋났고,
+# 모집단 4,530건에 외삽하면 약 90건이다.
+#
+# 왜 주소 쪽을 믿나
+# -----------------
+# 주소 경로는 이름을 아예 거치지 않고 **법정동코드·본번·부번·산번지**를 코드로 대조한다
+# (verify_address). 단, 그 주소가 이 단지의 주소가 맞다는 근거는 부동산원 매칭이 대준다 —
+# 그래서 **`name_exact`(단지명 완전일치)로 매칭된 건만** 이 판정을 적용한다.
+# `name_contains`/`name_fuzzy` 는 매칭 자체가 덜 확실해서 **주소 쪽이 틀렸을 수 있다**
+# (실측 예: '개포자이프레지던스' 1,317m — 여기서 주소를 믿고 덮으면 오류를 심는 것이다).
+# 그런 건은 재판정만 하고 **손대지 않는다**(APPLIABLE_METHODS).
+
+#: 지구 평균 반지름(m) — IUGG 평균반지름. 수도권 규모에서 haversine 오차는 무시할 수준이다.
+EARTH_RADIUS_M = 6_371_008.8
+
+#: 이름 경로와 주소 경로가 이만큼 넘게 어긋나면 **다른 곳을 가리키는 것**으로 본다.
+#: 근거: 수도권 대단지도 대각선이 400m 를 넘는 경우가 드물고, 단지 정문 POI 와 필지
+#: 대표점의 차이는 실측에서 대개 100m 안쪽이었다. 더 조이면 정상 편차를 오탐하고,
+#: 더 풀면 '옆 단지'가 통과한다.
+NAME_PATH_TOLERANCE_M = 400.0
+
+#: 재판정 결과로 **좌표를 고쳐도 되는** 매칭 방법. 여기를 넓히지 말 것 — 위 주석 참조.
+APPLIABLE_METHODS: tuple[str, ...] = ("name_exact",)
+
+
+def haversine_m(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
+    """두 좌표 사이 대권거리(m). 투영 없이 계산해 PostGIS 없이도 검증할 수 있게 한다."""
+    import math
+
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = p2 - p1
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * EARTH_RADIUS_M * math.asin(min(1.0, math.sqrt(a)))
+
+
+#: 재판정 결과 코드.
+#:   'agree'      주소 경로 좌표와 허용범위 안 — 그대로 둔다
+#:   'mismatch'   허용범위 밖 — 이름 경로 좌표가 틀렸다고 본다(무효화 대상)
+#:   'unverified' 주소 후보는 왔지만 코드·번지 대조에 떨어짐 — **판정 불가**, 손대지 않는다
+#:   'no_result'  주소 검색 0건 — 판정 불가, 손대지 않는다
+SWEEP_STATUSES = ("agree", "mismatch", "unverified", "no_result")
+
+
+@dataclass(frozen=True)
+class SweepVerdict:
+    """이름 경로로 넣은 좌표 1건에 대한 재판정 결과."""
+
+    complex_id: int
+    status: str
+    #: 이름 경로 좌표 ↔ 주소 경로 좌표 거리(m). 주소를 확인하지 못했으면 None.
+    distance_m: float | None = None
+    #: 검증을 통과한 주소 경로 좌표. 'agree'/'mismatch' 일 때만 채워진다.
+    fix: GeoFix | None = None
+
+    @property
+    def is_mismatch(self) -> bool:
+        return self.status == "mismatch"
+
+
+def sweep_verdict(target: GeoTarget, lon: float, lat: float,
+                  hits: Iterable[AddressHit], *,
+                  complex_id: int = 0,
+                  tolerance_m: float = NAME_PATH_TOLERANCE_M) -> SweepVerdict:
+    """이미 들어간 좌표(lon/lat)를 **주소 경로 결과와 대조**해 판정한다.
+
+    판정만 한다 — DB 도 네트워크도 모른다. 그래서 이 규칙을 테스트로 못박을 수 있다.
+    """
+    saw_any = False
+    for hit in hits:
+        saw_any = True
+        if not verify_address(hit, target):
+            continue
+        distance = haversine_m(lon, lat, hit.lon, hit.lat)
+        fix = GeoFix(lon=hit.lon, lat=hit.lat, confidence="address",
+                     query=target.address, matched_name=hit.building_name,
+                     matched_address=hit.address_name, source="kakao_address")
+        status = "mismatch" if distance > tolerance_m else "agree"
+        return SweepVerdict(complex_id=complex_id, status=status,
+                            distance_m=distance, fix=fix)
+    return SweepVerdict(complex_id=complex_id,
+                        status="unverified" if saw_any else "no_result")
+
+
+def sweep_name_path(
+    entries: Iterable[tuple[int, GeoTarget, float, float]],
+    address_search: AddressSearch,
+    *,
+    tolerance_m: float = NAME_PATH_TOLERANCE_M,
+    on_verdict: Callable[[SweepVerdict, GeoTarget], None] | None = None,
+) -> list[SweepVerdict]:
+    """(id, 단지, 경도, 위도) 목록을 **주소 검색 1회씩** 태워 재판정한다.
+
+    호출은 단지당 정확히 한 번이다 — 이후 무효화·재확보 단계는 여기서 받은 결과를
+    재사용한다(`ReplayGeocoder`). 같은 답을 두 번 물으면 카카오 쿼터만 두 배로 쓴다.
+    """
+    out: list[SweepVerdict] = []
+    for complex_id, target, lon, lat in entries:
+        hits = address_search.search(target.address) if target.address else []
+        verdict = sweep_verdict(target, lon, lat, hits,
+                                complex_id=complex_id, tolerance_m=tolerance_m)
+        out.append(verdict)
+        if on_verdict is not None:
+            on_verdict(verdict, target)
+    return out
+
+
+class ReplayGeocoder:
+    """이미 검증된 좌표를 **다시 묻지 않고** 돌려준다(재확보 단계용).
+
+    `enrich_geom` 의 충돌 게이트·공유 판정을 그대로 태우기 위해 Geocoder 인터페이스를
+    쓴다. 키는 `GeoTarget`(frozen dataclass — 값 동등성으로 해시된다) 자체다:
+    같은 값의 target 이 둘이면 그 둘은 실제로 같은 단지이므로 같은 좌표가 맞다.
+    """
+
+    def __init__(self, fixes: dict[GeoTarget, GeoFix]) -> None:
+        self._fixes = dict(fixes)
+        self.last_reason: str = ""
+
+    def locate(self, target: GeoTarget) -> GeoFix | None:
+        fix = self._fixes.get(target)
+        # 없으면 '검색 0건'과 같은 취급 — 재판정에서 좌표를 얻지 못한 것이다.
+        self.last_reason = "" if fix is not None else "no_result"
+        return fix
 
 
 @dataclass

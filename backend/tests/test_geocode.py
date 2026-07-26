@@ -19,7 +19,9 @@ from __future__ import annotations
 import pytest
 
 from app.ingest.geocode import (
+    APPLIABLE_METHODS,
     AddressHit,
+    GeoFix,
     GeoTarget,
     KakaoAddressSearch,
     KakaoPlaceSearch,
@@ -27,17 +29,23 @@ from app.ingest.geocode import (
     NullGeocoder,
     NullPlaceSearch,
     Place,
+    ReplayGeocoder,
     VerifiedGeocoder,
+    different_parcel,
     different_reb_complex,
     dong_matches,
     enrich_geom,
+    haversine_m,
     in_capital_bbox,
     name_contains,
     name_matches,
+    paren_jibun,
     place_core,
     query_variants,
     same_complex,
     strip_name_noise,
+    sweep_name_path,
+    sweep_verdict,
     unsafe_shared_ids,
     verify,
     verify_address,
@@ -346,18 +354,21 @@ def test_시공사가_다른_동명단지는_이름검증에서_먼저_걸린다
 
 
 def test_같은_단지가_이름만_갈라진_경우는_좌표를_공유한다():
-    """'삼환나띠르빌(1002-10)' ~ '(1002-22)' 은 지번만 다른 한 단지다.
+    """'대치우성아파트1동,2동' ~ '대치우성' 은 동 나열만 다른 한 단지다.
 
     이런 것까지 막으면 멀쩡한 단지가 지도에서 사라진다 — 충돌과 구분해서 센다.
+
+    ⚠️ 2026-07-26 GEO-6: 예전에는 이 자리에 '삼환나띠르빌(1002-10)' ~ '(1002-11)' 을
+       썼다. 부동산원 마스터가 그 표기들이 **각각 다른 단지고유번호**임을 보여줘
+       사례를 바꿨다(같은 파일 아래 `test_괄호_지번이_다르면_...` 참조).
     """
-    point = _place(lon=126.99, lat=37.48, name="삼환나띠르빌",
-                   addr="서울 서초구 방배동 1002")
+    point = _place(lon=127.06, lat=37.49, name="대치우성아파트",
+                   addr="서울 강남구 대치동 977")
     search = FakeSearch({q: [point] for q in
-                         ("방배동 삼환나띠르빌(1002-10)", "방배동 삼환나띠르빌(1002-11)")})
-    bangbae = dict(dong="방배동", sgg="서초구", sido="서울특별시")
+                         ("대치동 대치우성아파트1동,2동", "대치동 대치우성")})
     res = enrich_geom(
-        [(1, _target(name="삼환나띠르빌(1002-10)", **bangbae)),
-         (2, _target(name="삼환나띠르빌(1002-11)", **bangbae))],
+        [(1, _target(name="대치우성아파트1동,2동")),
+         (2, _target(name="대치우성"))],
         VerifiedGeocoder(search), lambda *a: None, occupied={})
 
     assert res.resolved == 2
@@ -366,7 +377,8 @@ def test_같은_단지가_이름만_갈라진_경우는_좌표를_공유한다()
 
 
 @pytest.mark.parametrize("a, b, expected", [
-    (("삼환나띠르빌(1002-10)", "방배동"), ("삼환나띠르빌(1002-22)", "방배동"), True),
+    # ⚠️ GEO-6: '삼환나띠르빌(1002-10)'/'(1002-22)' 는 여기 있었지만 **다른 단지**다.
+    (("대치우성아파트1동,2동", "대치동"), ("대치우성", "대치동"), True),
     (("롯데캐슬(1057-0)", "신월동"), ("수명산롯데캐슬", "신월동"), True),
     (("청담2차이-편한세상(204동)", "청담동"), ("청담2차이-편한세상(205동)", "청담동"), True),
     (("탑마을(경남)1", "야탑동"), ("탑마을(기산)1", "야탑동"), False),
@@ -755,3 +767,268 @@ def test_kakao_주소검색_빈질의는_호출도_안한다():
 
     assert KakaoAddressSearch("KEY", http_get=boom,
                               rate_limiter=_silent_clock_limiter()).search("  ") == []
+
+
+# ---------------------------------------------------------------------------
+# CR-022 GEO-7 — 이름 경로 좌표를 주소 경로와 대조해 재판정
+# ---------------------------------------------------------------------------
+#
+# 코드 결함이 아니라 **잔존 데이터** 문제였다. 좌표 충돌 게이트는 소수점 6자리까지
+# 같을 때만 도므로, 카카오가 옆 단지의 다른 출입구를 주면 몇백 m 어긋난 채 들어간다.
+# 표본에서 이름 경로 좌표의 약 2%가 주소 경로와 400m 넘게 어긋났다.
+
+
+def _geo7_geo7_hit(lon=127.05, lat=37.49, *, b_code="1168010100", main=977, sub=0,
+         atype="REGION_ADDR", mountain=False) -> AddressHit:
+    return AddressHit(lon=lon, lat=lat, address_name="서울 강남구 대치동 977",
+                      address_type=atype, b_code=b_code, main_no=main,
+                      sub_no=sub, is_mountain=mountain)
+
+
+def _geo7_target(name="○○아파트") -> GeoTarget:
+    return GeoTarget(name=name, legal_dong="대치동", sigungu="강남구", sido="서울특별시",
+                     address="서울특별시 강남구 대치동 977",
+                     legal_dong_code="1168010100", main_no=977, sub_no=0,
+                     reb_id="11680100000001")
+
+
+def test_거리계산은_알려진_값과_맞는다():
+    """haversine 회귀 — 여기가 틀리면 모든 판정이 조용히 틀린다."""
+    # 위도 1도 ≒ 111.2km
+    assert haversine_m(127.0, 37.0, 127.0, 38.0) == pytest.approx(111_195, rel=0.001)
+    # 같은 점은 0
+    assert haversine_m(127.05, 37.49, 127.05, 37.49) == 0.0
+    # 400m 근방 — 임계값이 실제로 400m 언저리를 가르는지 확인한다.
+    near = haversine_m(127.05, 37.49, 127.05, 37.49 + 0.0035)     # ≒ 389m
+    assert 380 < near < 400
+
+
+def test_주소와_가까우면_그대로_둔다():
+    target = _geo7_target()
+    verdict = sweep_verdict(target, 127.05, 37.49, [_geo7_geo7_hit(127.0505, 37.4902)],
+                            complex_id=7)
+    assert verdict.status == "agree" and verdict.complex_id == 7
+    assert verdict.distance_m is not None and verdict.distance_m < 100
+    assert verdict.is_mismatch is False
+
+
+def test_주소와_400m_넘게_어긋나면_불일치():
+    """실측 사례의 축소판 — 이름으로 찾은 점이 옆 단지에 붙은 경우."""
+    target = _geo7_target()
+    verdict = sweep_verdict(target, 127.05, 37.49, [_geo7_geo7_hit(127.06, 37.495)])
+    assert verdict.is_mismatch
+    assert verdict.distance_m > 400
+    assert verdict.fix is not None
+    # 재확보는 **주소 경로 좌표**로 한다 — 이름 경로 좌표를 그대로 두지 않는다.
+    assert (verdict.fix.lon, verdict.fix.lat) == (127.06, 37.495)
+    assert verdict.fix.source == "kakao_address" and verdict.fix.confidence == "address"
+
+
+def test_임계값은_경계에서_넘을_때만_불일치():
+    target = _geo7_target()
+    lon, lat = 127.05, 37.49
+    just_in = sweep_verdict(target, lon, lat, [_geo7_geo7_hit(lon, lat + 0.0035)])    # ≒389m
+    just_out = sweep_verdict(target, lon, lat, [_geo7_geo7_hit(lon, lat + 0.0037)])   # ≒411m
+    assert just_in.status == "agree"
+    assert just_out.status == "mismatch"
+
+
+def test_주소검증에_떨어지면_판정하지_않는다():
+    """다른 번지·동중심점(REGION)을 받았으면 **모르는 것**이다 — 좌표를 건드리지 않는다.
+
+    여기서 '불일치'로 처리하면, 카카오가 엉뚱한 답을 준 것만으로 멀쩡한 좌표가 지워진다.
+    """
+    target = _geo7_target()
+    assert sweep_verdict(target, 127.05, 37.49, [_geo7_geo7_hit(main=978)]).status == "unverified"
+    assert sweep_verdict(target, 127.05, 37.49,
+                         [_geo7_geo7_hit(atype="REGION")]).status == "unverified"
+    assert sweep_verdict(target, 127.05, 37.49, []).status == "no_result"
+
+
+def test_스윕은_단지당_한_번만_묻는다():
+    """4,500여 건을 도는 배치다. 두 번 물으면 카카오 쿼터가 두 배가 된다."""
+    calls: list[str] = []
+
+    class _Search:
+        def search(self, address: str):
+            calls.append(address)
+            return [_geo7_geo7_hit(127.06, 37.495)]
+
+    target = _geo7_target()
+    verdicts = sweep_name_path([(1, target, 127.05, 37.49), (2, target, 127.05, 37.49)],
+                               _Search())
+    assert len(calls) == 2 and len(verdicts) == 2
+    assert all(v.is_mismatch for v in verdicts)
+    assert [v.complex_id for v in verdicts] == [1, 2]
+
+
+def test_주소를_모르는_단지는_아예_묻지_않는다():
+    class _Boom:
+        def search(self, address: str):               # pragma: no cover - 불려선 안 된다
+            raise AssertionError("주소가 없는 단지로 카카오를 부르면 안 된다")
+
+    plain = GeoTarget(name="○○아파트", legal_dong="대치동")
+    assert sweep_name_path([(1, plain, 127.0, 37.5)], _Boom())[0].status == "no_result"
+
+
+def test_재확보는_충돌_게이트를_그대로_탄다():
+    """무효화 후 다시 넣는 좌표도 **다른 단지가 쓰는 점이면 채택하지 않는다.**
+
+    재확보가 새 오좌표를 만드는 경로를 막는다 — GEO-1 의 재발 방지선이다.
+    """
+    target = _geo7_target(name="개포우성1")
+    other = GeoTarget(name="개포우성2", legal_dong="대치동", reb_id="11680100000009")
+    fix = GeoFix(lon=127.06, lat=37.495, confidence="address", source="kakao_address")
+
+    written: dict[int, GeoFix] = {}
+    res = enrich_geom([(5, target)], ReplayGeocoder({target: fix}),
+                      lambda cid, f: written.__setitem__(cid, f),
+                      occupied={(127.06, 37.495): (9, other)})
+    assert written == {} and res.rejected_collision == 1 and res.resolved == 0
+
+
+def test_재확보는_같은_응답을_재사용한다():
+    """`--apply` 단계가 카카오를 다시 부르지 않는다는 것을 구조로 못박는다."""
+    target = _geo7_target()
+    fix = GeoFix(lon=127.06, lat=37.495, confidence="address", source="kakao_address")
+    replay = ReplayGeocoder({target: fix})
+
+    assert replay.locate(target) is fix
+    assert replay.last_reason == ""
+    unknown = GeoTarget(name="모르는단지", legal_dong="대치동")
+    assert replay.locate(unknown) is None
+    assert replay.last_reason == "no_result"          # enrich_geom 이 '검색 0건'으로 센다
+
+
+def test_반영_대상은_name_exact_뿐이다():
+    """`name_contains`/`name_fuzzy` 는 **주소 쪽이 틀렸을 수 있다**(개포자이프레지던스 1,317m).
+
+    옵션이 아니라 상수로 막는다 — 옵션이면 언젠가 누가 넓힌다.
+    """
+    assert APPLIABLE_METHODS == ("name_exact",)
+
+
+# ---------------------------------------------------------------------------
+# SR18-7 — 카카오 호출은 **한 줄로 선다** (속도 제한기 공유)
+# ---------------------------------------------------------------------------
+
+def _fake_clock():
+    """가짜 시계 — 잠든 만큼 시간이 흐른다. 테스트에서 실제로 기다리지 않는다."""
+    now = [0.0]
+    return now, (lambda: now[0]), (lambda sec: now.__setitem__(0, now[0] + sec))
+
+
+def _alternate(limiters: list[RateLimiter], rounds: int) -> None:
+    for _ in range(rounds):
+        for limiter in limiters:
+            limiter.wait()
+
+
+def test_속도제한기를_따로_만들면_실효간격이_절반이_된다():
+    """SR18-7 의 메커니즘을 눈에 보이게 못박는다.
+
+    키워드·주소 백엔드에 제한기를 각각 주면 서로의 마지막 호출 시각을 모른다.
+    카카오 입장에서는 **합의한 속도의 두 배**로 맞는 것이고, 차단되면 수집이 통째로 멈춘다.
+    """
+    now, clock, sleeper = _fake_clock()
+    shared = RateLimiter(1.0, clock=clock, sleeper=sleeper)
+    _alternate([shared, shared], 2)                    # 호출 4번
+    assert now[0] == pytest.approx(3.0)                # 간격 3번 × 1초
+
+    now2, clock2, sleeper2 = _fake_clock()
+    separate = [RateLimiter(1.0, clock=clock2, sleeper=sleeper2),
+                RateLimiter(1.0, clock=clock2, sleeper=sleeper2)]
+    _alternate(separate, 2)                            # 같은 4번인데
+    assert now2[0] == pytest.approx(1.0)               # 1초 만에 끝난다 = 두 배 속도
+
+
+def test_지오코더_배선은_제한기를_공유한다():
+    """실제 배선(`scripts/geocode_complexes.build_geocoder`)이 하나만 만드는지 확인한다."""
+    import importlib.util
+    import sys
+    from pathlib import Path
+
+    scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    spec = importlib.util.spec_from_file_location(
+        "_test_geocode_complexes", scripts_dir / "geocode_complexes.py")
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    geocoder = module.build_geocoder("KEY", min_interval=0.25)
+    place, address = geocoder.backends
+    assert place.rate_limiter is address.rate_limiter, (
+        "키워드·주소 백엔드가 제한기를 따로 씁니다 — 카카오 실효 간격이 절반이 됩니다")
+    assert place.rate_limiter.min_interval == 0.25
+
+    # --address 모드에서는 키워드 백엔드를 아예 꽂지 않는다(같은 질의 재시도 금지).
+    only_address = module.build_geocoder("KEY", min_interval=0.25, address_only=True)
+    assert isinstance(only_address.backends[0], NullPlaceSearch)
+
+
+# ---------------------------------------------------------------------------
+# CR-022 GEO-6 — 괄호 안 지번은 잡음이 아니라 **단지 식별자**다
+# ---------------------------------------------------------------------------
+#
+# 아래 사례는 전부 2026-07-26 운영 DB + 부동산원 마스터 실측이다. 좌표를 공유하던
+# 16개 그룹/37단지를 전수 대조했더니 **모두** 부동산원에서 서로 다른 단지고유번호였다.
+
+
+@pytest.mark.parametrize("name, expected", [
+    ("삼환나띠르빌(1002-10)", {"1002-10"}),
+    ("월드컵아이파크(666-0)", {"666"}),          # 부번 0 은 '(666)' 과 같은 필지
+    ("월드컵아이파크(667)", {"667"}),
+    ("동궁리치웰문정(101)", {"101"}),
+    # 동 목록은 지번이 아니다 — 한 단지의 동들이다
+    ("래미안목동아델리체(101동~118동)", set()),
+    ("현대2차(10,11,20,23,24,25동)", set()),
+    ("서초자연인아파트(102동)", set()),
+    # 시공사·차수 표기도 지번이 아니다
+    ("탑마을(경남)1", set()),
+    ("은평뉴타운 제각말 푸르지오(5-1단지)", set()),
+])
+def test_괄호_지번만_골라낸다(name, expected):
+    assert paren_jibun(name) == expected
+
+
+@pytest.mark.parametrize("a, b", [
+    # 부동산원 실측: 각각 별개 단지고유번호 · 세대수도 다르다
+    ("삼환나띠르빌(1002-10)", "삼환나띠르빌(1002-22)"),   # 16세대 vs 15세대
+    ("뉴월드(402-42)", "뉴월드(402-120)"),                # **본번이 같아도** 다른 단지
+    ("우성(23)", "우성(1058)"),                           # 344세대 vs 296세대
+    ("동궁리치웰문정(101)", "동궁리치웰문정(102)"),        # 문정1차 vs 문정2차
+    ("근상프리즘(957-1)", "근상프리즘(1076-2)"),
+    ("광남캐스빌(443-26)", "광남캐스빌(448-5)"),
+    ("래미안삼성1차(103-22)", "래미안삼성1차(105-0)"),
+    ("동탄숲속마을자연앤경남아너스빌(1115-0)",
+     "동탄숲속마을자연앤경남아너스빌(1124-0)"),           # 641세대 vs 455세대
+])
+def test_괄호_지번이_다르면_좌표를_공유하지_않는다(a, b):
+    """⚠️ 본번만 비교하면 '뉴월드(402-42)'/'(402-120)' 를 놓친다 — 부번까지 본다."""
+    ta = GeoTarget(name=a, legal_dong="○○동")
+    tb = GeoTarget(name=b, legal_dong="○○동")
+    assert different_parcel(ta, tb) is True
+    assert same_complex(ta, tb) is False
+
+
+@pytest.mark.parametrize("a, b", [
+    ("롯데캐슬", "롯데캐슬(1057-1)"),                  # 한쪽이 없으면 '모른다'
+    ("월드컵아이파크(666)", "월드컵아이파크(666-0)"),   # 같은 필지의 다른 표기
+    ("서초자연인아파트(101동)", "서초자연인아파트(102동)"),  # 동 — 한 단지
+    ("대치우성아파트1동,2동", "대치우성"),
+])
+def test_지번이_아니거나_모르면_공유를_깨지_않는다(a, b):
+    """규칙이 정상 공유까지 깨면 멀쩡한 단지가 지도에서 사라진다 — 그건 과잉교정이다."""
+    ta = GeoTarget(name=a, legal_dong="○○동")
+    tb = GeoTarget(name=b, legal_dong="○○동")
+    assert different_parcel(ta, tb) is False
+    assert same_complex(ta, tb) is True
+
+
+def test_부동산원_번호가_같으면_괄호_지번보다_우선한다():
+    """번호가 이름을 이긴다 — 엄격 매칭을 통과한 값이 표기보다 강하다(GEO-3 규약 유지)."""
+    a = GeoTarget(name="○○(1002-10)", legal_dong="○○동", reb_id="11650100050187")
+    b = GeoTarget(name="○○(1002-22)", legal_dong="○○동", reb_id="11650100050187")
+    assert same_complex(a, b) is True

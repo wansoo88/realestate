@@ -99,6 +99,28 @@ _COLLISION_SQL = """
 """
 
 
+def build_geocoder(key: str, *, min_interval: float,
+                   address_only: bool = False) -> VerifiedGeocoder:
+    """카카오 백엔드 2종 + 검증 계층을 배선한다.
+
+    ⚠️ SR18-7 — **속도 제한기는 하나다.**
+    예전에는 키워드·주소 백엔드에 `RateLimiter` 를 **각각** 만들어 줬다. 두 인스턴스는
+    서로의 마지막 호출 시각을 모르므로, 한 단지에서 주소→키워드로 이어 부를 때
+    실효 간격이 설정값의 **절반**이 된다(0.25초 설정 → 실제 0.125초). 카카오 입장에선
+    합의한 속도의 두 배로 맞는 것이고, 차단당하면 수집이 통째로 멈춘다 —
+    속도 제한은 예의가 아니라 가용성 요구사항이다(ratelimit.py).
+    같은 인스턴스를 넘겨 **프로세스 전체의 카카오 호출**이 한 줄로 서게 한다.
+
+    `address_only` 면 키워드 백엔드를 아예 꽂지 않는다. 대상 단지는 이름으로 이미
+    실패한 것들이라, 같은 질의를 다시 보내면 쿼터만 태우고 결과는 같다.
+    """
+    limiter = RateLimiter(min_interval_sec=min_interval, jitter_sec=0.15)
+    place_search = (NullPlaceSearch() if address_only
+                    else KakaoPlaceSearch(key, rate_limiter=limiter))
+    address_search = KakaoAddressSearch(key, rate_limiter=limiter)
+    return VerifiedGeocoder(place_search, address_search)
+
+
 def coverage(engine) -> tuple[int, int]:
     from sqlalchemy import text
 
@@ -249,15 +271,8 @@ def main(argv: list[str] | None = None) -> int:
           f"· 그중 법정동 불일치 {c_cross}건 · 부동산원 번호 불일치 {c_reb}건")
 
     # 카카오 응답을 그대로 믿지 않는다 — 법정동·시군구·단지명을 대조해 통과분만 채택.
-    def _limiter() -> RateLimiter:
-        return RateLimiter(min_interval_sec=args.min_interval, jitter_sec=0.15)
-
-    # --address 모드에서는 키워드 백엔드를 아예 꽂지 않는다. 대상 단지는 이름으로
-    # 이미 실패한 것들이라, 같은 질의를 다시 보내면 쿼터만 태우고 결과는 같다.
-    place_search = NullPlaceSearch() if args.address else KakaoPlaceSearch(
-        key, rate_limiter=_limiter())
-    address_search = KakaoAddressSearch(key, rate_limiter=_limiter())
-    geocoder = VerifiedGeocoder(place_search, address_search)
+    geocoder = build_geocoder(key, min_interval=args.min_interval,
+                              address_only=args.address)
 
     if args.recheck_shared:
         table = "backup.complex_geom_geo3"
