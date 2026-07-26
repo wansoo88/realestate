@@ -55,6 +55,22 @@
   color: var(--text-estimated);
 }
 
+/* AI 추천 순위 — 근거(리포트)가 붙은 후보에만 생긴다. 지도 마커의 강조색과 같은 언어. */
+.card__rank {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 22px;
+  margin-bottom: var(--sp-2);
+  padding: 0 6px;
+  border-radius: var(--r-pill);
+  background: var(--accent-weak);
+  color: var(--accent);
+  font-size: var(--fs-caption);
+  font-weight: 600;
+}
+
 .card__head {
   display: flex;
   align-items: center;
@@ -84,4 +100,91 @@
   margin: var(--sp-1) 0 0;
   font-size: var(--fs-caption);
   color: var(--text-estimated);
+}
+
+/* ── 데스크톱: 카드가 아니라 **밀도 높은 행** ───────────────────────────────
+   우측 패널은 세로로 길다. 폰용 카드(금액 26px + 4줄)를 그대로 늘리면 한 화면에 3~4건밖에
+   안 들어와 비교가 안 된다. 2줄짜리 행으로 접어 8~10건이 보이게 한다.
+   금액은 작아지지만 여전히 행에서 가장 굵고 큰 요소다(규칙 2 유지). */
+@media (min-width: 900px) {
+  .card__main {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-areas:
+      "rank name  price"
+      "rank meta  asof";
+    align-items: center;
+    column-gap: var(--sp-3);
+    row-gap: 2px;
+    padding: var(--sp-3) var(--sp-2);
+  }
+
+  .card--selected .card__main {
+    padding-left: var(--sp-2);
+    padding-right: var(--sp-2);
+  }
+
+  .card__main:hover {
+    background: var(--badge-bg);
+  }
+
+  .card--selected .card__main:hover {
+    background: var(--accent-weak);
+  }
+
+  .card__rank {
+    grid-area: rank;
+    margin-bottom: 0;
+  }
+
+  .card__head {
+    grid-area: name;
+    margin-bottom: 0;
+    min-width: 0;
+  }
+
+  /* 행에서는 단지명이 먼저 읽혀야 한다(금액은 우측 정렬로 세로 비교) */
+  .card__name {
+    font-size: var(--fs-footnote);
+    color: var(--text);
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .card__price {
+    grid-area: price;
+    margin: 0;
+    justify-content: flex-end;
+    flex-wrap: nowrap;
+    font-size: var(--fs-footnote);
+    text-align: right;
+  }
+
+  /* '추정' 배지는 좁은 행에서도 **지우지 않는다.** 이 배지가 이 제품의 정체성이다
+     (지도에서 마커 글자를 뺀 대신, 목록에서는 항목마다 근거의 농도를 남긴다).
+     자리를 아끼되 사라지지는 않게 크기만 줄인다. */
+  .card__conf {
+    padding: 1px 6px;
+    font-size: 11px;
+  }
+
+  .card__nodata {
+    font-size: var(--fs-caption);
+  }
+
+  .card__meta {
+    grid-area: meta;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .card__asof {
+    grid-area: asof;
+    margin: 0;
+    text-align: right;
+    white-space: nowrap;
+  }
 }

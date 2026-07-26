@@ -117,6 +117,127 @@
   text-align: right;
 }
 
+/* ── 가중치 항목 ──────────────────────────────────────────────────────────
+   한 줄짜리 `.cond__row` 로는 설명이 들어갈 자리가 없어 별도 블록으로 뺐다.
+   구조: [라벨 + 한 마디]  [ⓘ]
+         한 줄 요약
+         [슬라이더]        [%]
+         (반영 안 되는 사유) */
+.cond__weight {
+  padding: var(--sp-3) 0;
+  border-bottom: 0.5px solid var(--hairline);
+}
+
+.cond__weight:last-child {
+  border-bottom: none;
+}
+
+.cond__weight-head {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.cond__weight .cond__label {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  font-size: var(--fs-body);
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* 라벨 옆 한 마디 — '가격'과 '가치'의 차이를 여기서 가른다 */
+.cond__weight-tag {
+  font-size: var(--fs-caption);
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+
+.cond__weight-sum {
+  margin: var(--sp-1) 0 var(--sp-2);
+  font-size: var(--fs-caption);
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.cond__weight-agent {
+  display: block;
+  margin-top: var(--sp-2);
+  color: var(--text-estimated);
+}
+
+/* 슬라이더는 남는 폭을 다 쓴다 — 140px 고정이면 5% 단위를 손가락으로 못 맞춘다 */
+.cond__weight .cond__range {
+  gap: var(--sp-3);
+}
+
+.cond__weight .cond__range input[type="range"] {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+}
+
+.cond__weight .cond__value {
+  min-width: 76px; /* "반영 안 됨"이 줄바꿈되지 않게 */
+}
+
+/* 반영되지 않는 항목 — 흐리게 두되 **지우지 않는다.** 무엇이 빠졌는지 보여야 한다. */
+.cond__weight--off .cond__label,
+.cond__weight--off .cond__weight-tag {
+  color: var(--text-secondary);
+}
+
+.cond__weight--off input[type="range"] {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.cond__weight-note {
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-caption);
+  line-height: 1.5;
+  color: var(--warn-text);
+}
+
+/* 부분 커버리지 — 반영 여부와 무관하게 늘 보인다(api-spec §5.3).
+   "호가만 들어오면 리스크가 다 반영된다"는 오해를 막는 문장이라 지우면 안 된다. */
+.cond__weight-gap {
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-caption);
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+.cond__weight-badge {
+  margin-right: var(--sp-2);
+  color: var(--warn-text);
+}
+
+.cond__value-off {
+  font-family: var(--ff);
+  color: var(--text-estimated);
+  white-space: nowrap;
+}
+
+/* 섹션 전체 상태 안내(가중치가 아직 순위에 안 들어간다) */
+.cond__warn {
+  margin: 0 0 var(--sp-2);
+  padding: var(--sp-3);
+  border-radius: var(--r-btn);
+  background: var(--badge-bg);
+  color: var(--text-secondary);
+  font-size: var(--fs-caption);
+  line-height: 1.6;
+}
+
+.cond__warn strong {
+  color: var(--warn-text);
+  font-weight: 600;
+}
+
 .cond__check {
   display: flex;
   align-items: flex-start;

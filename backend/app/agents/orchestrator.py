@@ -30,11 +30,18 @@ from app.agents.base import (
     validate_finding,
 )
 from app.agents.llm import LLMClient, LLMError
+from app.agents.scoring import (
+    ScoreResult,
+    build_axis_signals,
+    normalize_weights,
+    score_item,
+    summary_notes,
+)
 from app.domain.affordability.models import AffordabilityResult
 from app.domain.listings.dedup import ListingGroup, trust_score
 from app.domain.location.analysis import evaluate_location
 from app.domain.location.models import LocationAssessment, LocationFacts
-from app.domain.valuation.models import DongValuation, ListingRow, TradeRow
+from app.domain.valuation.models import DongValuation, Liquidity, ListingRow, TradeRow
 from app.domain.valuation.stats import (
     ask_gap_pct,
     dong_effect,
@@ -151,6 +158,10 @@ class AnalysisContext:
     affordability: AffordabilityResult
     candidates: list[Candidate]
     avoid: dict[str, Any] = field(default_factory=dict)
+    #: 사용자 조건 가중치(`user_preference.weights`) — 가격·입지·가치·리스크.
+    #: **여기서 순위가 실제로 바뀐다.** 비어 있으면 기존 동작(신뢰도 가중 평균)으로
+    #: 폴백하고 그 사실을 notes 에 남긴다(app/agents/scoring.py).
+    weights: dict[str, Any] = field(default_factory=dict)
     as_of: dt.date = field(default_factory=dt.date.today)
     #: tripwire 검사값(프롬프트 구성에는 쓰지 않는다). 비워두면 파이프라인이
     #: affordability 파생값으로 보강하고, 그래도 비면 fail-loud 로 막는다.
@@ -226,8 +237,18 @@ def listing_finding(candidate: Candidate, median_krw: int | None,
 # [3] valuation-trader — 규칙 계산 + (선택) LLM 설명
 # ---------------------------------------------------------------------------
 
+def candidate_liquidity(candidate: Candidate, as_of: dt.date) -> Liquidity:
+    """이 후보의 환금성. **가치 축 점수의 원천**이라 파이프라인과 finding 이 같은 값을 본다.
+
+    한 곳에서 계산해 양쪽에 넘긴다 — rationale 에 적힌 등급과 점수가 서로 다른 거래를
+    보고 있으면 사용자는 어느 쪽도 검증할 수 없다.
+    """
+    return liquidity(candidate.trades, candidate.listings,
+                     candidate.total_households, as_of=as_of)
+
+
 def valuation_finding(candidate: Candidate, as_of: dt.date, *,
-                      band: Any | None = None) -> Finding:
+                      band: Any | None = None, liq: Liquidity | None = None) -> Finding:
     """시세 판정. **호가 유무에 따라 판정 축이 다르다.**
 
     호가 있음 → 호가 갭(ask_gap)으로 "적정가 상단/하단"을 판정한다.
@@ -242,8 +263,7 @@ def valuation_finding(candidate: Candidate, as_of: dt.date, *,
     # ⚠️ 호가가 없으면 갭은 **None** 이다. 실거래 중위를 호가 자리에 넣어 0% 를 만들면
     #    "적정가 범위"라는 근거 없는 판정이 생긴다(비교 대상이 자기 자신이므로).
     gap = ask_gap_pct(ask, band) if ask is not None else None
-    liq = liquidity(candidate.trades, candidate.listings,
-                    candidate.total_households, as_of=as_of)
+    liq = candidate_liquidity(candidate, as_of) if liq is None else liq
 
     if ask is None:
         verdict = TRADE_BASIS_VERDICT
@@ -612,9 +632,13 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
     budget = ctx.affordability.max_purchase_krw
     avoid_tokens = _avoid_tokens(ctx.avoid)
     forbidden = _derive_forbidden(ctx)
+    # 저장된 가중치는 **클라이언트의 주장**이다. 여기서 다시 정규화하고,
+    # 모르는 키는 버리되 목록으로 받아 notes 에 남긴다(조용히 버리지 않는다).
+    weights, unknown_weight_keys = normalize_weights(ctx.weights)
 
     items: list[dict[str, Any]] = []
     excluded: list[dict[str, Any]] = []
+    scores: list[ScoreResult] = []  # 결과 전체 고지를 만들 때 다시 훑는다
 
     for cand in ctx.candidates:
         rep = cand.group.representative if cand.group is not None else None
@@ -655,7 +679,9 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
                 reason="; ".join(loc_assess.exclusion_reasons)))
             continue
 
-        valuation = valuation_finding(cand, ctx.as_of, band=band)
+        # 환금성은 여기서 한 번 계산해 finding(문구)과 가치 축 점수가 같은 값을 보게 한다.
+        liq = candidate_liquidity(cand, ctx.as_of)
+        valuation = valuation_finding(cand, ctx.as_of, band=band, liq=liq)
         median = band.median_krw if band.available else None
         dong_val = None
         if band.available:
@@ -666,17 +692,18 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
         location = (_assessment_to_finding(loc_assess) if loc_assess is not None
                     else insufficient("location-analyst",
                                       ["입지 데이터(학군·교통·인프라) 미수집"]))
-        findings = [
-            finance,
-            listing_finding(cand, median, ctx.as_of),
-            valuation,
-            location,
-        ]
-        scored = [f for f in findings if f.score is not None]
+        listing_f = listing_finding(cand, median, ctx.as_of)
+        findings = [finance, listing_f, valuation, location]
+
+        # 총점: 사용자 가중치(가격·입지·가치·리스크)를 실제로 곱한다.
+        # 근거 없는 축은 **총점에서 빼고 재정규화**하되 무엇이 빠졌는지 응답에 남긴다.
         # 점수를 매길 근거가 하나도 없으면 **0 이 아니라 None** 이다.
         # 0.0 은 "나쁘다"로 읽힌다 — "모른다"와 구분되지 않으면 그것도 환각이다(G2).
-        total = (round(sum(f.score * f.confidence for f in scored) /
-                       sum(f.confidence for f in scored), 1) if scored else None)
+        signals = build_axis_signals(
+            valuation=valuation, listing=listing_f, location=location,
+            liq=liq, has_ask=cand.ask_price_krw is not None)
+        score = score_item(findings=findings, signals=signals, weights=weights)
+        scores.append(score)
 
         summary = portfolio_summary(findings, llm, forbidden)
         items.append({
@@ -701,8 +728,17 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
             "ask_gap_pct": (ask_gap_pct(cand.ask_price_krw, band)
                             if cand.ask_price_krw is not None and band.available else None),
             "price_band": _price_band_dict(band),
-            "total_score": total,
-            "score_basis": ("agent_scores" if scored else None),
+            # --- 점수 계약 (api-spec §5.3) ------------------------------------
+            # total_score  : null 이면 "모름"(0 이 아니다)
+            # score_basis  : user_weighted(사용자 가중치) | agent_scores(폴백) | null
+            # score_axes   : 축별 가중치·점수·상태·빠진 사유 — **검증 가능한 형태로**
+            # score_notes  : 반영되지 않은 가중치 고지(사람이 읽는 문장)
+            # score_coverage_pct : 사용자 가중치 중 실제로 반영된 비율(%)
+            "total_score": score.total,
+            "score_basis": score.basis,
+            "score_axes": [dict(row) for row in score.axes],
+            "score_notes": list(score.notes),
+            "score_coverage_pct": score.coverage_pct,
             # MVP 에는 타이밍 분석가가 없다. 없는 기능을 있는 척하지 않는다.
             "timing_signal": "unknown",
             "headline": summary["headline"],
@@ -731,6 +767,10 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
 
     notes = ["타이밍 분석(market-timing-analyst)은 2차 기능입니다.",
              "입지 분석은 데이터 수집 후 제공됩니다."]
+    # 가중치가 **어떻게 반영됐는지**(그리고 무엇이 반영되지 않았는지)를 목록 상단에도 말한다.
+    # 개별 카드의 score_notes 만 남기면 사용자는 카드를 하나씩 열어야 알 수 있다.
+    notes += summary_notes(weights=weights, unknown_keys=unknown_weight_keys,
+                           results=scores, total_items=len(items))
     if any(it["price_basis"] == PRICE_BASIS_TRADE for it in items[:top_n]):
         notes.append(
             "일부 후보는 현재 등록된 매물이 없어 최근 실거래 기준으로 세운 추정입니다"

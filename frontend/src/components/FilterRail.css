@@ -1,0 +1,115 @@
+/* ── 모바일: 지도 좌상단에 떠 있는 조건 바 ──────────────────────────────
+   지도를 덮지 않도록 배경은 두지 않는다. 칩 하나하나가 떠 있는 유리다(규칙 4). */
+.rail {
+  position: absolute;
+  top: max(var(--sp-2), env(safe-area-inset-top));
+  left: var(--sp-3);
+  right: calc(var(--list-w, 0px) + 64px); /* 우측 확대/축소 컨트롤과 겹치지 않게 */
+  z-index: 8;
+  pointer-events: none; /* 빈 자리로는 지도를 끌 수 있어야 한다 */
+}
+
+/* 제목·안내는 데스크톱 좌측 패널에서만 의미가 있다. 폰에서는 지도를 먹기만 한다. */
+.rail__title,
+.rail__note {
+  display: none;
+}
+
+.rail__row {
+  display: flex;
+  gap: var(--sp-2);
+  overflow-x: auto;
+  /* 스크롤바가 칩을 가리지 않게(모바일 기본은 오버레이 스크롤바) */
+  scrollbar-width: none;
+  padding: 2px;
+}
+
+.rail__row::-webkit-scrollbar {
+  display: none;
+}
+
+.rail__edit,
+.rail__chip {
+  pointer-events: auto;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 38px;
+  padding: 0 var(--sp-3);
+  border-radius: var(--r-pill);
+  background: var(--bg-elev);
+  border: 0.5px solid var(--hairline);
+  box-shadow: var(--shadow-pill);
+  font-size: var(--fs-caption);
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.rail__edit {
+  font-weight: 600;
+}
+
+/* 꺼진 조건 = 점선(색만으로 구분하지 않는다 · A3) */
+.rail__chip {
+  border-style: dashed;
+  border-color: var(--hairline-strong);
+  color: var(--text-secondary);
+}
+
+.rail__chip--on {
+  border-style: solid;
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+}
+
+/* ── 데스크톱: 좌측 고정 패널 ────────────────────────────────────────────
+   3분할(조건 · 지도 · 결과)의 첫 칸. 지도를 덮지 않고 항상 펼쳐져 있다. */
+@media (min-width: 1200px) {
+  .rail {
+    top: 0;
+    bottom: 0;
+    left: 0;
+    right: auto;
+    width: var(--rail-w);
+    padding: var(--sp-5) var(--sp-4);
+    overflow-y: auto;
+    background: var(--bg);
+    border-right: 0.5px solid var(--hairline);
+    pointer-events: auto;
+  }
+
+  .rail__title {
+    display: block;
+    margin: 0 0 var(--sp-3);
+    font-size: var(--fs-title);
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+
+  /* 좁은 칸이므로 칩을 가로 스크롤이 아니라 **세로로 쌓는다** — 잘려 보이면 조건을 못 읽는다 */
+  .rail__row {
+    flex-direction: column;
+    align-items: stretch;
+    overflow-x: visible;
+    gap: var(--sp-2);
+  }
+
+  .rail__edit,
+  .rail__chip {
+    justify-content: flex-start;
+    min-height: var(--touch-min);
+    white-space: normal;
+    box-shadow: none;
+  }
+
+  .rail__note {
+    display: block;
+    margin: var(--sp-4) 0 0;
+    font-size: var(--fs-caption);
+    color: var(--text-secondary);
+    line-height: 1.5;
+  }
+}

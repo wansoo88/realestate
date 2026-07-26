@@ -1,0 +1,120 @@
+/* 장소 검색 — 지도 위에 떠 있는 유리(규칙 4). 좌상단 조건 바 아래에 붙는다. */
+.psearch {
+  pointer-events: auto;
+  width: min(320px, calc(100vw - var(--sp-4) * 2));
+}
+
+.psearch__form {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: var(--sp-1);
+  border-radius: var(--r-pill);
+  background: var(--bg-elev);
+  border: 0.5px solid var(--hairline);
+  box-shadow: var(--shadow-pill);
+}
+
+/* 라벨은 화면에서 숨기되 접근성 트리에는 남긴다(상자 폭이 좁다) */
+.psearch__label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
+.psearch__input {
+  flex: 1;
+  min-width: 0;
+  min-height: 36px;
+  padding: 0 var(--sp-3);
+  border: none;
+  background: none;
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--fs-caption);
+}
+
+.psearch__input:focus {
+  outline: none;
+}
+
+.psearch__form:focus-within {
+  border-color: var(--accent);
+}
+
+.psearch__btn {
+  flex: 0 0 auto;
+  min-height: 36px;
+  padding: 0 var(--sp-3);
+  border-radius: var(--r-pill);
+  background: var(--accent-weak);
+  color: var(--accent);
+  font-size: var(--fs-caption);
+  font-weight: 600;
+}
+
+.psearch__btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* 이 상자가 무엇을 하는지 — "역세권 필터"로 오해되지 않게 */
+.psearch__hint,
+.psearch__error {
+  margin: var(--sp-1) 0 0;
+  padding: 0 var(--sp-2);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  text-shadow: 0 0 3px var(--bg);
+}
+
+.psearch__hint strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.psearch__error {
+  color: var(--warn-text);
+}
+
+.psearch__list {
+  list-style: none;
+  margin: var(--sp-2) 0 0;
+  padding: var(--sp-1);
+  max-height: 40vh;
+  overflow-y: auto;
+  border-radius: var(--r-btn);
+  background: var(--bg-elev);
+  border: 0.5px solid var(--hairline);
+  box-shadow: var(--shadow-1);
+}
+
+.psearch__item {
+  display: block;
+  width: 100%;
+  min-height: var(--touch-min);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-btn);
+  text-align: left;
+}
+
+.psearch__item:hover {
+  background: var(--badge-bg);
+}
+
+.psearch__name {
+  display: block;
+  font-size: var(--fs-caption);
+  font-weight: 600;
+}
+
+.psearch__detail {
+  display: block;
+  margin-top: 1px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}

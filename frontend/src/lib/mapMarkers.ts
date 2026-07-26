@@ -16,19 +16,68 @@
  *    dangerouslySetInnerHTML 도 쓰지 않는다.
  */
 import type { ClusterItem, ComplexItem } from "../api/client";
-import { formatKrwShort } from "./format";
+import { formatKrwCompact } from "./format";
+import { tierFor, type MarkerTier } from "./markerTiers";
 
-/** 마커 가격 라벨 텍스트. 추정치는 '추정' 접두로 확정치와 구분한다(규칙 1·2). */
+/**
+ * 마커 가격 라벨.
+ *
+ * ⚠️ **'추정' 이라는 글자를 넣지 않는다.** 확인한 사실: 이 API 의 `price_confidence` 는
+ * `estimated`(시세 있음) 아니면 `unknown`(없음) 둘뿐이다 — 서버에 `confirmed` 가 없다
+ * (`backend/app/api/routes.py`: `"estimated" if c.recent_price_krw else "unknown"`).
+ * 즉 **지도 가격은 전부 추정치**라서, 마커마다 '추정'을 붙이면 그건 구분이 아니라 노이즈다.
+ * 한 화면에 수십 개가 뜨는 자리에서 같은 단어를 수십 번 반복하면 아무도 읽지 않는다.
+ *
+ * 그래서 고지는 **한 곳으로 모은다**: 지도 범례(MapLegend, 항상 보이는 요약 줄) ·
+ * 목록 카드의 '추정' 배지 · 상세. 마커가 구분해야 하는 건 "추정이냐"가 아니라
+ * **"값을 아느냐 모르느냐"** 이고, 그건 `데이터 없음`(빈 점)으로 드러난다.
+ */
 export function complexMarkerText(item: ComplexItem): string {
   if (item.recent_price_krw === null) return "데이터 없음";
-  const price = formatKrwShort(item.recent_price_krw);
-  return item.price_confidence === "estimated" ? `추정 ${price}` : price;
+  return formatKrwCompact(item.recent_price_krw);
+}
+
+/**
+ * 표현 단계별 마커 줄. **0번 줄이 항상 주인공(가격)** 이다.
+ *
+ * 예전엔 순위가 있으면 `["2위", "추정 14.8억"]` 이라 **순위가 큰 글씨, 가격이 작은 글씨**로
+ * 뒤집혀 있었다(규칙 2: 숫자가 주인공 — 라벨이 금액보다 커지면 안 된다). 순위는 채움색으로
+ * 알리고 글자는 보조로 내린다.
+ */
+export function complexMarkerLines(
+  item: ComplexItem,
+  opts: { tier: MarkerTier; rank?: number } = { tier: "price" },
+): string[] {
+  if (opts.tier === "dot") return []; // 점에는 글자가 없다(그래서 지도가 보인다)
+
+  const lines = [complexMarkerText(item)];
+  const sub: string[] = [];
+  if (opts.tier === "detail") sub.push(item.name);
+  if (opts.rank) sub.push(`추천 ${opts.rank}위`);
+  if (sub.length > 0) lines.push(sub.join(" · "));
+  return lines;
+}
+
+/**
+ * 보조기기용 라벨 — **점으로 강등돼도 정보는 줄지 않는다.**
+ * 화면에서 글자를 지우는 건 시각적 밀도 때문이지 정보를 감추려는 게 아니므로,
+ * aria-label 은 단계와 무관하게 항상 단지명·가격·상태를 전부 싣는다.
+ */
+export function complexMarkerLabel(
+  item: ComplexItem,
+  opts: { rank?: number; selected?: boolean } = {},
+): string {
+  const parts = [item.name, complexMarkerText(item)];
+  if (item.over_budget) parts.push("예산 초과");
+  if (opts.rank) parts.push(`추천 ${opts.rank}위`);
+  if (opts.selected) parts.push("선택됨");
+  return parts.join(" ");
 }
 
 /** 군집 라벨 — 개수(주인공)와 중위가. 중위가 없으면 개수만. */
 export function clusterMarkerLines(c: ClusterItem): string[] {
   const lines = [`${c.count}`];
-  if (c.median_price_krw !== null) lines.push(`중위 ${formatKrwShort(c.median_price_krw)}`);
+  if (c.median_price_krw !== null) lines.push(`중위 ${formatKrwCompact(c.median_price_krw)}`);
   return lines;
 }
 
@@ -102,7 +151,14 @@ export interface KakaoMap {
 
 export interface ComplexLayerOpts {
   selectedId?: number | null;
+  /** 목록에서 마우스를 올린 단지 — 지도에서 그 마커만 살짝 들어올린다(양방향 동기화). */
+  hoveredId?: number | null;
   rankById?: Record<number, number>;
+  /**
+   * 이번 화면의 기본 표현 단계(줌·밀집으로 결정 — lib/markerTiers).
+   * 기본값이 "price" 인 이유: 호출부가 빠뜨려도 **가격은 보이는** 쪽으로 안전하게 실패한다.
+   */
+  tier?: MarkerTier;
   onSelect?: (id: number) => void;
 }
 
@@ -283,6 +339,10 @@ export class MarkerLayer {
   }
 
   setComplexes(items: ComplexItem[], opts: ComplexLayerOpts = {}): void {
+    const base = opts.tier ?? "price";
+    // 무엇 하나라도 선택돼 있으면 나머지는 눌러 준다 — 동시에 여럿을 강조하면 강조가 아니다.
+    const hasSelection = opts.selectedId != null;
+
     this.complexes = this.reconcile(
       this.complexes,
       items,
@@ -290,22 +350,31 @@ export class MarkerLayer {
       (item) => {
         const rank = opts.rankById?.[item.id];
         const selected = opts.selectedId != null && opts.selectedId === item.id;
-
-        const lines: string[] = [];
-        if (rank) lines.push(`${rank}위`);
-        lines.push(complexMarkerText(item));
+        const hovered = opts.hoveredId != null && opts.hoveredId === item.id;
+        const hasPrice = item.recent_price_krw !== null;
+        const tier = tierFor(base, { selected, hovered, rank, hasPrice });
+        const muted = hasSelection && !selected && !rank;
 
         return {
-          lines,
+          lines: complexMarkerLines(item, { tier, rank }),
           className:
-            "map-pill map-pill--complex" +
+            `map-pill map-pill--complex map-pill--${tier}` +
             (selected ? " map-pill--selected" : "") +
+            (hovered && !selected ? " map-pill--hover" : "") +
+            (rank ? " map-pill--rank" : "") +
             (item.over_budget ? " map-pill--over" : "") +
-            (item.price_confidence === "estimated" ? " map-pill--est" : ""),
-          ariaLabel: `${item.name} ${lines.join(" ")}`,
-          zIndex: selected ? 100 : rank ? 50 : 10,
+            (hasPrice ? "" : " map-pill--nodata") +
+            (muted ? " map-pill--muted" : ""),
+          ariaLabel: complexMarkerLabel(item, { rank, selected }),
+          // 층: 선택 > hover > 추천 > 일반 > 점. 겹쳤을 때 무엇이 위로 올지 정한다.
+          zIndex: selected ? 100 : hovered ? 90 : rank ? 60 : tier === "dot" ? 8 : 10,
           point: item.point,
-          yAnchor: 1.35,
+          /* ⚠️ 앵커는 **단계와 무관하게 고정**한다(중심 정렬).
+           * CustomOverlay 는 앵커를 나중에 바꿀 수 없어서, 단계마다 앵커가 다르면
+           * 줌을 넘길 때 마커를 전부 **재생성**해야 한다 — CR18-7 의 재사용이 통째로 깨진다.
+           * 좌표 위에 아무 점도 그리지 않으므로 pill 을 중심에 두는 편이 위치도 정확하다. */
+          yAnchor: 0.5,
+          xAnchor: 0.5,
           activate: () => opts.onSelect?.(item.id),
         };
       },

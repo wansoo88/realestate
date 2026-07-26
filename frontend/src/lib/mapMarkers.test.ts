@@ -9,6 +9,8 @@ import {
   MarkerLayer,
   buildLabelEl,
   clusterMarkerLines,
+  complexMarkerLabel,
+  complexMarkerLines,
   complexMarkerText,
   patchLabelEl,
   type KakaoLike,
@@ -98,14 +100,62 @@ function cluster(code: string, count: number): ClusterItem {
 }
 
 describe("complexMarkerText", () => {
-  it("추정치는 '추정' 접두로 확정치와 구분한다", () => {
-    expect(complexMarkerText(complex(1))).toBe("추정 14.8억");
+  it("마커에는 '추정' 글자를 넣지 않는다 — 지도 가격은 전부 추정이라 구분이 아니라 노이즈다", () => {
+    // 서버 계약상 price_confidence 는 estimated | unknown 뿐이다(confirmed 가 없다).
+    // 모든 마커에 붙는 단어는 정보가 아니다 → 고지는 범례 한 곳으로 모은다(MapLegend).
+    expect(complexMarkerText(complex(1))).toBe("14.8억");
+    expect(complexMarkerText(complex(1))).not.toContain("추정");
+  });
+
+  it("가격은 억 단위 소수 1자리로 압축한다(마커 폭이 예측 가능해야 한다)", () => {
+    expect(complexMarkerText({ ...complex(1), recent_price_krw: 840_000_000 })).toBe("8.4억");
   });
 
   it("가격이 없으면 0원이 아니라 '데이터 없음'", () => {
     expect(
       complexMarkerText({ ...complex(1), recent_price_krw: null, price_confidence: "unknown" }),
     ).toBe("데이터 없음");
+  });
+});
+
+describe("complexMarkerLines — 표현 단계", () => {
+  it("점 단계에는 글자가 없다(그래서 지도가 보인다)", () => {
+    expect(complexMarkerLines(complex(1), { tier: "dot" })).toEqual([]);
+  });
+
+  it("가격 단계는 숫자 한 줄만", () => {
+    expect(complexMarkerLines(complex(1), { tier: "price" })).toEqual(["14.8억"]);
+  });
+
+  it("근접 단계에서만 단지명을 붙인다", () => {
+    expect(complexMarkerLines(complex(1), { tier: "detail" })).toEqual(["14.8억", "단지1"]);
+  });
+
+  it("순위가 있어도 **가격이 0번 줄(주인공)** 이다 — 라벨이 금액보다 커지면 안 된다", () => {
+    const lines = complexMarkerLines(complex(1), { tier: "price", rank: 2 });
+    expect(lines[0]).toBe("14.8억");
+    expect(lines[1]).toBe("추천 2위");
+  });
+
+  it("근접 단계에서 순위는 단지명과 한 줄로 합친다(pill 이 3줄로 자라지 않게)", () => {
+    expect(complexMarkerLines(complex(1), { tier: "detail", rank: 1 })).toEqual([
+      "14.8억",
+      "단지1 · 추천 1위",
+    ]);
+  });
+});
+
+describe("complexMarkerLabel — 강등돼도 정보는 줄지 않는다", () => {
+  it("점으로 줄여도 보조기기에는 단지명·가격·상태를 전부 말한다", () => {
+    const label = complexMarkerLabel({ ...complex(1), over_budget: true }, { rank: 3 });
+    expect(label).toContain("단지1");
+    expect(label).toContain("14.8억");
+    expect(label).toContain("예산 초과");
+    expect(label).toContain("추천 3위");
+  });
+
+  it("시세를 모르면 '데이터 없음'이라고 말한다(빈칸이 아니다)", () => {
+    expect(complexMarkerLabel({ ...complex(1), recent_price_krw: null })).toContain("데이터 없음");
   });
 });
 
@@ -454,6 +504,156 @@ describe("CR18-7 — id 기준 diff (마커 재사용)", () => {
     const moved = overlays[0].positionCalls[0] as { lat: number; lng: number };
     expect(moved.lat).toBe(37.6);
     expect(moved.lng).toBe(127.1);
+  });
+});
+
+describe("MarkerLayer — 밀집 강등과 표현 단계", () => {
+  // 사용자 지적("추정 XXX억 동그라미가 화면을 덮는다")에 대한 구조적 대응.
+  // 여기서 못박는 것: 강등이 **정보를 지우지 않고** 화면만 정리하는가.
+
+  it("점 단계에서는 라벨 span 을 아예 만들지 않는다(요소 수가 절반)", () => {
+    const { kakao, overlays } = mockKakao();
+    const { doc, stats } = countingDoc();
+    const layer = new MarkerLayer({ kakao, map: { panTo: vi.fn() }, doc });
+
+    layer.setComplexes(complexRange(1, 100), { tier: "dot" });
+
+    expect(overlays.length).toBe(100);
+    expect(stats().created).toBe(100); // div 만. 가격 pill 이면 div+span 200개였다.
+    expect((overlays[0].opts.content as HTMLElement).className).toContain("map-pill--dot");
+    expect((overlays[0].opts.content as HTMLElement).textContent).toBe("");
+  });
+
+  it("점으로 줄여도 마커는 사라지지 않는다 — 개수도, 탭도 그대로다", () => {
+    const { kakao, overlays } = mockKakao();
+    const layer = new MarkerLayer({ kakao, map: { panTo: vi.fn() }, doc: document });
+    const onSelect = vi.fn();
+
+    layer.setComplexes(complexRange(1, 80), { tier: "dot", onSelect });
+    const el = overlays[3].opts.content as HTMLElement;
+    el.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    expect(overlays.length).toBe(80); // 숨긴 게 아니라 줄인 것이다
+    expect(onSelect).toHaveBeenCalledWith(4);
+    expect(el.getAttribute("aria-label")).toContain("14.8억"); // 값은 보조기기에 그대로
+  });
+
+  it("선택한 단지는 밀집 강등의 예외 — 혼자 상세로 열린다", () => {
+    const { kakao, overlays } = mockKakao();
+    const layer = new MarkerLayer({ kakao, map: { panTo: vi.fn() }, doc: document });
+
+    layer.setComplexes([complex(1), complex(2)], { tier: "dot", selectedId: 2 });
+
+    const sel = overlays[1].opts.content as HTMLElement;
+    const other = overlays[0].opts.content as HTMLElement;
+    expect(sel.className).toContain("map-pill--detail");
+    expect(sel.className).toContain("map-pill--selected");
+    expect(sel.textContent).toContain("14.8억");
+    expect(sel.textContent).toContain("단지2");
+    expect(other.className).toContain("map-pill--dot"); // 나머지는 점 그대로
+  });
+
+  it("추천 순위가 붙은 후보는 밀집에서도 가격을 지킨다", () => {
+    const { kakao, overlays } = mockKakao();
+    const layer = new MarkerLayer({ kakao, map: { panTo: vi.fn() }, doc: document });
+
+    layer.setComplexes([complex(1), complex(2)], { tier: "dot", rankById: { 2: 1 } });
+
+    const ranked = overlays[1].opts.content as HTMLElement;
+    expect(ranked.className).toContain("map-pill--price");
+    expect(ranked.className).toContain("map-pill--rank");
+    expect(ranked.textContent).toContain("추천 1위");
+  });
+
+  it("목록에서 가리키면 그 마커의 가격만 되살아난다(양방향 동기화)", () => {
+    const { kakao, overlays } = mockKakao();
+    const layer = new MarkerLayer({ kakao, map: { panTo: vi.fn() }, doc: document });
+
+    layer.setComplexes([complex(1), complex(2)], { tier: "dot", hoveredId: 1 });
+
+    expect((overlays[0].opts.content as HTMLElement).className).toContain("map-pill--hover");
+    expect((overlays[0].opts.content as HTMLElement).textContent).toContain("14.8억");
+    expect((overlays[1].opts.content as HTMLElement).textContent).toBe("");
+  });
+
+  it("hover 만으로는 지도를 움직이지 않는다(CR18-1 회귀 방지)", () => {
+    const { kakao } = mockKakao();
+    const map = { panTo: vi.fn() };
+    const layer = new MarkerLayer({ kakao, map, doc: document });
+
+    layer.setComplexes([complex(1), complex(2)], { hoveredId: 2 });
+
+    expect(map.panTo).not.toHaveBeenCalled();
+  });
+
+  it("선택이 있으면 나머지를 눌러 주되, 추천 후보는 누르지 않는다", () => {
+    const { kakao, overlays } = mockKakao();
+    const layer = new MarkerLayer({ kakao, map: { panTo: vi.fn() }, doc: document });
+
+    layer.setComplexes([complex(1), complex(2), complex(3)], {
+      selectedId: 1,
+      rankById: { 3: 2 },
+    });
+
+    expect((overlays[0].opts.content as HTMLElement).className).not.toContain("map-pill--muted");
+    expect((overlays[1].opts.content as HTMLElement).className).toContain("map-pill--muted");
+    expect((overlays[2].opts.content as HTMLElement).className).not.toContain("map-pill--muted");
+  });
+
+  it("선택이 없으면 아무도 누르지 않는다", () => {
+    const { kakao, overlays } = mockKakao();
+    const layer = new MarkerLayer({ kakao, map: { panTo: vi.fn() }, doc: document });
+
+    layer.setComplexes([complex(1), complex(2)], {});
+
+    expect(overlays.every((o) => !(o.opts.content as HTMLElement).className.includes("muted")))
+      .toBe(true);
+  });
+
+  it("시세를 모르는 단지는 가격 단계에서도 점이다 — pill 에 넣을 숫자가 없다", () => {
+    const { kakao, overlays } = mockKakao();
+    const layer = new MarkerLayer({ kakao, map: { panTo: vi.fn() }, doc: document });
+
+    layer.setComplexes(
+      [{ ...complex(1), recent_price_krw: null, price_confidence: "unknown" }],
+      { tier: "price" },
+    );
+
+    const el = overlays[0].opts.content as HTMLElement;
+    expect(el.className).toContain("map-pill--dot");
+    expect(el.className).toContain("map-pill--nodata");
+    expect(el.getAttribute("aria-label")).toContain("데이터 없음");
+  });
+
+  it("줌을 넘겨 단계가 바뀌어도 마커를 재생성하지 않는다(CR18-7 재사용 유지)", () => {
+    // 앵커를 단계마다 다르게 잡으면 여기서 전량 재생성이 일어난다 — 그래서 앵커를 고정했다.
+    const { kakao, overlays } = mockKakao();
+    const { doc, stats } = countingDoc();
+    const layer = new MarkerLayer({ kakao, map: { panTo: vi.fn() }, doc });
+
+    layer.setComplexes(complexRange(1, 200), { tier: "dot" });
+    const before = stats();
+
+    layer.setComplexes(complexRange(1, 200), { tier: "price" }); // 강등 해제(확대)
+    const after = stats();
+
+    expect(overlays.length).toBe(200); // 새 오버레이 0
+    expect(after.listeners - before.listeners).toBe(0); // 리스너 재부착 0
+    expect(after.created - before.created).toBe(200); // 없던 가격 span 만 200개
+    expect((overlays[0].opts.content as HTMLElement).textContent).toContain("14.8억");
+    expect(overlays.every((o) => !o.setMapCalls.includes(null))).toBe(true);
+  });
+
+  it("마커 앵커는 단계와 무관하게 중심 고정이다", () => {
+    const { kakao, overlays } = mockKakao();
+    const layer = new MarkerLayer({ kakao, map: { panTo: vi.fn() }, doc: document });
+
+    layer.setComplexes([complex(1)], { tier: "dot" });
+    layer.setComplexes([complex(2)], { tier: "detail" });
+
+    expect(overlays[0].opts.yAnchor).toBe(0.5);
+    expect(overlays[0].opts.xAnchor).toBe(0.5);
+    expect(overlays[1].opts.yAnchor).toBe(0.5);
   });
 });
 

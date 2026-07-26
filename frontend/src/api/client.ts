@@ -197,6 +197,35 @@ export interface DongValuation {
   }>;
 }
 
+/**
+ * 축별 점수 반영 결과 (api-spec §5.3 · 서버 `scoring.py::AXIS_SPECS` 가 정본).
+ *
+ * 왜 이 구조가 통째로 오는가: 서버가 **근거 있는 축만** 총점에 넣고 나머지 가중치를
+ * 재정규화하기 때문이다. 그 사실을 화면이 말하지 않으면 재정규화 자체가 거짓말이 된다 —
+ * 사용자는 자기가 준 30%가 반영된 줄 안다.
+ */
+export interface ScoreAxis {
+  axis: "price" | "location" | "value" | "risk" | string;
+  label: string;
+  agent_ids: string[];
+  /** 무엇을 점수로 썼는지(사람이 읽는 설명) */
+  signal: string;
+  coverage: "full" | "partial" | string;
+  /** partial 이면 **무엇이 빠졌는지**. 반영 여부와 무관하게 보여줘야 한다(계약). */
+  coverage_gap: string | null;
+  /** 사용자가 준 비중(정규화 후) */
+  weight: number;
+  /** 재정규화 후 실효 비중. 반영되지 않았으면 null. */
+  applied_weight: number | null;
+  /** 이 축의 점수. null = 근거 없음(0 이 아니다). */
+  score: number | null;
+  confidence?: number | null;
+  detail?: string | null;
+  status: "applied" | "no_signal" | "zero_weight" | "no_weights" | string;
+  /** 근거가 없을 때 무엇이 없는지 */
+  missing: string[];
+}
+
 export interface RecommendationItem {
   rank?: number;
   complex: { id: number; name: string };
@@ -214,7 +243,15 @@ export interface RecommendationItem {
   price_band: PriceBand | null;
   /** null = "모른다". 0 으로 렌더링 금지. */
   total_score: number | null;
+  /** `user_weighted`(사용자 가중치) | `agent_scores`(가중치 없어 폴백) | null.
+   *  ⚠️ `agent_scores` 는 "가중치가 반영된 점수"가 **아니다** — 그렇게 표시하면 계약 위반. */
   score_basis: string | null;
+  /** 사용자 가중치 중 실제로 반영된 비율(%). 100 미만이면 **부분 반영 표기 필수**(계약). */
+  score_coverage_pct?: number | null;
+  /** 축별 반영 결과. 서버가 안 줄 수도 있다(구버전) — 없으면 표시하지 않는다. */
+  score_axes?: ScoreAxis[] | null;
+  /** 이 후보에서 반영되지 못한 가중치 고지. 결과 전체 notes 와 **양쪽 다** 보여준다. */
+  score_notes?: string[] | null;
   timing_signal: string;
   headline: string;
   why: string[];

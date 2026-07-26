@@ -16,9 +16,15 @@ import {
   DEFAULT_WEIGHTS,
   WEIGHT_KEYS,
   WEIGHT_LABELS,
+  WEIGHT_META,
   normalizeWeights,
+  weightStatus,
+  weightStatusNote,
+  weightsApplied,
   type Weights,
 } from "../lib/preferences";
+import { observedNoSignal } from "../lib/scoreAxes";
+import { InfoTip } from "./InfoTip";
 import { MoneyField } from "./MoneyField";
 import "./ConditionsScreen.css";
 
@@ -325,35 +331,96 @@ export function ConditionsScreen({ profile, preferences, onSave, onClose }: Prop
           ))}
         </section>
 
+        {/* ── 가중치 ────────────────────────────────────────────────────────
+            사용자가 "가격·입지·가치·리스크가 무슨 말인지 모르겠다"고 했다. 설명을 붙이되,
+            **작동하는 범위를 넘겨 말하지 않는다.** 서버는 이제 가중치를 실제로 반영하지만
+            (api-spec §5.3), 근거가 없는 축은 재정규화로 빠지고 partial 축은 일부만 본다.
+            그 판단은 전부 lib/preferences · lib/scoreAxes 에서 내린다. */}
         <section className="cond__group" aria-labelledby="cond-weights">
           <h2 className="cond__group-title" id="cond-weights">
             무엇을 더 중요하게 볼까요
           </h2>
-          <p className="cond__note">합계는 자동으로 맞춰집니다. 비율만 정하면 됩니다.</p>
-          {WEIGHT_KEYS.map((key) => (
-            <div className="cond__row" key={key}>
-              <label className="cond__label" htmlFor={`cond-w-${key}`}>
-                {WEIGHT_LABELS[key]}
-              </label>
-              <div className="cond__range">
-                <input
-                  id={`cond-w-${key}`}
-                  type="range"
-                  min={0}
-                  max={100}
-                  step={5}
-                  value={Math.round((weights[key] ?? 0) * 100)}
-                  onChange={(e) =>
-                    setWeights({ ...weights, [key]: Number(e.target.value) / 100 })
-                  }
-                  aria-describedby={`cond-w-${key}-value`}
-                />
-                <span id={`cond-w-${key}-value`} className="cond__value num">
-                  {Math.round((normalized[key] ?? 0) * 100)}%
-                </span>
+          <p className="cond__note">
+            추천 순위를 매길 때 어디에 비중을 둘지 정합니다. 합계는 자동으로 맞춰집니다.
+            근거가 없는 항목은 순위 계산에서 빠지고, 빠진 사실은 결과에 함께 표시됩니다.
+          </p>
+
+          {/* 서버가 아직 가중치를 안 쓰는 배포라면 그것부터 밝힌다(항목마다 반복하지 않는다) */}
+          {!weightsApplied() && (
+            <p className="cond__warn">
+              현재 이 비중은 <strong>저장만 되고 추천 순위 계산에는 아직 반영되지 않습니다.</strong>{" "}
+              반영되기 시작하면 이 안내가 사라집니다.
+            </p>
+          )}
+
+          {WEIGHT_KEYS.map((key) => {
+            const meta = WEIGHT_META[key];
+            // "지금 근거가 있는가"는 **직전 분석에서 관측한 값**으로 판단한다(하드코딩 금지).
+            const status = weightStatus(key, { observedNoSignal: observedNoSignal(key) });
+            const note = weightStatusNote(status, key);
+            const descId = `cond-w-${key}-desc`;
+            const noteId = `cond-w-${key}-note`;
+            const gapId = `cond-w-${key}-gap`;
+            const describedBy = [descId, meta.coverageGap ? gapId : "", note ? noteId : ""]
+              .filter(Boolean)
+              .join(" ");
+
+            return (
+              <div className="cond__weight" key={key}>
+                <div className="cond__weight-head">
+                  <label className="cond__label" htmlFor={`cond-w-${key}`}>
+                    {WEIGHT_LABELS[key]}
+                    <span className="cond__weight-tag">{meta.tagline}</span>
+                  </label>
+                  {/* 자세한 설명은 눌러서 연다 — hover 툴팁은 폰에서 뜨지 않는다 */}
+                  <InfoTip label={WEIGHT_LABELS[key]}>
+                    {meta.detail}
+                    <span className="cond__weight-agent">
+                      점수 근거: {meta.signal} · 담당 {meta.agent}
+                    </span>
+                  </InfoTip>
+                </div>
+
+                {/* 한 줄 요약은 **항상 보인다.** 열어야만 뜻을 알 수 있으면 설명이 아니다. */}
+                <p className="cond__weight-sum" id={descId}>
+                  {meta.summary}
+                </p>
+
+                <div className="cond__range">
+                  <input
+                    id={`cond-w-${key}`}
+                    type="range"
+                    min={0}
+                    max={100}
+                    step={5}
+                    value={Math.round((weights[key] ?? 0) * 100)}
+                    onChange={(e) =>
+                      setWeights({ ...weights, [key]: Number(e.target.value) / 100 })
+                    }
+                    aria-describedby={describedBy}
+                  />
+                  <span className="cond__value num">
+                    {Math.round((normalized[key] ?? 0) * 100)}%
+                  </span>
+                </div>
+
+                {/* 부분 커버리지는 **반영 여부와 무관하게** 늘 말한다 —
+                    "호가만 들어오면 리스크가 다 반영된다"는 오해를 막는다(api-spec §5.3). */}
+                {meta.coverageGap && (
+                  <p className="cond__weight-gap" id={gapId}>
+                    <span className="badge cond__weight-badge">일부만 반영</span>
+                    {meta.coverageGap}
+                  </p>
+                )}
+
+                {note && (
+                  <p className="cond__weight-note" id={noteId}>
+                    {note}
+                  </p>
+                )}
               </div>
-            </div>
-          ))}
+            );
+          })}
         </section>
 
         {error && (

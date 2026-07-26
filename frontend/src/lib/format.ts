@@ -38,6 +38,25 @@ export function formatKrwShort(won: number | null | undefined): string {
   return `${Math.round(won).toLocaleString("ko-KR")}원`;
 }
 
+/**
+ * 지도 마커 전용 **초압축** — 항상 억 단위 소수 1자리. "8.4억"
+ *
+ * 왜 formatKrwShort 로 부족한가: 그쪽은 10억 미만에서 소수 2자리("8.50억")를 쓴다.
+ * 칩·리스트에서는 그 정밀도가 비교에 도움이 되지만, 마커에서는 **글자 한 개가 지도를 덮는다**.
+ * 한 화면에 수십 개가 동시에 뜨는 자리이므로 자릿수를 고정해 폭을 예측 가능하게 만든다.
+ * 100억 이상은 소수점을 버린다("120억") — 그 구간에서 1,000만원 자리는 판단에 영향이 없다.
+ */
+export function formatKrwCompact(won: number | null | undefined): string {
+  if (won === null || won === undefined || Number.isNaN(won)) return "—";
+  const abs = Math.abs(won);
+  if (abs >= 100_000_000) {
+    const eok = won / 100_000_000;
+    return `${eok.toFixed(abs >= 10_000_000_000 ? 0 : 1)}억`;
+  }
+  if (abs >= 10_000) return `${Math.round(won / 10_000).toLocaleString("ko-KR")}만`;
+  return `${Math.round(won).toLocaleString("ko-KR")}원`;
+}
+
 /** ㎡ → "84.97㎡ (25.7평)" */
 export function formatArea(m2: number | null | undefined): string {
   if (m2 === null || m2 === undefined || Number.isNaN(m2)) return "—";

@@ -4,6 +4,7 @@ import {
   formatArea,
   formatAsOf,
   formatKrw,
+  formatKrwCompact,
   formatKrwShort,
   formatPct,
 } from "./format";
@@ -48,6 +49,33 @@ describe("formatKrwShort", () => {
 
   it("억 미만은 만 단위", () => {
     expect(formatKrwShort(85_000_000)).toBe("8,500만");
+  });
+});
+
+/**
+ * 지도 마커용 압축 표기. 한 화면에 수십 개가 동시에 뜨므로 **자릿수를 고정**해야
+ * pill 폭이 예측 가능해지고 서로 덜 겹친다.
+ */
+describe("formatKrwCompact", () => {
+  it("억 단위 소수 1자리로 고정한다 — 10억 미만도 2자리로 늘리지 않는다", () => {
+    expect(formatKrwCompact(840_000_000)).toBe("8.4억");
+    expect(formatKrwCompact(1_480_000_000)).toBe("14.8억");
+    // formatKrwShort 는 같은 값을 "8.50억"으로 준다(칩·리스트용). 마커는 더 짧아야 한다.
+    expect(formatKrwShort(850_000_000)).toBe("8.50억");
+    expect(formatKrwCompact(850_000_000)).toBe("8.5억");
+  });
+
+  it("100억 이상은 소수점을 버린다(그 구간에서 1,000만원 자리는 판단을 바꾸지 않는다)", () => {
+    expect(formatKrwCompact(12_000_000_000)).toBe("120억");
+  });
+
+  it("억 미만은 만 단위", () => {
+    expect(formatKrwCompact(85_000_000)).toBe("8,500만");
+  });
+
+  it("모르는 값은 0 이 아니라 대시", () => {
+    expect(formatKrwCompact(null)).toBe("—");
+    expect(formatKrwCompact(undefined)).toBe("—");
   });
 });
 

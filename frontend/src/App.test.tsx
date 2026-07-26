@@ -9,7 +9,16 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Authenticated } from "./App";
-import { ApiException, api, type AffordabilityResponse, type Preferences, type Profile } from "./api/client";
+import {
+  ApiException,
+  api,
+  type AffordabilityResponse,
+  type ComplexItem,
+  type Preferences,
+  type Profile,
+} from "./api/client";
+import { forgetCamera } from "./lib/mapCamera";
+import { installKakaoStub, type KakaoStubHandle } from "./test/kakaoStub";
 
 const PROFILE: Profile = {
   cash_krw: 300_000_000,
@@ -158,6 +167,149 @@ describe("프로필이 있을 때", () => {
     // 근거는 출처·기준일과 함께 (G2)
     expect(screen.getByText("취득세율 1.1%")).toBeTruthy();
     expect(screen.getByText(/지방세법 §11/)).toBeTruthy();
+  });
+});
+
+/**
+ * 지도 화면의 조작 — 사용자가 실사용 후 지적한 부분들.
+ *  ① "내 조건을 지도에서 언제든지 설정할 수 있나" → 상시 진입점
+ *  ② 목록에 위계가 없다 → 정렬. 단, **모르는 값을 0 으로 줄 세우지 않는다**.
+ */
+describe("지도 화면", () => {
+  function complex(over: Partial<ComplexItem> & { id: number; name: string }): ComplexItem {
+    return {
+      point: [127, 37.5],
+      households: 500,
+      built_year: 2005,
+      recent_price_krw: 1_000_000_000,
+      price_as_of: "2026-06-30",
+      price_confidence: "estimated",
+      active_listings: 1,
+      over_budget: false,
+      ...over,
+    };
+  }
+
+  let kakao: KakaoStubHandle | null = null;
+
+  afterEach(() => {
+    kakao?.restore();
+    kakao = null;
+    forgetCamera(); // 테스트끼리 지도 위치를 물려주지 않는다
+  });
+
+  function mountWith(items: ComplexItem[]) {
+    // 목록은 지도가 만든다(idle → bbox → 조회). SDK 가 없으면 목록도 없다.
+    kakao = installKakaoStub();
+    vi.spyOn(api, "getProfile").mockResolvedValue(PROFILE);
+    vi.spyOn(api, "getPreferences").mockResolvedValue(PREFS);
+    vi.spyOn(api, "affordability").mockResolvedValue(AFFORD);
+    vi.spyOn(api, "mapComplexes").mockResolvedValue({ level: "complex", items, note: "" });
+    return userEvent.setup();
+  }
+
+  const names = () =>
+    screen.getAllByRole("heading", { level: 3 }).map((h) => h.textContent);
+
+  it("지도를 보는 중에도 조건 진입점이 항상 있다(요청: 지도에서 언제든 설정)", async () => {
+    const user = mountWith([]);
+    render(<Authenticated />);
+
+    const edit = await screen.findByRole("button", { name: "조건 수정" });
+    await user.click(edit);
+
+    expect(await screen.findByRole("heading", { name: "내 조건", level: 1 })).toBeTruthy();
+  });
+
+  it("정렬을 바꾸면 목록 순서가 바뀐다 — 범위는 '지금 보이는 지도'라고 밝힌다", async () => {
+    const user = mountWith([
+      complex({ id: 1, name: "가나아파트", recent_price_krw: 1_400_000_000 }),
+      complex({ id: 2, name: "다라아파트", recent_price_krw: 700_000_000 }),
+    ]);
+    render(<Authenticated />);
+
+    await screen.findByText("가나아파트");
+    expect(names()).toEqual(["가나아파트", "다라아파트"]); // 서버 순서 그대로
+    expect(screen.getByText("지금 보이는 지도 범위 기준")).toBeTruthy();
+
+    await user.selectOptions(screen.getByLabelText("목록 정렬"), "price_asc");
+
+    expect(names()).toEqual(["다라아파트", "가나아파트"]);
+  });
+
+  it("시세를 모르는 단지는 '가격 낮은 순'에서도 맨 뒤다(0 원이 아니다)", async () => {
+    const user = mountWith([
+      complex({ id: 1, name: "가나아파트", recent_price_krw: 1_400_000_000 }),
+      complex({
+        id: 2,
+        name: "미상아파트",
+        recent_price_krw: null,
+        price_confidence: "unknown",
+      }),
+      complex({ id: 3, name: "다라아파트", recent_price_krw: 700_000_000 }),
+    ]);
+    render(<Authenticated />);
+    await screen.findByText("미상아파트");
+
+    await user.selectOptions(screen.getByLabelText("목록 정렬"), "price_asc");
+
+    expect(names()).toEqual(["다라아파트", "가나아파트", "미상아파트"]);
+    // 값을 지어내지 않는다 — 목록에도 '데이터 없음'으로 남는다
+    expect(screen.getByText("데이터 없음")).toBeTruthy();
+  });
+
+  it("보여줄 단지가 없으면 정렬 컨트롤도 없다(누를 게 없는 조작을 두지 않는다)", async () => {
+    mountWith([]);
+    render(<Authenticated />);
+
+    await screen.findByRole("button", { name: "조건 수정" });
+    expect(screen.queryByLabelText("목록 정렬")).toBeNull();
+  });
+
+  /**
+   * 분석 지역 — 예전엔 `region_codes` 를 **한 번도 보내지 않아** 늘 수도권 전체(단지 1.6만)에서
+   * 상한 50개만 보고 추천했다. 사용자가 평촌·분당을 지정할 방법이 없었던 원인이다.
+   */
+  it("고른 시군구가 실제로 추천 요청에 실려 나간다", async () => {
+    const user = mountWith([]);
+    const create = vi
+      .spyOn(api, "createRecommendation")
+      .mockResolvedValue({ job_id: "rec_1", status: "queued" });
+    vi.spyOn(api, "recommendation").mockResolvedValue({
+      job_id: "rec_1",
+      status: "done",
+      items: [],
+    });
+    render(<Authenticated />);
+
+    await user.click(await screen.findByRole("tab", { name: "AI 추천" }));
+    await user.click(screen.getByRole("button", { name: "지역 선택" }));
+    await user.click(screen.getByRole("checkbox", { name: /성남시 분당구/ }));
+    await user.click(screen.getByRole("button", { name: "AI 추천 실행" }));
+
+    await waitFor(() => expect(create).toHaveBeenCalled());
+    expect(create.mock.calls[0][0]).toMatchObject({ region_codes: ["41135"] });
+  });
+
+  it("지역을 안 고르면 빈 배열을 보내고, 전체에서 찾는다는 사실을 화면에 적는다", async () => {
+    const user = mountWith([]);
+    const create = vi
+      .spyOn(api, "createRecommendation")
+      .mockResolvedValue({ job_id: "rec_1", status: "queued" });
+    vi.spyOn(api, "recommendation").mockResolvedValue({
+      job_id: "rec_1",
+      status: "done",
+      items: [],
+    });
+    render(<Authenticated />);
+
+    await user.click(await screen.findByRole("tab", { name: "AI 추천" }));
+    expect(screen.getByText(/수도권 전체에서 찾습니다/)).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "AI 추천 실행" }));
+
+    await waitFor(() => expect(create).toHaveBeenCalled());
+    expect(create.mock.calls[0][0].region_codes).toEqual([]);
   });
 });
 

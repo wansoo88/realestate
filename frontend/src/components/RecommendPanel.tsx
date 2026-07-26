@@ -13,6 +13,7 @@ import type { RecommendationJob } from "../api/client";
 import { formatKrwShort } from "../lib/format";
 import { NOTICE_NOT_ADVICE, NOTICE_TRADE_DELAY } from "../lib/notices";
 import { progressText, type JobPhase } from "../lib/recommendation";
+import { RegionPicker } from "./RegionPicker";
 import { ReportCard } from "./ReportCard";
 import { Section } from "./Section";
 import "./RecommendPanel.css";
@@ -22,6 +23,9 @@ interface Props {
   job: RecommendationJob | null;
   error: string | null;
   budgetKrw: number | null;
+  /** 분석 지역(5자리 시군구). 빈 배열 = 수도권 전체. */
+  regionCodes: string[];
+  onRegionsChange: (codes: string[]) => void;
   onStart: () => void;
   onCancel: () => void;
   onShowOnMap?: (complexId: number) => void;
@@ -33,6 +37,8 @@ export function RecommendPanel({
   job,
   error,
   budgetKrw,
+  regionCodes,
+  onRegionsChange,
   onStart,
   onCancel,
   onShowOnMap,
@@ -49,6 +55,9 @@ export function RecommendPanel({
           ? `내 예산 ${formatKrwShort(budgetKrw)} 기준으로 분석합니다.`
           : "예산이 아직 계산되지 않았습니다 — 자산을 입력하면 예산 안에서만 후보를 세웁니다."}
       </p>
+
+      {/* 어디에서 찾을지 — 분석을 **시작하기 전에** 정한다. 실행 버튼 바로 위가 제자리다. */}
+      <RegionPicker value={regionCodes} onChange={onRegionsChange} disabled={running} />
 
       <div className="rec__actions">
         <button type="button" className="rec__run" onClick={onStart} disabled={running}>

@@ -53,8 +53,109 @@
 
 .report__score {
   flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
   font-size: var(--fs-footnote);
   font-weight: 600;
+}
+
+/* 부분 반영 — 커버리지가 낮은 점수를 100% 점수와 같은 강도로 그리면
+   "확신의 농도"가 깨진다(api-spec §5.3 프론트 계약). 숫자를 눌러 표시한다. */
+.report__score--partial .num {
+  color: var(--text-secondary);
+}
+
+.report__score-cov {
+  font-family: var(--ff);
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--warn-text);
+  white-space: nowrap;
+}
+
+/* 이 후보에서 빠진 가중치 고지 — 결과 전체 notes 와 **양쪽 다** 보여준다 */
+.report__scorenotes {
+  list-style: none;
+  margin: 0 0 var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-btn);
+  background: var(--badge-bg);
+}
+
+.report__scorenotes li {
+  font-size: var(--fs-caption);
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+/* 축별 반영 내역 */
+.report__axes {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.report__axis {
+  padding: var(--sp-2) 0;
+  border-bottom: 0.5px solid var(--hairline);
+}
+
+.report__axis:last-child {
+  border-bottom: none;
+}
+
+/* 반영되지 않은 축 — 지우지 않고 눌러 둔다 */
+.report__axis--off .report__axis-label,
+.report__axis--off .report__axis-weight {
+  color: var(--text-secondary);
+}
+
+.report__axis-head {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: baseline;
+  gap: var(--sp-2);
+  margin: 0;
+}
+
+.report__axis-label {
+  font-size: var(--fs-footnote);
+  font-weight: 600;
+}
+
+.report__axis-weight {
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+}
+
+.report__axis-applied {
+  color: var(--accent);
+}
+
+.report__axis-score {
+  min-width: 36px;
+  text-align: right;
+  font-weight: 600;
+}
+
+.report__axis-why,
+.report__axis-gap,
+.report__axis-basis {
+  margin: 2px 0 0;
+  font-size: var(--fs-caption);
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.report__axis-gap {
+  color: var(--warn-text);
+}
+
+.report__axis-basis {
+  margin-top: var(--sp-3);
+  color: var(--warn-text);
 }
 
 /* 점수 없음 — 0점처럼 보이면 안 되므로 숫자 강조를 뺀다 */

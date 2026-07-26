@@ -21,18 +21,36 @@
 
 ## 종합 로직
 
-### A. 점수 집계 (규칙 계산)
-```
-total_score = Σ ( agent_score_i × weight_i × confidence_i )
-```
-| 기본 가중치 | 값 | 사용자 조정 |
-|---|---|---|
-| 가격 적정성 (`valuation-trader`) | 0.30 | ✅ |
-| 입지 (`location-analyst`) | 0.30 | ✅ |
-| 자금 적합 (`finance-tax-advisor`) | 0.25 | ✅ |
-| 리스크 (`risk-auditor`) | 0.15 | ✅ (2차) |
+### A. 점수 집계 (규칙 계산) — 2026-07-26 구현 반영
 
-**`confidence`를 곱한다**는 점이 중요하다. 신뢰도 낮은 추정(동별 판단 등)이 순위를 흔들지 못하게 한다.
+> ⚠️ **설계 정정.** 초안은 축을 `가격/입지/자금 적합/리스크` 로 잡고
+> `Σ(score × weight × confidence)` 를 썼다. 구현·API 계약(`api-spec.md` §2·§5.3)과
+> 프론트 슬라이더(`lib/preferences.ts`)의 실제 축은 **`price/location/value/risk`** 이고,
+> `자금 적합`은 축이 아니라 **하드 제외**다(아래 B). 정본은 `app/agents/scoring.py::AXIS_SPECS`.
+>
+> 그리고 초안 시점에는 이 가중치가 **어디에도 연결되지 않았다** — 슬라이더가 DB 에 저장만
+> 되고 순위는 신뢰도 가중 평균으로 나왔다. 2026-07-26 에 실제로 연결했다.
+
+```
+total_score = Σ(wᵢ × scoreᵢ) / Σ(wᵢ)      (i ∈ 근거가 있는 축)
+```
+| 축 | 기본값 | 담당 | 점수 신호 |
+|---|---|---|---|
+| `price` 가격 | 0.30 | `valuation-trader` | 호가−적정가 밴드 갭 |
+| `location` 입지 | 0.30 | `location-analyst` | 학군·역세권·인프라 근접 |
+| `value` 가치(시세) | 0.25 | `valuation-trader` | 12개월 거래회전율(환금성) |
+| `risk` 리스크 | 0.15 | `listing-researcher` (**`risk-auditor` 는 2차**) | 매물 신뢰도 |
+
+**근거가 없는 축은 빼고 재정규화한다.** 0점 처리는 "나쁘다"는 없는 판정을 만들고,
+조용한 제외는 사용자가 자기 가중치가 반영된 줄 알게 만든다. 둘 다 금지 —
+빠진 비율과 사유를 `score_axes`·`score_notes`·`notes` 로 함께 내보낸다.
+
+**`confidence` 를 가중치에 곱하지 않는다** (초안에서 바뀐 점).
+사용자가 30% 라고 한 것이 내부 신뢰도 때문에 21% 로 조용히 바뀌면 슬라이더가 예측
+불가능해진다. 대신 confidence 는 ① 근거 유무 판정(점수 `null` → 축 제외)과
+② `score_axes[].confidence` 노출로 쓰고, 추정 기반 판단은 애초에 `≤0.6` 으로 캡된다
+(`base.py::ESTIMATE_CONFIDENCE_CAP`). 가중치가 아예 없을 때의 폴백만 **기존
+신뢰도 가중 평균**을 그대로 쓴다.
 
 ### B. 하드 제외 (점수와 무관하게 탈락)
 1. `finance-tax-advisor`가 **예산 초과** 판정 → 제외
@@ -66,6 +84,10 @@ total_score = Σ ( agent_score_i × weight_i × confidence_i )
   "agent_id": "portfolio-advisor",
   "items": [
     { "rank": 1, "total_score": 82.4,
+      "score_basis": "user_weighted",        // 가중치 없으면 "agent_scores"
+      "score_coverage_pct": 70.0,            // 가중치 중 실제로 반영된 비율
+      "score_axes": [ /* 축별 weight·applied_weight·score·status·missing (§5.3) */ ],
+      "score_notes": ["입지 가중치 30%가 반영되지 않았습니다 — 학구도 데이터 미확보"],
       "complex": { "id": 1024, "name": "○○아파트" },
       "unit_type": { "area_m2": 84.97, "type_name": "84A" },
       "building": { "id": 88, "name": "101동", "confidence": 0.45,

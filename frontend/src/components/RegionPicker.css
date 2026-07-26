@@ -1,0 +1,162 @@
+/* 분석 지역 — 추천 패널 안. 조건 칩(FilterRail)과 같은 시각 언어를 쓰되
+   **자리는 다르다**(지도 필터가 아니라 추천 요청 파라미터다). */
+.regions {
+  margin: 0 0 var(--sp-4);
+  padding: var(--sp-3);
+  border-radius: var(--r-card);
+  background: var(--badge-bg);
+}
+
+.regions__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+
+.regions__title {
+  margin: 0;
+  font-size: var(--fs-footnote);
+  font-weight: 600;
+}
+
+.regions__toggle {
+  min-height: var(--touch-min);
+  padding: 0 var(--sp-2);
+  color: var(--accent);
+  font-size: var(--fs-caption);
+  font-weight: 600;
+}
+
+.regions__scope {
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-caption);
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+.regions__chips {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin: var(--sp-2) 0 0;
+  padding: 0;
+}
+
+/* 선택 칩 — 지우기 쉬워야 한다(칩 전체가 삭제 버튼이다) */
+.regions__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 34px;
+  padding: 0 var(--sp-3);
+  border-radius: var(--r-pill);
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: var(--fs-caption);
+  font-weight: 600;
+}
+
+.regions__chip-x {
+  font-size: var(--fs-footnote);
+  opacity: 0.8;
+}
+
+.regions__clear {
+  min-height: 34px;
+  padding: 0 var(--sp-2);
+  color: var(--accent);
+  font-size: var(--fs-caption);
+}
+
+.regions__body {
+  margin-top: var(--sp-3);
+  padding-top: var(--sp-3);
+  border-top: 0.5px solid var(--hairline);
+}
+
+.regions__search-input {
+  width: 100%;
+  min-height: var(--touch-min);
+  padding: 0 var(--sp-3);
+  border: 0.5px solid var(--hairline-strong);
+  border-radius: var(--r-btn);
+  background: var(--bg-elev);
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--fs-footnote);
+}
+
+.regions__sido {
+  display: flex;
+  gap: var(--sp-2);
+  margin: var(--sp-3) 0;
+}
+
+.regions__sidobtn {
+  flex: 1;
+  min-height: 36px;
+  border-radius: var(--r-pill);
+  border: 0.5px solid var(--hairline);
+  background: var(--bg-elev);
+  color: var(--text-secondary);
+  font-size: var(--fs-caption);
+}
+
+.regions__sidobtn--on {
+  border-color: transparent;
+  background: var(--accent-weak);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* 목록 — 스크롤 영역. 91개를 한 번에 펼치면 그 아래 실행 버튼이 화면 밖으로 밀린다. */
+.regions__list {
+  max-height: 42vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin: 0;
+  padding: 0;
+  border: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 2px;
+}
+
+.regions__item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: var(--touch-min);
+  padding: 0 var(--sp-2);
+  border-radius: var(--r-btn);
+  cursor: pointer;
+}
+
+.regions__item:hover {
+  background: var(--bg-elev);
+}
+
+.regions__item input {
+  width: 20px;
+  height: 20px;
+  accent-color: var(--accent);
+}
+
+.regions__item-name {
+  font-size: var(--fs-caption);
+}
+
+.regions__empty {
+  margin: var(--sp-3) 0;
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+}
+
+.regions__note {
+  margin: var(--sp-3) 0 0;
+  font-size: var(--fs-caption);
+  line-height: 1.5;
+  color: var(--text-estimated);
+}

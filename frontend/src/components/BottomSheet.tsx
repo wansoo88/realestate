@@ -22,6 +22,8 @@ interface Props {
   snap: SnapPoint;
   onSnapChange: (s: SnapPoint) => void;
   title: string;
+  /** 제목 줄 우측(정렬 선택 등). 목록의 성격을 바꾸는 조작은 목록 **바로 위**에 있어야 한다. */
+  actions?: React.ReactNode;
   children: React.ReactNode;
 }
 
@@ -38,7 +40,7 @@ function nearestSnap(ratio: number): SnapPoint {
   return best;
 }
 
-export function BottomSheet({ snap, onSnapChange, title, children }: Props) {
+export function BottomSheet({ snap, onSnapChange, title, actions, children }: Props) {
   const [dragRatio, setDragRatio] = useState<number | null>(null);
   const startY = useRef(0);
   const startRatio = useRef(0);
@@ -123,7 +125,10 @@ export function BottomSheet({ snap, onSnapChange, title, children }: Props) {
         <div className="sheet__grip" aria-hidden="true" />
       </div>
       {/* 제목은 slider 밖에 둔다 — slider 자식은 접근성 트리에서 무시돼 스크린리더에 안 읽힌다(F-04) */}
-      <h2 className="sheet__title">{title}</h2>
+      <div className="sheet__head">
+        <h2 className="sheet__title">{title}</h2>
+        {actions && <div className="sheet__actions">{actions}</div>}
+      </div>
       <div className="sheet__body">{children}</div>
     </section>
   );

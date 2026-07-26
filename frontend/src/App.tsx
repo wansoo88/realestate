@@ -7,6 +7,15 @@
  * 그래서 프로필이 비어 있으면 지도가 아니라 **조건 화면**으로 먼저 보낸다.
  *
  * 필터는 **보이게** 건다(칩 + 스위치). 조용히 걸린 필터는 사용자에게 "왜 안 보이지?"가 된다.
+ *
+ * 레이아웃 (App.css 의 --rail-w / --list-w 가 단일 진실)
+ * ------------------------------------------------------
+ *   폰(~899px)      : 지도 전체 + 좌상단 조건 바 + 바텀시트 3단
+ *   태블릿(900~)    : 지도 + **우측 결과 패널**(시트가 패널이 된다)
+ *   데스크톱(1200~) : **좌(조건) · 중(지도) · 우(결과)** 3분할
+ *
+ * DOM 은 한 벌이고 배치만 CSS 가 바꾼다 — 화면 크기별로 컴포넌트를 두 번 렌더하면
+ * 접근성 이름이 중복되고 상태가 갈라진다.
  */
 import { useCallback, useMemo, useState } from "react";
 import { logout, type Preferences, type Profile } from "./api/client";
@@ -16,6 +25,7 @@ import { AuthForm } from "./components/AuthForm";
 import { BottomSheet, type SnapPoint } from "./components/BottomSheet";
 import { ComplexCard } from "./components/ComplexCard";
 import { ConditionsScreen } from "./components/ConditionsScreen";
+import { FilterRail } from "./components/FilterRail";
 import { MapView } from "./components/MapView";
 import { RecommendPanel } from "./components/RecommendPanel";
 import { useAdminUsers } from "./hooks/useAdminUsers";
@@ -24,6 +34,7 @@ import { useAuth } from "./hooks/useAuth";
 import { useMapArea } from "./hooks/useMapArea";
 import { useProfile } from "./hooks/useProfile";
 import { useRecommendation } from "./hooks/useRecommendation";
+import { SORT_OPTIONS, isSortKey, sortComplexes, type SortKey } from "./lib/complexSort";
 import { formatKrwShort } from "./lib/format";
 import { filterChips, type MapFilterState } from "./lib/mapFilters";
 import { NOTICE_NOT_ADVICE, NOTICE_TRADE_DELAY } from "./lib/notices";
@@ -48,6 +59,11 @@ export function Home({ preferences, onEditConditions, adminEntry }: HomeProps) {
   const [tab, setTab] = useState<Tab>("map");
   const [snap, setSnap] = useState<SnapPoint>("peek");
   const [selected, setSelected] = useState<number | null>(null);
+  /** 목록에서 가리키는 중인 단지 — 지도 마커를 들어올린다(선택과 다르다: 지도를 움직이지 않는다). */
+  const [hovered, setHovered] = useState<number | null>(null);
+  const [sort, setSort] = useState<SortKey>("default");
+  /** AI 추천을 돌릴 시군구(5자리). 빈 배열 = 수도권 전체 — 그 사실은 RegionPicker 가 화면에 적는다. */
+  const [regionCodes, setRegionCodes] = useState<string[]>([]);
   const [purpose] = useState<Purpose>("live");
 
   // 필터 스위치 — 기본은 켜짐. 끌 수 있어야 "왜 안 보이지?"에 사용자가 스스로 답한다.
@@ -74,6 +90,12 @@ export function Home({ preferences, onEditConditions, adminEntry }: HomeProps) {
     return out;
   }, [rec.job]);
 
+  /** 목록에 실제로 그릴 순서. 지도 범위 안에서만 도는 클라이언트 정렬이다(서버 계약에 정렬이 없다). */
+  const listItems = useMemo(
+    () => sortComplexes(map.items, sort, rankById),
+    [map.items, sort, rankById],
+  );
+
   const onBoundsChange = useCallback(
     (bbox: string, zoom: number) => {
       // 지도를 움직이면 시트를 내려 지도가 가려지지 않게 한다(ux §3).
@@ -95,12 +117,18 @@ export function Home({ preferences, onEditConditions, adminEntry }: HomeProps) {
   }, []);
 
   const startRecommendation = useCallback(() => {
-    // 지역은 서버 기본(전 대상지역)에 맡긴다. 예산은 서버가 /affordability 로 다시 계산한다
-    // — 화면이 계산한 값을 보내면 진실이 두 개가 된다.
-    void rec.start({ purpose, top_n: 10 });
-  }, [purpose, rec]);
+    // 예산은 서버가 /affordability 로 다시 계산한다 — 화면이 계산한 값을 보내면 진실이 두 개가 된다.
+    // 지역은 **사용자가 고른 것을 그대로** 보낸다. 빈 배열이면 서버가 전체에서 찾는다
+    // (예전엔 아예 보내지 않아 항상 수도권 전체였고, 그래서 추천이 엉뚱하게 느껴졌다).
+    void rec.start({ purpose, top_n: 10, region_codes: regionCodes });
+  }, [purpose, rec, regionCodes]);
 
   const chips = filterChips(filters);
+  const toggleChip = useCallback((id: "budget" | "area" | "built") => {
+    if (id === "budget") setBudgetApplied((v) => !v);
+    else setPreferApplied((v) => !v);
+  }, []);
+
   const title =
     tab === "map"
       ? map.level === "cluster"
@@ -110,49 +138,44 @@ export function Home({ preferences, onEditConditions, adminEntry }: HomeProps) {
         ? "내 자금"
         : "AI 추천";
 
+  /* 정렬은 목록 바로 위에 둔다. 네이티브 select 를 쓰는 이유: 키보드·스크린리더·모바일
+     기본 피커가 전부 공짜로 따라오고, 직접 만든 드롭다운은 그 셋을 대개 못 만든다. */
+  const sortControl =
+    tab === "map" && map.level === "complex" && listItems.length > 0 ? (
+      <label className="app__sort">
+        <span className="sr-only">목록 정렬</span>
+        <select
+          className="app__sort-select"
+          value={sort}
+          onChange={(e) => isSortKey(e.target.value) && setSort(e.target.value)}
+        >
+          {SORT_OPTIONS.map((o) => (
+            <option key={o.key} value={o.key}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+      </label>
+    ) : null;
+
   return (
     <main className="app">
       <h1 className="sr-only">부동산 AI 자문</h1>
+
+      {/* 좌상단(폰) · 좌측 패널(데스크톱) — 조건은 지도를 보는 내내 보이고 고칠 수 있어야 한다 */}
+      <FilterRail chips={chips} onToggle={toggleChip} onEdit={onEditConditions} />
 
       <MapView
         onBoundsChange={onBoundsChange}
         items={map.items}
         clusters={map.clusters}
         selectedId={selected}
+        hoveredId={hovered}
         onSelect={handleSelect}
         rankById={rankById}
       />
 
-      <BottomSheet snap={snap} onSnapChange={setSnap} title={title}>
-        {/* 지금 무엇이 걸려 있는지 — 항상 보이고, 그 자리에서 끌 수 있다 */}
-        {chips.length > 0 && (
-          <div className="app__chips" aria-label="적용 중인 조건">
-            {chips.map((chip) => (
-              <button
-                key={chip.id}
-                type="button"
-                className={`app__chip${chip.active ? " app__chip--on" : ""}`}
-                aria-pressed={chip.active}
-                onClick={() =>
-                  chip.id === "budget"
-                    ? setBudgetApplied((v) => !v)
-                    : setPreferApplied((v) => !v)
-                }
-              >
-                {chip.label}
-              </button>
-            ))}
-            <button type="button" className="app__chip app__chip--edit" onClick={onEditConditions}>
-              조건 수정
-            </button>
-          </div>
-        )}
-        {chips.length === 0 && (
-          <button type="button" className="app__chip app__chip--edit" onClick={onEditConditions}>
-            내 조건 입력
-          </button>
-        )}
-
+      <BottomSheet snap={snap} onSnapChange={setSnap} title={title} actions={sortControl}>
         <div className="app__tabs" role="tablist" aria-label="화면 전환">
           {TABS.map((t) => (
             <button
@@ -201,18 +224,24 @@ export function Home({ preferences, onEditConditions, adminEntry }: HomeProps) {
 
               {!map.loading && map.level === "complex" && (
                 <>
-                  {map.items.length === 0 && (
+                  {listItems.length === 0 && (
                     <p className="app__status">
-                      이 범위에 조건에 맞는 단지가 없습니다. 지도를 옮기거나 위 조건 스위치를
+                      이 범위에 조건에 맞는 단지가 없습니다. 지도를 옮기거나 조건 스위치를
                       꺼 보세요.
                     </p>
                   )}
-                  {map.items.map((item) => (
+                  {listItems.length > 0 && (
+                    // 전국 순위처럼 읽히지 않게 정렬 범위를 밝힌다
+                    <p className="app__scope">지금 보이는 지도 범위 기준</p>
+                  )}
+                  {listItems.map((item) => (
                     <ComplexCard
                       key={item.id}
                       item={item}
                       selected={selected === item.id}
+                      rank={rankById[item.id]}
                       onSelect={handleSelect}
+                      onHover={setHovered}
                     />
                   ))}
                 </>
@@ -236,6 +265,8 @@ export function Home({ preferences, onEditConditions, adminEntry }: HomeProps) {
               job={rec.job}
               error={rec.error}
               budgetKrw={budgetKrw}
+              regionCodes={regionCodes}
+              onRegionsChange={setRegionCodes}
               onStart={startRecommendation}
               onCancel={rec.cancel}
               onShowOnMap={showOnMap}

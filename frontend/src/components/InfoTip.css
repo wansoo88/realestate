@@ -1,0 +1,34 @@
+/* 설명 토글 — 장식 최소화. 아이콘은 본문보다 흐리게 두어 읽기를 방해하지 않는다. */
+.tip {
+  display: contents; /* 부모 레이아웃(grid/flex)에 그대로 참여하게 둔다 */
+}
+
+.tip__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* 아이콘은 16px 이지만 터치 타깃은 44px 를 지킨다(ux §1). */
+  min-width: var(--touch-min);
+  min-height: var(--touch-min);
+  margin: calc(var(--touch-min) / -2 + 8px) 0; /* 줄 간격을 밀어내지 않게 */
+  padding: 0;
+  color: var(--text-secondary);
+}
+
+.tip__btn[aria-expanded="true"] {
+  color: var(--accent);
+}
+
+/* 설명 본문 — 말풍선이 아니라 **그 자리에 펼쳐지는 문단**.
+   말풍선은 화면 밖으로 잘리거나 지도를 덮는다(모바일에서 특히). */
+.tip__body {
+  display: block;
+  grid-column: 1 / -1;
+  margin: var(--sp-2) 0 0;
+  padding: var(--sp-3);
+  border-radius: var(--r-btn);
+  background: var(--badge-bg);
+  color: var(--text-secondary);
+  font-size: var(--fs-caption);
+  line-height: 1.6;
+}

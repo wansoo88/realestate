@@ -15,6 +15,7 @@ import type { RecommendationItem } from "../api/client";
 import { agentLabel, severityLabel } from "../lib/agentLabels";
 import { formatArea, formatKrw, formatPct } from "../lib/format";
 import { dongView, findingView, priceView, scoreView } from "../lib/recommendation";
+import { axisViews, coverageView } from "../lib/scoreAxes";
 import { ConfidenceDots, Price } from "./Price";
 import { Section } from "./Section";
 import "./ReportCard.css";
@@ -30,6 +31,9 @@ export function ReportCard({ item, onShowOnMap }: Props) {
   const dong = dongView(item.dong_valuation);
   const band = item.price_band;
 
+  const coverage = coverageView(item);
+  const axes = axisViews(item);
+  const scoreNotes = item.score_notes ?? [];
   const views = item.findings.map((f) => ({ finding: f, view: findingView(f) }));
   const pending = views.filter((v) => v.view.pending);
   const risks = item.findings.flatMap((f) =>
@@ -52,13 +56,32 @@ export function ReportCard({ item, onShowOnMap }: Props) {
             {item.building?.name ? ` · ${item.building.name}` : ""}
           </p>
         </div>
-        {/* 점수: 모르면 "점수 없음". 0 을 쓰지 않는다. */}
-        <span className={`report__score${score.known ? "" : " report__score--unknown"}`}>
+        {/* 점수: 모르면 "점수 없음". 0 을 쓰지 않는다.
+            부분 반영(coverage<100)이면 **점수 옆에** 그 사실을 붙인다 —
+            25% 커버리지 점수와 100% 점수를 같은 강도로 그리면 "확신의 농도"가 깨진다(§5.3). */}
+        <span
+          className={`report__score${score.known ? "" : " report__score--unknown"}${
+            coverage.partial ? " report__score--partial" : ""
+          }`}
+        >
           <span className="num">{score.text}</span>
+          {score.known && coverage.badge && (
+            <span className="report__score-cov">{coverage.badge}</span>
+          )}
         </span>
       </header>
 
       {!score.known && score.reason && <p className="report__score-why">{score.reason}</p>}
+
+      {/* 이 후보에서 반영되지 못한 가중치 — 서버가 결과 전체와 후보별 **양쪽에** 넣어 준다.
+          한쪽만 그리면 화면 구성에 따라 사용자가 영영 못 보는 경로가 생긴다(계약 §5.3). */}
+      {scoreNotes.length > 0 && (
+        <ul className="report__scorenotes" aria-label="점수에 반영되지 않은 항목">
+          {scoreNotes.map((n, i) => (
+            <li key={`${n}-${i}`}>{n}</li>
+          ))}
+        </ul>
+      )}
 
       {/* 가격 — 호가/실거래 추정을 라벨과 농도로 구분한다 */}
       <Price
@@ -169,6 +192,46 @@ export function ReportCard({ item, onShowOnMap }: Props) {
           ))}
         </ul>
       </Section>
+
+      {/* 내 조건이 점수에 어떻게 들어갔는가 — 슬라이더를 움직인 사람이 확인할 자리.
+          반영된 축·빠진 축·내가 0 을 준 축을 **전부** 보여준다(숨기면 재정규화가 거짓말이 된다). */}
+      {axes.length > 0 && (
+        <Section title="내 조건 반영" count={axes.filter((a) => a.applied).length}>
+          <ul className="report__axes">
+            {axes.map((a) => (
+              <li key={a.axis} className={`report__axis${a.applied ? "" : " report__axis--off"}`}>
+                <p className="report__axis-head">
+                  <span className="report__axis-label">{a.label}</span>
+                  <span className="report__axis-weight num">
+                    {a.weightPct}%
+                    {/* 재정규화로 실효 비중이 달라졌으면 그 값을 함께 — 숫자가 왜 다른지 알려야 한다 */}
+                    {a.applied && a.appliedPct !== null && a.appliedPct !== a.weightPct && (
+                      <span className="report__axis-applied"> → 실제 {a.appliedPct}%</span>
+                    )}
+                  </span>
+                  <span className="report__axis-score num">
+                    {a.applied && a.score !== null ? a.score : "—"}
+                  </span>
+                </p>
+                <p className="report__axis-why">
+                  {a.zeroWeight
+                    ? "내가 0% 로 둔 항목입니다 — 점수에 넣지 않았습니다."
+                    : a.applied
+                      ? a.signal
+                      : `반영 안 됨 — ${a.missing.join(", ") || "근거 없음"}`}
+                </p>
+                {/* partial 축은 반영됐어도 "어디까지만 보는지" 말한다 */}
+                {a.coverageGap && <p className="report__axis-gap">{a.coverageGap}</p>}
+              </li>
+            ))}
+          </ul>
+          {!coverage.userWeighted && (
+            <p className="report__axis-basis">
+              이 점수는 내 가중치가 아니라 전문가 신뢰도 평균으로 매겨졌습니다.
+            </p>
+          )}
+        </Section>
+      )}
 
       <Section title="전문가별 근거" count={views.length}>
         <ul className="report__findings">

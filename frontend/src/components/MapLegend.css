@@ -1,0 +1,129 @@
+/* 범례 — 지도 위에 떠 있는 유리(규칙 4). 지도를 가리지 않도록 접힌 상태는 한 줄이다. */
+.legend {
+  pointer-events: auto;
+  max-width: min(320px, calc(100vw - var(--sp-4) * 2));
+  border-radius: var(--r-btn);
+  background: var(--material);
+  -webkit-backdrop-filter: blur(18px) saturate(180%);
+  backdrop-filter: blur(18px) saturate(180%);
+  border: 0.5px solid var(--hairline);
+  box-shadow: var(--shadow-1);
+  overflow: hidden;
+}
+
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .legend {
+    background: var(--bg-elev);
+  }
+}
+
+.legend__toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  min-height: 36px; /* 접힌 범례가 지도를 덜 먹도록 44px 규칙의 예외 — 보조 정보다 */
+  padding: 0 var(--sp-3);
+  text-align: left;
+}
+
+.legend__lede {
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.legend__more {
+  margin-left: auto;
+  font-size: var(--fs-caption);
+  color: var(--accent);
+}
+
+.legend__body {
+  padding: 0 var(--sp-3) var(--sp-3);
+  border-top: 0.5px solid var(--hairline);
+}
+
+.legend__note {
+  margin: var(--sp-3) 0;
+  font-size: var(--fs-caption);
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+.legend__note strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.legend__note--weak {
+  color: var(--text-estimated);
+  margin-bottom: 0;
+}
+
+.legend__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--sp-2);
+}
+
+.legend__row {
+  display: grid;
+  grid-template-columns: 56px 1fr;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+/* 견본은 실제 마커와 같은 재질로 그린다 — 설명과 화면이 어긋나면 범례가 거짓말이 된다 */
+.legend__swatch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 22px;
+  border-radius: var(--r-pill);
+  font-family: var(--ff-num);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.legend__swatch--price {
+  background: var(--bg-elev);
+  color: var(--text);
+  border: 0.5px solid var(--hairline-strong);
+  box-shadow: var(--shadow-pill);
+}
+
+.legend__swatch--over {
+  background: var(--bg-grouped);
+  color: var(--text-secondary);
+  border: 0.5px solid var(--hairline);
+}
+
+.legend__swatch--rank {
+  background: var(--accent-weak);
+  color: var(--accent);
+  border: 1px solid var(--accent);
+}
+
+.legend__swatch--dot {
+  width: 12px;
+  height: 12px;
+  min-height: 0;
+  margin: 0 auto;
+  border-radius: 50%;
+  background: var(--bg-elev);
+  border: 1.5px solid var(--hairline-strong);
+}
+
+.legend__desc {
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.legend__desc strong {
+  color: var(--text);
+  font-weight: 600;
+}

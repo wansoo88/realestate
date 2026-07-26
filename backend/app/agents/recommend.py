@@ -45,6 +45,7 @@ from app.agents.orchestrator import (
     excluded_record,
     run_mvp_pipeline,
 )
+from app.agents.scoring import BASIS_USER_WEIGHTED
 from app.core.security import decrypt_amount, load_key
 from app.domain.affordability.engine import compute_affordability
 from app.domain.affordability.models import Borrower, PropertyFacts
@@ -127,12 +128,16 @@ def _analyze(repo: Any, settings: Any, user_id: int, criteria: dict[str, Any],
 
     prefs = repo.get_preferences(user_id) if hasattr(repo, "get_preferences") else {}
     avoid = (prefs or {}).get("avoid") or {}
+    # ⚠️ 가중치는 **저장만 되고 순위에 쓰이지 않던 값**이었다(슬라이더를 움직여도 결과가
+    #    그대로였다). 여기서 파이프라인으로 넘겨 실제 총점에 곱한다 — 근거가 없는 축은
+    #    빼고 재정규화하되 그 사실을 응답에 남긴다(app/agents/scoring.py).
+    weights = (prefs or {}).get("weights") or {}
 
     assembly = _assemble_candidates(repo, criteria, budget)
     candidates = assembly.candidates
     ctx = AnalysisContext(
         affordability=afford, candidates=candidates,
-        avoid=avoid, forbidden_amounts=forbidden,
+        avoid=avoid, weights=weights, forbidden_amounts=forbidden,
     )
     # 요청한 top_n 을 실제로 지킨다. 예전엔 파이프라인 기본값(10)으로 고정돼 있어
     # `top_n` 이 API 계약에만 있고 동작하지 않았다 — 이제 제외 사유가 "상위 N건 밖"을
@@ -146,10 +151,14 @@ def _analyze(repo: Any, settings: Any, user_id: int, criteria: dict[str, Any],
     excluded = _strip_asset_amounts(
         assembly.excluded + (result.get("excluded") or []), forbidden)
     trade_basis = sum(1 for it in items if it.get("price_basis") == "trade")
+    # 가중치가 실제로 반영된 건수를 남긴다 — "반영했다"는 주장을 로그로 반증할 수 있게.
+    # ⚠️ 가중치 **값**은 찍지 않는다(사용자 취향도 개인정보다). 건수만 센다.
+    weighted = sum(1 for it in items if it.get("score_basis") == BASIS_USER_WEIGHTED)
     logger.info(
-        "추천 완료 user=%s 후보=%d 추천=%d (실거래기준 %d · 호가기준 %d) 제외=%d %s",
+        "추천 완료 user=%s 후보=%d 추천=%d (실거래기준 %d · 호가기준 %d · "
+        "가중치반영 %d) 제외=%d %s",
         user_id, len(candidates), len(items), trade_basis, len(items) - trade_basis,
-        len(excluded), _reason_counts(excluded))
+        weighted, len(excluded), _reason_counts(excluded))
     return "done", {"items": items, "excluded": excluded,
                     "notes": list(result.get("notes") or []) + assembly.notes}
 

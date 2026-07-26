@@ -51,13 +51,30 @@
   background: var(--hairline-strong);
 }
 
-.sheet__title {
+/* 제목 줄 — 왼쪽은 "무엇을 몇 건 보고 있는가", 오른쪽은 그 목록을 다루는 조작(정렬) */
+.sheet__head {
   flex: 0 0 auto;
-  margin: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
   padding: var(--sp-1) var(--sp-4) var(--sp-3);
+}
+
+.sheet__title {
+  margin: 0;
   font-size: var(--fs-title);
   font-weight: 600;
   letter-spacing: -0.01em;
+  /* 긴 제목이 정렬 컨트롤을 밀어내지 않게 */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sheet__actions {
+  flex: 0 0 auto;
 }
 
 .sheet__body {
@@ -68,23 +85,31 @@
   -webkit-overflow-scrolling: touch;
 }
 
-/* 데스크톱: 시트가 아니라 우측 고정 패널 (ux/README.md §3) */
+/* ── 데스크톱: 시트가 아니라 **우측 결과 패널** (3분할의 오른쪽 칸) ──────────
+   폭은 App.css 의 --list-w 하나로 정한다(지도 폭과 반드시 맞아야 한다).
+   높이는 인라인 style 로 들어오는 시트 비율을 눌러야 해서 !important 가 필요하다 —
+   드래그 스냅은 폰에서만 의미가 있다. */
 @media (min-width: 900px) {
   .sheet {
     top: 0;
     left: auto;
-    width: 420px;
+    width: var(--list-w);
     height: 100% !important;
     border-radius: 0;
     border-top: none;
     border-left: 0.5px solid var(--hairline);
     box-shadow: none;
+    /* 지도가 비치는 반투명 재질은 폰에서 시트가 지도를 덮을 때 쓰는 것이다.
+       고정 패널이 되면 뒤에 지도가 없으므로 불투명하게 두어 가독성을 취한다. */
+    background: var(--bg);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
   }
-  .sheet__grip {
+  /* 드래그 손잡이는 폰 전용 장치다. 안 움직이는 slider 를 남겨 두면 보조기기에 거짓말이 된다. */
+  .sheet__handle {
     display: none;
   }
-  .sheet__handle {
-    cursor: default;
-    min-height: var(--sp-4);
+  .sheet__head {
+    padding-top: var(--sp-4);
   }
 }

@@ -370,6 +370,100 @@ def test_호가_단지와_실거래_단지가_섞여도_각각_제_근거를_쓴
 
 
 # ---------------------------------------------------------------------------
+# 사용자 조건 가중치 — 저장만 되고 순위에 안 쓰이던 값 (회귀 방지)
+#
+# ★ 파이프라인 단위 테스트(test_scoring.py)만으로는 **러너가 prefs 를 안 넘기는 버그**를
+#   못 잡는다. 이번 버그가 정확히 그 모양이었다: 계산 로직이 아니라 **배선**이 없었다.
+#   그래서 여기서는 PUT /me/preferences → POST /recommendations 전 구간을 태운다.
+# ---------------------------------------------------------------------------
+
+def _seed_weighted_pair(repo):
+    """가격 축과 가치(환금성) 축이 **정확히 반대**인 두 단지를 심는다.
+
+    1 가격우위단지 : 호가 = 실거래 중위(갭 0 → 가격 만점) · 4000세대(회전율 바닥)
+    2 환금성우위단지: 호가 = 중위 +10%(가격 낮음)        · 100세대(회전율 만점)
+    """
+    def seed(cid, name, ask_oku, median_oku, households):
+        repo.add_complex(ComplexSummary(
+            id=cid, name=name, lon=127.05, lat=37.51, region_code=REGION,
+            built_year=2015, total_households=households,
+            recent_price_krw=int(median_oku * OKU), price_as_of=TODAY.isoformat(),
+            active_listings=1))
+        repo.add_listings(cid, [ListingRow(
+            id=cid * 10, ask_price_krw=int(ask_oku * OKU), area_m2=84.97, floor=10,
+            listed_at=TODAY - dt.timedelta(days=10), collected_at=TODAY,
+            agency="중개", status="active")])
+        repo.add_trades(cid, [
+            TradeRow(contract_date=TODAY - dt.timedelta(days=15 * i),
+                     price_krw=int(median_oku * OKU), area_m2=84.97, floor=10)
+            for i in range(8)])
+
+    seed(1, "가격우위단지", ask_oku=7.0, median_oku=7.0, households=4000)
+    seed(2, "환금성우위단지", ask_oku=7.7, median_oku=7.0, households=100)
+
+
+def _set_weights(client, token, weights):
+    r = client.put("/api/v1/me/preferences",
+                   json={"prefer": {}, "avoid": {}, "weights": weights},
+                   headers=_auth(token))
+    assert r.status_code == 200, r.text
+
+
+def test_저장된_가중치가_추천_순위를_실제로_바꾼다(client):
+    """★ 핵심 회귀: 슬라이더를 움직이면 결과가 **달라져야** 한다.
+
+    예전에는 `weights` 가 저장만 되고 러너가 `avoid` 만 꺼내 써서, 가격 100% 든
+    가치 100% 든 완전히 같은 목록이 나왔다.
+    """
+    token = _login(client)
+    _set_profile(client, token, cash=1_000_000_000, income=300_000_000)
+    _seed_weighted_pair(client.repo)
+
+    _set_weights(client, token, {"price": 1.0})
+    price_body = _run(client, token, {"region_codes": [REGION]})
+    price_order = [it["complex"]["name"] for it in price_body["items"]]
+
+    _set_weights(client, token, {"value": 1.0})
+    value_body = _run(client, token, {"region_codes": [REGION]})
+    value_order = [it["complex"]["name"] for it in value_body["items"]]
+
+    assert price_order[0] == "가격우위단지", price_order
+    assert value_order[0] == "환금성우위단지", value_order
+    assert price_order != value_order, "가중치를 바꿨는데 순위가 같다 — 반영되지 않은 것이다"
+    assert price_body["items"][0]["score_basis"] == "user_weighted"
+
+
+def test_가중치가_반영되지_않은_축은_결과에_고지된다(client):
+    """입지 100% — 데이터가 없으면 조용히 무시하지 않고 **왜 못 썼는지** 말한다."""
+    token = _login(client)
+    _set_profile(client, token, cash=1_000_000_000, income=300_000_000)
+    _seed_weighted_pair(client.repo)
+    _set_weights(client, token, {"location": 1.0})
+
+    body = _run(client, token, {"region_codes": [REGION]})
+
+    notes = " ".join(body["notes"])
+    assert "입지 가중치 100%가" in notes and "반영되지 않았습니다" in notes
+    # 점수는 0 이 아니라 '모름'이다.
+    assert all(it["total_score"] is None for it in body["items"])
+    top = body["items"][0]
+    assert any("반영되지 않았습니다" in n for n in top["score_notes"])
+    loc = next(a for a in top["score_axes"] if a["axis"] == "location")
+    assert loc["status"] == "no_signal" and loc["missing"]
+
+
+def test_가중치_미저장이면_기존_동작이고_그_사실을_말한다(client):
+    """조건을 한 번도 저장하지 않은 사용자에게 동작이 바뀌면 안 된다."""
+    token = _login(client)
+    _set_profile(client, token, cash=1_000_000_000, income=300_000_000)
+    _seed_weighted_pair(client.repo)
+
+    body = _run(client, token, {"region_codes": [REGION]})
+    assert body["items"][0]["score_basis"] == "agent_scores"
+    assert any("가중치가 없어" in n for n in body["notes"])
+
+
+# ---------------------------------------------------------------------------
 # 데이터 없을 때 — 빈 결과가 정상(수집 전)
 # ---------------------------------------------------------------------------
 

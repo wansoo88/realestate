@@ -182,8 +182,18 @@ def test_기본_차단과_프레임_방어가_들어_있다():
     assert _directive("object-src") == ["'none'"]
     assert _directive("base-uri") == ["'none'"]
     assert _directive("frame-ancestors") == ["'none'"]   # X-Frame-Options DENY 의 CSP 판
-    # 우리 API 는 같은 오리진이고, 기본 지도+clusterer 는 XHR 을 하지 않는다.
-    assert _directive("connect-src") == ["'self'"]
+    # connect-src 는 **정확 집합**으로 못박는다(SR19-2 권고 · SR-021 반영).
+    #   · 'self'            — 우리 API 는 같은 오리진(`/api/...`)
+    #   · dapi.kakao.com    — 역·장소 검색(SDK `services`)이 순수 XHR + Authorization 헤더라
+    #                         이게 없으면 기능이 100% 안 된다(services.js 원본으로 확인)
+    # "포함"이 아니라 "일치"로 단언하는 이유: XSS 반출 경로는 **조용히 하나씩 늘어난다.**
+    # 새 출처를 넣으려면 이 테스트를 고쳐야 하고, 그때 리뷰가 강제된다.
+    # 추가 기준(SR-021): **이미 script-src 에 있는 출처만** 여기 넣는다 — 임의 코드 실행을
+    # 허용한 상대에게 XHR 을 더 주는 건 약한 권한이지만, 그렇지 않은 출처는 순수한 표면 확대다.
+    assert _directive("connect-src") == ["'self'", "https://dapi.kakao.com"]
+    assert set(_directive("connect-src")) - {"'self'"} <= set(_directive("script-src")), (
+        "connect-src 에 script-src 에 없는 출처가 있습니다 — 대가 없이 반출 표면만 넓힙니다(SR-021)"
+    )
 
 
 # ---------------------------------------------------------------------------

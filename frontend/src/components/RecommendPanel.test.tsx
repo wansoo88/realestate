@@ -19,6 +19,8 @@ function base(over: Partial<React.ComponentProps<typeof RecommendPanel>> = {}) {
     job: null,
     error: null,
     budgetKrw: 850_000_000,
+    regionCodes: [] as string[],
+    onRegionsChange: noop,
     onStart: noop,
     onCancel: noop,
     ...over,

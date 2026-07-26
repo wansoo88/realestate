@@ -14,6 +14,7 @@ import {
   type RecommendationRequest,
 } from "../api/client";
 import { jobPhase, resolvePollPath, type JobPhase } from "../lib/recommendation";
+import { rememberAxisGaps } from "../lib/scoreAxes";
 
 export const POLL_INTERVAL_MS = 2000;
 /** 이 시간이 지나면 포기하고 사용자에게 알린다(무한 폴링 금지). */
@@ -111,6 +112,9 @@ export function useRecommendation() {
         if (!alive.current || id !== runId.current) return;
 
         const phase = jobPhase(job.status);
+        // 어떤 축에 근거가 없었는지 기억해 둔다 — 조건 화면이 하드코딩 대신
+        // **관측된 사실**로 "지금은 이 비중이 반영되지 않습니다"를 말할 수 있게(lib/scoreAxes).
+        if (phase === "done") rememberAxisGaps(job.items);
         setState({
           phase,
           jobId,

@@ -1,7 +1,41 @@
+/* ── 레이아웃의 단일 진실 ─────────────────────────────────────────────────
+   좌(조건 레일) · 중(지도) · 우(결과 목록)의 폭을 **여기서만** 정한다.
+   지도(.mapzone)·시트(.sheet)·레일(.rail)이 전부 이 변수를 읽으므로 셋이 어긋날 수 없다.
+
+   폰에서는 두 폭이 0 이라 지도가 화면을 다 쓰고, 조건 레일은 지도 위에 떠 있는 칩 줄이 된다
+   (--railbar-h 는 그 칩 줄 높이 — 지도 위 컨트롤이 그만큼 아래에서 시작한다).
+   모바일이 기준이고 데스크톱이 확장이라는 원칙은 그대로다. 다만 **데스크톱을 확장으로
+   설계한 적이 없어서** 시트가 옆으로 늘어난 어정쩡한 패널이 됐던 것을 여기서 바로잡는다. */
 .app {
   position: relative;
   height: 100%;
   overflow: hidden;
+
+  --rail-w: 0px;
+  --list-w: 0px;
+  --railbar-h: 46px;
+}
+
+/* 태블릿·작은 노트북: 지도 + 우측 결과 패널(2분할) */
+@media (min-width: 900px) {
+  .app {
+    --list-w: 380px;
+  }
+}
+
+/* 데스크톱: 좌(조건) · 중(지도) · 우(결과) 3분할. 조건이 지도를 덮지 않는다. */
+@media (min-width: 1200px) {
+  .app {
+    --rail-w: 280px;
+    --list-w: 400px;
+    --railbar-h: 0px;
+  }
+}
+
+@media (min-width: 1600px) {
+  .app {
+    --list-w: 440px;
+  }
 }
 
 /* 세션 확인 중 — 스피너 대신 조용한 한 줄(규칙 5: 소란 떨지 않는다) */
@@ -63,36 +97,23 @@
   font-size: var(--fs-caption);
 }
 
-/* 적용 중인 조건 칩 — 필터가 조용히 걸려 있으면 안 된다. 눌러서 끌 수 있다. */
-.app__chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--sp-2);
-  margin-bottom: var(--sp-3);
-}
-
-.app__chip {
-  min-height: 36px;
-  padding: 0 var(--sp-3);
-  border: 1px dashed var(--hairline-strong);
-  border-radius: var(--r-pill);
-  color: var(--text-secondary);
+/* 정렬 범위 — "지금 보이는 지도 범위 기준". 전국 순위처럼 읽히면 안 된다. */
+.app__scope {
+  margin: 0 0 var(--sp-1);
   font-size: var(--fs-caption);
+  color: var(--text-estimated);
 }
 
-/* 켜짐 = 실선 + 강조색 채움. 색만이 아니라 **선 종류**로도 구분된다(A3). */
-.app__chip--on {
-  border-style: solid;
-  border-color: transparent;
-  background: var(--accent-weak);
-  color: var(--accent);
-  font-weight: 600;
-}
-
-.app__chip--edit {
-  border-style: solid;
-  border-color: var(--hairline);
-  color: var(--accent);
+/* 정렬 선택 — 네이티브 select(키보드·스크린리더·모바일 피커가 공짜로 따라온다) */
+.app__sort-select {
+  min-height: 36px;
+  padding: 0 var(--sp-2);
+  border: 0.5px solid var(--hairline);
+  border-radius: var(--r-btn);
+  background: var(--bg-elev);
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--fs-caption);
 }
 
 /* 탭 — 세그먼트 컨트롤. 44px 터치 타깃. */
