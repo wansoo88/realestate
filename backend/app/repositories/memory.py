@@ -10,6 +10,7 @@ import itertools
 from typing import Any
 
 from app.domain.location.models import BuildingLocationFact, LocationFacts
+from app.domain.redevelopment.models import RedevProject
 from app.domain.valuation.models import ListingRow, TradeRow
 from app.repositories.base import (
     STATUS_APPROVED,
@@ -50,6 +51,7 @@ class InMemoryRepository:
         self._buildings: dict[int, list[BuildingLocationFact]] = {}
         self._listings: dict[int, list[ListingRow]] = {}
         self._trades: dict[int, list[TradeRow]] = {}
+        self._redev: dict[int, RedevProject] = {}
         self._ids = itertools.count(1)
 
     # -- 사용자 -----------------------------------------------------------
@@ -199,6 +201,26 @@ class InMemoryRepository:
 
     def building_location_facts(self, complex_id: int) -> list[BuildingLocationFact]:
         return list(self._buildings.get(complex_id, ()))
+
+    # -- 정비사업(재건축) --------------------------------------------------
+    # 입지와 같은 규칙이다: **테스트가 넣어준 사실만** 돌려주고, 좌표·연식으로
+    # "재건축 같다"를 추정하지 않는다. 넣은 적이 없으면 None = **모른다**
+    # (PostGIS 구현의 `redevelopment_for_complex` 와 같은 계약).
+    #
+    # ⚠️ 이 자리가 비어 있는 동안 재건축 가중치는 API 전 구간에서 증명할 수 없었다 —
+    #    인메모리에는 정비사업 사실을 넣을 방법 자체가 없어 그 축이 항상 '근거 없음'
+    #    이었기 때문이다. 증명할 수 없는 축은 "반영된다"고 말할 자격이 없다.
+
+    def set_redevelopment(self, complex_id: int,
+                          project: RedevProject | None) -> RedevProject | None:
+        if project is None:
+            self._redev.pop(complex_id, None)
+        else:
+            self._redev[complex_id] = project
+        return project
+
+    def redevelopment_for_complex(self, complex_id: int) -> RedevProject | None:
+        return self._redev.get(complex_id)
 
     # -- 추천 작업 ---------------------------------------------------------
     def create_job(self, job_id: str, user_id: int, criteria: dict[str, Any]) -> JobRecord:

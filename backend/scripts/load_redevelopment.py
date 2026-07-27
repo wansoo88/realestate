@@ -49,6 +49,7 @@ from app.ingest.redevelopment import (  # noqa: E402
     parse_incheon_csv,
     parse_seoul_csv,
 )
+from app.domain.redevelopment.analysis import money_like_tokens  # noqa: E402
 from app.domain.redevelopment.models import MATCH_PNU_ADMIN_DONG, MATCH_PNU_EXACT  # noqa: E402
 from app.domain.redevelopment.stages import STAGE_UNKNOWN  # noqa: E402
 
@@ -290,6 +291,22 @@ def load(engine, records: list[RedevRecord], *, sources: list[str]) -> dict:
     return {"stats": stats, "match_fail": match_fail, "samples": samples}
 
 
+def money_like_records(records: list[RedevRecord]) -> list[tuple[str, str, str, str]]:
+    """구역명·원문 단계명에 **금액처럼 읽히는 표기**가 있는 행. (출처, 키, 필드, 값)
+
+    막지 않는다 — `제3원구역` 처럼 실제 지명일 수 있고, 원문을 우리가 고칠 권한도 없다.
+    대신 **적재 시점에 눈에 띄게** 남긴다. 이 값들은 추천 카드의 rationale 에 그대로
+    인용되므로, 화면에서 처음 마주치는 것보다 여기서 세어 두는 편이 낫다(CR31-1).
+    """
+    out: list[tuple[str, str, str, str]] = []
+    for rec in records:
+        for field_name, value in (("zone_name", rec.zone_name),
+                                  ("raw_stage", rec.raw_stage)):
+            if money_like_tokens(value):
+                out.append((rec.source, rec.source_key, field_name, value))
+    return out
+
+
 def report(records: list[RedevRecord], outcome: dict) -> None:
     """무엇이 들어갔고 **무엇이 왜 안 들어갔는지**. 성공 건수만 찍지 않는다."""
     by_source = Counter(r.source for r in records)
@@ -324,6 +341,18 @@ def report(records: list[RedevRecord], outcome: dict) -> None:
         print("\n[매칭 예시]")
         for line in outcome["samples"]:
             print(f"  {line}")
+    money_like = money_like_records(records)
+    print("\n[금액처럼 읽히는 수집 원문]")
+    if money_like:
+        print(f"  {len(money_like)}건 — **막지 않고 그대로 적재합니다.** 원문 인용이지 "
+              "우리가 만든 금액이 아닙니다(추천 카드에도 원문 그대로 나갑니다).")
+        for source, key, field_name, value in money_like[:20]:
+            print(f"     {source} {key} · {field_name}={value!r}")
+        if len(money_like) > 20:
+            print(f"     … 외 {len(money_like) - 20}건")
+    else:
+        print("  0건")
+
     print("\n⚠️ 경기도는 이번 수집 범위 밖입니다 — 경기 단지의 '정비사업 정보 없음'은 "
           "'없다'가 아니라 '확인되지 않았다'입니다.")
     print("⚠️ 추가분담금은 공개 데이터에 없어 어떤 형태로도 저장·표시하지 않습니다.")

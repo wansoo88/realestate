@@ -24,6 +24,10 @@
   · `FilterConditions.area_ok` 의 미상 처리를 통과로 뒤집으면 → 같은 증명
   · 리포지토리 SQL 의 면적 절만 지우면    → (인메모리에서는 안 잡히므로) 조립 판정이 잡는다
   · `_avoid_tokens` 의 꺼진 값 무시를 지우면 → test_증명[avoid_excludes_and_off_restores]
+  · 후보 조립에서 repo 의 정비사업 판정을 안 싣거나(`_build(redevelopment=None)`),
+    `build_axis_signals` 의 재건축 축 신호를 죽이거나, `normalize_weights` 가 **명시한 0**
+    을 무시하고 기본 15% 를 덮어쓰거나, 목적(purpose)이 `assess_redevelopment` 에
+    닿지 않으면 → test_증명[weights_change_order_redevelopment] (4종 실측 확인)
 
 ⚠️ 호가 경로를 일부러 태운다 (CR-029 차단 2, 2026-07-27)
 --------------------------------------------------------
@@ -60,6 +64,12 @@ from app.domain.conditions import (
     spec_keys,
 )
 from app.domain.location.models import HazardFact, LocationFacts, StationFact
+from app.domain.redevelopment.models import RedevProject
+from app.domain.redevelopment.stages import (
+    KIND_REBUILD,
+    STAGE_COMPLETED,
+    STAGE_IMPLEMENTATION,
+)
 from app.domain.valuation.models import ListingRow, TradeRow
 from app.repositories.base import ComplexSummary
 from app.repositories.memory import InMemoryRepository
@@ -720,6 +730,82 @@ def proof_weights_change_order_risk(client) -> None:
     assert risk_first[0] == "신뢰도우위단지", risk_first
 
 
+def _redev(stage: str, raw_stage: str) -> RedevProject:
+    """정비사업 구역 1건 — **단계만** 있고 일자·세대수는 없다.
+
+    일부러 비운다: 일자가 있으면 정체 감점, 세대수가 있으면 사업성 보정이 붙어
+    점수가 단계 하나로 결정되지 않는다. 이 증명이 보려는 것은 "재건축 비중이
+    순위를 바꾸는가"이므로 단계 외의 변수는 넣지 않는다.
+    """
+    return RedevProject(zone_name="테스트구역", sigungu="강남구", raw_stage=raw_stage,
+                        stage=stage, raw_biz_type="공동주택재건축",
+                        biz_type=KIND_REBUILD, source="test", as_of=TODAY)
+
+
+def proof_weights_change_order_redevelopment(client) -> None:
+    """재건축 비중. 슬라이더를 0 ↔ 100% 로 움직이면 순위가 **달라져야** 한다.
+
+    ★ 이 축에만 있는 함정 두 개를 함께 고정한다.
+      ① **'안 보냄'과 '0'이 다른 뜻이다.** 뒤에 추가된 축이라 키가 없으면 서버가
+         기본 15%를 넣는다(`scoring.DEFAULT_AXIS_WEIGHTS`). 그러니 "재건축을 끈"
+         상태는 키를 빼는 게 아니라 **0 을 명시해 보내는 것**이고, 서버가 그 0 을
+         존중하는지까지 봐야 이 축을 껐다고 말할 수 있다.
+      ② **비단조 · 목적 의존.** 같은 단계가 실거주와 투자에 정반대 신호다
+         (`redevelopment/analysis.STAGE_PROFILE`). 그래서 목적만 바꿔도 순서가
+         다시 뒤집히는지 본다 — 다른 축이 우연히 같은 순서를 만든 경우와 구분된다.
+    """
+    token = _ready(client)
+    # 가격은 역전시켜 둔다 — 재건축 비중이 실제로 작동해야만 순서가 뒤집힌다.
+    # 준공 = 실거주에 좋고 투자엔 나쁨 / 사업시행인가 = 그 반대.
+    _seed(client.repo, complex_id=1, name="준공단지", price_oku=7.0,
+          listings=((7.7, 84.97),))
+    _seed(client.repo, complex_id=2, name="사업시행단지", price_oku=7.0,
+          listings=((7.0, 84.97),))
+    client.repo.set_redevelopment(1, _redev(STAGE_COMPLETED, "준공"))
+    client.repo.set_redevelopment(2, _redev(STAGE_IMPLEMENTATION, "사업시행인가"))
+
+    def run(weights, **body):
+        _prefs(client, token, weights=weights)
+        return _run(client, token, {"region_codes": [REGION], **body})
+
+    def order(body):
+        return [it["complex"]["name"] for it in body["items"]]
+
+    def redev_axis(body, name):
+        item = next(it for it in body["items"] if it["complex"]["name"] == name)
+        return next(a for a in item["score_axes"] if a["axis"] == "redevelopment")
+
+    # --- 끈 상태: 0 을 **명시**해서 보낸다(프론트가 실제로 보내는 모양) ----------
+    off = run({"price": 1.0, "location": 0.0, "value": 0.0, "risk": 0.0,
+               "redevelopment": 0.0})
+    assert order(off)[0] == "사업시행단지", order(off)
+    # 명시한 0 이 존중돼야 '끈 상태'가 성립한다 — 여기서 applied 가 나오면 서버가
+    # 기본 15% 를 덮어씌운 것이고, 그러면 아래 대조는 0 과 100% 의 비교가 아니다.
+    assert redev_axis(off, "사업시행단지")["status"] == "zero_weight"
+
+    # --- 켠 상태: 재건축 100% (기본 목적 = 실거주) ------------------------------
+    on = run({"price": 0.0, "location": 0.0, "value": 0.0, "risk": 0.0,
+              "redevelopment": 1.0})
+    assert order(on)[0] == "준공단지", order(on)
+    assert order(on) != order(off), "재건축 비중을 0 → 100% 로 바꿨는데 순위가 같다"
+    top_axis = redev_axis(on, "준공단지")
+    assert top_axis["status"] == "applied"
+    # 점수 자체가 순위를 만든 것이어야 한다(순서만 우연히 맞은 게 아니라).
+    assert top_axis["score"] > redev_axis(on, "사업시행단지")["score"]
+
+    # --- 같은 가중치 · 같은 데이터인데 **목적**만 바꾸면 다시 뒤집힌다 ----------
+    invest = run({"price": 0.0, "location": 0.0, "value": 0.0, "risk": 0.0,
+                  "redevelopment": 1.0}, purpose="invest")
+    assert order(invest)[0] == "사업시행단지", order(invest)
+
+    # --- 키가 아예 없으면 기본 15% + **그 사실을 말한다** -----------------------
+    # 예전 저장값(재건축 축이 생기기 전의 내 조건)이 여기에 해당한다. 조용히 넣으면
+    # 사용자가 준 적 없는 비중이 순위를 바꾸는데 아무도 모른다.
+    legacy = run({"price": 1.0, "location": 0.0, "value": 0.0, "risk": 0.0})
+    assert redev_axis(legacy, "사업시행단지")["status"] == "applied"
+    assert any("기본 비중" in n and "15%" in n for n in legacy["notes"]), legacy["notes"]
+
+
 def proof_region_scope(client) -> None:
     token = _ready(client)
     _seed(client.repo, complex_id=1, name="강남단지", region=REGION)
@@ -794,6 +880,7 @@ PROOFS = {
     "weights_change_order": proof_weights_change_order,
     "weights_change_order_location": proof_weights_change_order_location,
     "weights_change_order_risk": proof_weights_change_order_risk,
+    "weights_change_order_redevelopment": proof_weights_change_order_redevelopment,
     "region_scope": proof_region_scope,
     "bbox_scope": proof_bbox_scope,
     "top_n_limits_items": proof_top_n_limits_items,

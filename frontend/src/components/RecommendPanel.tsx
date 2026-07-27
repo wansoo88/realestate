@@ -16,7 +16,8 @@ import { sameBbox } from "../lib/bbox";
 import { formatKrwShort } from "../lib/format";
 import { filterList } from "../lib/listFilter";
 import { NOTICE_NOT_ADVICE, NOTICE_TRADE_DELAY } from "../lib/notices";
-import { progressText, type JobPhase } from "../lib/recommendation";
+import { llmSummaryActive, progressText, type JobPhase } from "../lib/recommendation";
+import { conditionText, type ConditionPlan } from "../lib/recommendConditions";
 import { scopeText, type SearchScope } from "../lib/searchScope";
 import { recommendationTagFacts } from "../lib/tags";
 import { AreaScope } from "./AreaScope";
@@ -53,6 +54,14 @@ interface Props {
    * 이 값은 그대로 남는다 — 그러지 않으면 "그때 그 범위"가 뭐였는지 알 길이 사라진다.
    */
   appliedScope: SearchScope | null;
+  /**
+   * 지금 누르면 걸릴 "내 조건"(실행 전 표시). 없으면 조건 줄 자체를 그리지 않는다.
+   * 조건 칩을 껐는데 추천만 계속 걸러지던 사고(FE-4) 이후, 화면은 **무엇이 걸리고
+   * 무엇이 꺼졌는지**를 실행 전에도 후에도 말해야 한다.
+   */
+  conditions?: ConditionPlan | null;
+  /** 이번 결과가 **실제로 쓴** 조건. 결과가 나온 뒤 칩을 만져도 이 값은 남는다. */
+  appliedConditions?: ConditionPlan | null;
   onStart: () => void;
   onCancel: () => void;
   onShowOnMap?: (complexId: number) => void;
@@ -74,6 +83,8 @@ export function RecommendPanel({
   onCaptureArea,
   onClearArea,
   appliedScope,
+  conditions = null,
+  appliedConditions = null,
   onStart,
   onCancel,
   onShowOnMap,
@@ -82,6 +93,15 @@ export function RecommendPanel({
   const running = phase === "queued" || phase === "running";
   const items = useMemo(() => job?.items ?? [], [job]);
   const excluded = job?.excluded ?? null;
+
+  /**
+   * 이번 결과에 AI 요약이 **한 건이라도** 쓰였는가.
+   *
+   * 이 값이 카드별 강등 표기의 스위치다(CR31-2). LLM 미연결이면 모든 카드가 규칙 기반이라
+   * 카드마다 배지를 달면 소음이 되고, 그건 이미 job notes 가 한 번 말한다.
+   * **AI 가 돌았는데 이 카드만 규칙 기반인 경우**가 진짜 알려야 할 상황이다.
+   */
+  const llmActive = useMemo(() => llmSummaryActive(items), [items]);
 
   const tagFilter = useTagFilter();
 
@@ -114,6 +134,13 @@ export function RecommendPanel({
   /** 결과를 낸 범위가 지금 지도와 다른가 — 다르면 "지금 화면 = 결과"로 읽히지 않게 말한다. */
   const resultAreaMoved =
     appliedScope?.bbox != null && !sameBbox(appliedScope.bbox, currentBbox);
+
+  /* 조건도 범위와 같은 규칙: 결과가 있으면 **그때 조건**, 없으면 **지금 조건**. */
+  const resultPhase = running || phase === "done";
+  const plan = (resultPhase ? (appliedConditions ?? conditions) : conditions) ?? null;
+  const onText = plan ? conditionText(plan.on) : null;
+  const offText = plan ? conditionText(plan.off) : null;
+  const mapOnlyMissing = plan?.on.filter((c) => c.side === "rec_only") ?? [];
 
   return (
     <div className="rec">
@@ -175,6 +202,38 @@ export function RecommendPanel({
         </p>
       )}
 
+      {/* 이 결과가 **어떤 조건으로** 나왔는지. 범위(위)와 짝을 이룬다.
+          FE-4 이전에는 이 줄이 없어서, 칩을 껐는데 추천만 계속 걸러져도
+          화면 어디에도 그 사실이 없었다. */}
+      {plan && (onText || offText) && (
+        <div className="rec__conds">
+          {onText && (
+            <p className="rec__conds-line">
+              <span className="rec__conds-key">
+                {resultPhase ? "이 결과에 적용된 조건" : "적용할 조건"}
+              </span>
+              <span>{onText}</span>
+            </p>
+          )}
+          {/* 껐다는 사실은 **결과 옆에** 남아야 한다 — 조건이 없어서 안 걸린 것과
+              사용자가 꺼서 안 걸린 것은 다른 이야기다. */}
+          {offText && (
+            <p className="rec__conds-line rec__conds-line--off">
+              <span className="rec__conds-key">꺼 둔 조건</span>
+              <span>{offText} — 지도와 추천 모두 적용하지 않았습니다.</span>
+            </p>
+          )}
+          {/* 지도와 추천이 다른 조건으로 돌면 반드시 말한다.
+              말하지 않으면 "지도엔 보이는데 추천엔 없는 단지"의 이유가 사라진다. */}
+          {mapOnlyMissing.length > 0 && (
+            <p className="rec__conds-diff">
+              {mapOnlyMissing.map((c) => c.label).join(" · ")} 은(는) 추천에만 걸립니다 —
+              지도 목록과 결과가 다를 수 있습니다.
+            </p>
+          )}
+        </div>
+      )}
+
       {phase === "done" && items.length === 0 && (
         <div className="rec__empty">
           <p className="rec__empty-title">조건에 맞는 후보가 없습니다.</p>
@@ -223,6 +282,7 @@ export function RecommendPanel({
           item={entry.item}
           tags={entry.tags}
           unknownTags={entry.unknownTags}
+          llmActive={llmActive}
           onShowOnMap={onShowOnMap}
         />
       ))}

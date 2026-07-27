@@ -312,10 +312,40 @@ X-Requested-With: XMLHttpRequest        ← 필수
                "recent_price_krw": 1420000000,
                "price_as_of": "2026-06-30",
                "price_confidence": "estimated",
-               "active_listings": 7 } ] }
+               "active_listings": 7,
+               // --- 특성 태그용 사실 (MAP-2, 2026-07-28) ---
+               // 추천 카드(`recommendations.items[]`)와 **같은 이름·같은 모양**이다.
+               "nearest_station": { "name": "압구정", "distance_m": 493.3,
+                                    "line_count": 1, "lines": ["3호선"],
+                                    "basis": "straight_line" },
+               "redevelopment": { "available": true, "stage": "association",
+                                  "raw_stage": "조합설립", "zone_name": "○○구역" } } ],
+  "note": "실거래는 신고까지 최대 30일이 걸립니다. …",
+  "redevelopment_note": "redevelopment.available=false 는 '정비사업이 없다'가 아니라 …" }
 ```
 > `price_as_of` + `price_confidence`를 **항상 함께 반환**한다. 실거래 신고 지연 최대 30일 →
 > 클라이언트가 "현재가"로 표시하면 안 된다.
+
+**특성 태그(🏢대단지·🚇역세권·🔨재건축)용 필드 규약** (MAP-2)
+
+| 필드 | 값 | 뜻 |
+|---|---|---|
+| `nearest_station` | 객체 \| `null` | `null` 은 **"역이 없다"가 아니라 "탐색 반경(3km) 안에서 못 찾았다"**. 0m 로 채우지 않는다 |
+| `nearest_station.distance_m` | 숫자 | **직선거리**(geography). 도보 거리가 아니다 — `basis:"straight_line"` 이 이를 못박는다 |
+| `redevelopment.available` | `true`/`false` | **`false` = '정비사업 없음'이 아니라 '확인되지 않음'** (수집 범위: 서울·인천, 경기도 미수집). 매칭이 없어도 **블록은 항상 온다** — 빼면 '없다'와 '모른다'가 같은 모양이 된다 |
+| `redevelopment_note` | 문자열 (**응답 단위**) | 위 `false` 의 뜻. **항목마다 반복하지 않는다** — 한 화면 500단지 중 실측 470이 미매칭이라 같은 문장을 항목에 실으면 응답이 +64KiB 커진다(지도는 팬할 때마다 다시 부른다) |
+
+> **판정(boolean)이 아니라 값을 준다.** '역세권 500m'·'대단지 1,000세대' 임계값은 표시
+> 관례라 바뀐다. 서버가 굳혀 보내면 저장된 결과에 옛 임계값이 박혀 되돌릴 수 없다.
+> 임계값은 프론트 `lib/tags.ts` **한 곳**에만 둔다.
+>
+> **지도에는 `verdict`·`score` 를 싣지 않는다.** 같은 '관리처분'이 투자에는 "확실",
+> 실거주에는 "이주 임박 — 부적합"이다. 지도는 사용자의 목적을 모르므로, 목적 없이 만든
+> 판정을 올리면 추천 카드와 다른 말을 하게 된다.
+>
+> **성능** — 두 값은 후보 조회와 **같은 SQL 안 LATERAL** 로 얻는다(단지마다 따로 물으면
+> 상한 500단지 × 공간질의 = N+1). 운영 실측(강남·송파 밀집 bbox, 500건): **125~157ms**,
+> 최대 bbox(2도)에서도 135ms — 목표 1초 안이다.
 
 ### `GET /complexes/{id}` — 단지 상세
 ```json

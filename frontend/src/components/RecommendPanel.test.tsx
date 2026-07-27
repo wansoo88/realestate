@@ -329,3 +329,122 @@ describe("이 결과를 찾은 범위", () => {
     expect(container.textContent).not.toContain("이 결과를 찾은 범위");
   });
 });
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * FE-4 — "이 결과는 어떤 조건으로 나왔나"
+ *
+ * 칩을 껐는데 추천만 계속 걸러지던 사고 이후, 화면은 세 가지를 말해야 한다:
+ *   ① 지금 무엇이 걸리는가  ② 무엇을 꺼 뒀는가  ③ 지도와 다르게 도는 부분이 있는가
+ * ───────────────────────────────────────────────────────────────────────── */
+
+describe("적용된 조건 표기", () => {
+  const PLAN_ON = {
+    on: [
+      { id: "budget" as const, label: "희망가 9.00억 이하", side: "both" as const },
+      { id: "area" as const, label: "전용 59~84㎡", side: "both" as const },
+    ],
+    off: [],
+    diverged: false,
+  };
+
+  it("실행 전에는 '적용할 조건'으로 미리 보여준다", () => {
+    render(<RecommendPanel {...base({ conditions: PLAN_ON })} />);
+    expect(screen.getByText("적용할 조건")).toBeTruthy();
+    expect(screen.getByText("희망가 9.00억 이하 · 전용 59~84㎡")).toBeTruthy();
+  });
+
+  it("결과가 나오면 **그때 쓴 조건**을 적는다(지금 칩 상태가 아니다)", () => {
+    render(
+      <RecommendPanel
+        {...base({
+          phase: "done",
+          job: DONE,
+          conditions: { on: [], off: [], diverged: false }, // 결과 후 칩을 다 껐다
+          appliedConditions: PLAN_ON,
+        })}
+      />,
+    );
+    expect(screen.getByText("이 결과에 적용된 조건")).toBeTruthy();
+    expect(screen.getByText("희망가 9.00억 이하 · 전용 59~84㎡")).toBeTruthy();
+  });
+
+  it("꺼 둔 조건은 사라지지 않고 '껐다'고 적힌다 — 추천에도 안 걸린다는 뜻이다", () => {
+    render(
+      <RecommendPanel
+        {...base({
+          conditions: {
+            on: [{ id: "budget" as const, label: "내 예산 8.50억 이내", side: "both" as const }],
+            off: [{ id: "area" as const, label: "전용 59~84㎡", side: "both" as const }],
+            diverged: false,
+          },
+        })}
+      />,
+    );
+    expect(screen.getByText("꺼 둔 조건")).toBeTruthy();
+    expect(screen.getByText(/전용 59~84㎡ — 지도와 추천 모두 적용하지 않았습니다/)).toBeTruthy();
+  });
+
+  it("지도와 추천이 다른 조건으로 돌면 그 사실을 말한다", () => {
+    render(
+      <RecommendPanel
+        {...base({
+          conditions: {
+            on: [
+              { id: "budget" as const, label: "내 예산 8.50억 이내", side: "rec_only" as const },
+              { id: "households" as const, label: "1,000세대 이상", side: "rec_only" as const },
+            ],
+            off: [],
+            diverged: true,
+          },
+        })}
+      />,
+    );
+    expect(
+      screen.getByText(/내 예산 8.50억 이내 · 1,000세대 이상 은\(는\) 추천에만 걸립니다/),
+    ).toBeTruthy();
+  });
+
+  it("걸린 조건이 없으면 빈 줄을 만들지 않는다", () => {
+    const { container } = render(
+      <RecommendPanel {...base({ conditions: { on: [], off: [], diverged: false } })} />,
+    );
+    expect(container.querySelector(".rec__conds")).toBeNull();
+  });
+});
+
+/* CR31-2 — 카드별 강등 표기의 스위치를 패널이 계산해 내려준다. */
+describe("요약 강등 표기는 결과 전체를 보고 정한다", () => {
+  function job(items: RecommendationItem[]): RecommendationJob {
+    return { job_id: "rec_1", status: "done", items, excluded: [], notes: [] };
+  }
+
+  it("AI 요약이 섞여 있으면 규칙 기반 카드에만 표기한다", () => {
+    render(
+      <RecommendPanel
+        {...base({
+          phase: "done",
+          job: job([
+            recItem({ rank: 1, complex: { id: 1, name: "가나" }, summary_basis: "llm" }),
+            recItem({ rank: 2, complex: { id: 2, name: "다라" }, summary_basis: "fallback" }),
+          ]),
+        })}
+      />,
+    );
+    expect(screen.getAllByText("규칙 기반 요약")).toHaveLength(1);
+  });
+
+  it("전부 규칙 기반이면(LLM 미연결) 카드에는 한 건도 띄우지 않는다", () => {
+    render(
+      <RecommendPanel
+        {...base({
+          phase: "done",
+          job: job([
+            recItem({ rank: 1, complex: { id: 1, name: "가나" }, summary_basis: "fallback" }),
+            recItem({ rank: 2, complex: { id: 2, name: "다라" }, summary_basis: "fallback" }),
+          ]),
+        })}
+      />,
+    );
+    expect(screen.queryByText("규칙 기반 요약")).toBeNull();
+  });
+});

@@ -192,6 +192,16 @@ REGISTRY: tuple[ConditionSpec, ...] = (
         effect=EFFECT_RANKING, prefer_key="risk",
         proof="weights_change_order_risk",
         why="리스크 신호 축(부분 커버리지)."),
+    ConditionSpec(
+        key="redevelopment", group=GROUP_WEIGHT, label="재건축 비중",
+        effect=EFFECT_RANKING, prefer_key="redevelopment",
+        proof="weights_change_order_redevelopment",
+        why=("정비사업 단계 축(부분 커버리지 · 수집 범위 서울·인천). 다른 축과 두 가지가 "
+             "다르다. ① **목적(실거주/투자)에 따라 같은 단계가 정반대 신호**라 점수가 "
+             "비단조다(scoring.AXIS_REDEV · redevelopment/analysis.STAGE_PROFILE). "
+             "② 뒤에 추가된 축이라 **키가 아예 없으면** 서버가 기본 15%를 넣고 그 사실을 "
+             "notes 로 말한다(scoring.DEFAULT_AXIS_WEIGHTS) — 명시한 0 은 그대로 존중한다. "
+             "'안 보냄'과 '0'이 다른 뜻인 유일한 축이다.")),
 )
 
 

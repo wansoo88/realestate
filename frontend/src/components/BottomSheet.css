@@ -1,4 +1,10 @@
-/* 바텀시트 — 컨셉 규칙 4: 지도 위 UI 는 떠 있는 유리(blur)만. 불투명 패널로 지도를 덮지 않는다. */
+/* 바텀시트 — 지도 위에 **떠 있는 면**.
+ *
+ * ⚠️ 예전에는 반투명 유리(blur)였다. UX-5 에서 걷어냈다: 뒤에 오는 것이 우리가 색을
+ *    정하지 않는 지도 타일이라, 반투명이면 이 면에 얹힌 글자의 대비를 보장할 수 없다
+ *    (다크 실측 2.14~3.16 · 라이트 4.46 — 자세한 근거는 tokens.css `--material`).
+ *    "떠 있다"는 인상은 이제 **둥근 모서리 + 헤어라인 + 그림자**가 만든다.
+ *    시트는 peek·half 에서 화면 일부만 덮으므로 지도는 여전히 보인다. */
 .sheet {
   position: absolute;
   left: 0;
@@ -11,20 +17,10 @@
   /* iOS 하단 홈 인디케이터 회피 */
   padding-bottom: env(safe-area-inset-bottom);
 
-  /* 반투명 재질 + blur — 지도가 은은하게 비쳐 보인다 */
   background: var(--material);
-  -webkit-backdrop-filter: blur(20px) saturate(180%);
-  backdrop-filter: blur(20px) saturate(180%);
   border-top: 0.5px solid var(--hairline);
-  /* 아주 옅은 그림자 한 겹 */
-  box-shadow: 0 -1px 12px rgba(0, 0, 0, 0.06);
-}
-
-/* blur 미지원 브라우저 — 불투명 배경으로 폴백(가독성 우선) */
-@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-  .sheet {
-    background: var(--bg);
-  }
+  /* 그림자가 유일한 깊이 단서다 — 다크에서는 토큰이 더 진해진다(밝은 지도 위라서) */
+  box-shadow: var(--shadow-sheet);
 }
 
 .sheet__handle {
@@ -99,11 +95,8 @@
     border-top: none;
     border-left: 0.5px solid var(--hairline);
     box-shadow: none;
-    /* 지도가 비치는 반투명 재질은 폰에서 시트가 지도를 덮을 때 쓰는 것이다.
-       고정 패널이 되면 뒤에 지도가 없으므로 불투명하게 두어 가독성을 취한다. */
+    /* 데스크톱은 뒤에 지도가 없는 고정 패널이다(폰 시트와 달리 애초에 겹치지 않는다). */
     background: var(--bg);
-    -webkit-backdrop-filter: none;
-    backdrop-filter: none;
   }
   /* 드래그 손잡이는 폰 전용 장치다. 안 움직이는 slider 를 남겨 두면 보조기기에 거짓말이 된다. */
   .sheet__handle {

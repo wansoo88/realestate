@@ -234,6 +234,23 @@
   line-height: 1.6;
 }
 
+/* 요약 출처 — 경고가 아니라 표기다. 배지 + 캡션까지만(농도 규칙: 헤드라인보다 약하게).
+   `.badge--estimated` 를 쓰는 이유: "규칙으로 만든 문장"은 추정과 같은 층의 정보다. */
+.report__basis {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: calc(var(--sp-3) * -1 + var(--sp-1)) 0 var(--sp-3);
+  font-size: var(--fs-caption);
+  line-height: 1.5;
+}
+
+.report__basis-why {
+  flex: 1 1 100%;
+  color: var(--text-estimated);
+}
+
 .report__pending {
   margin: 0 0 var(--sp-3);
   padding: 0;

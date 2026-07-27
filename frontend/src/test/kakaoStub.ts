@@ -88,15 +88,29 @@ export function installKakaoStub(
     setPosition() {}
   }
 
-  /** 장소검색 — 실제 SDK 와 같은 콜백 형태(status 문자열 + 배열). */
+  /**
+   * 장소검색 — **실제 SDK 의 콜백 형태를 그대로** 흉내낸다(services.js 1.1.1 실물 확인).
+   *
+   * ⚠️ 성공과 실패에서 인자가 다르다. 예전 스텁은 실패도 `cb(rows, "ERROR")` 로 넘겨
+   *    실제로는 존재하지 않는 모양을 테스트하고 있었다 — 그러면 진짜 실패 경로
+   *    (`cb("ERROR", null, null)`)는 아무도 검증하지 않는다.
+   *      성공  cb(documents, "OK",          pagination)
+   *      0건   cb([],        "ZERO_RESULT", pagination)
+   *      실패  cb("ERROR",   null,          null)   ← 인자가 한 칸씩 밀린다
+   */
   const services = init.places
     ? {
         Places: class {
           keywordSearch(
             _kw: string,
-            cb: (data: unknown[], status: string) => void,
+            cb: (data: unknown, status: string | null, pagination: unknown) => void,
           ) {
-            cb(init.places?.rows ?? [], init.places?.status ?? "OK");
+            const status = init.places?.status ?? "OK";
+            if (status === "ERROR") {
+              cb("ERROR", null, null);
+              return;
+            }
+            cb(init.places?.rows ?? [], status, {});
           }
         },
         Status: { OK: "OK", ZERO_RESULT: "ZERO_RESULT", ERROR: "ERROR" },

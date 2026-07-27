@@ -1,0 +1,12 @@
+{
+  "security_review": {
+    "status": "ran",
+    "at": "2026-07-28T08:19:10",
+    "note": "훅 백스톱 기록(스킬이 pass/fail 미기록)"
+  },
+  "code_review": {
+    "status": "ran",
+    "at": "2026-07-28T08:25:38",
+    "note": "훅 백스톱 기록(스킬이 pass/fail 미기록)"
+  }
+}

@@ -129,14 +129,14 @@ describe("가중치 정직성 — 작동 범위를 넘겨 말하지 않는다", 
   it("부분 반영 고지는 **반영 여부와 무관하게** 항상 보인다(계약 §5.3)", () => {
     renderScreen();
 
-    // partial 축은 둘(가치·리스크) — 반영되고 있어도 한계는 말한다
-    expect(screen.getAllByText("일부만 반영").length).toBe(2);
+    // partial 축은 셋(가치·리스크·재건축) — 반영되고 있어도 한계는 말한다
+    expect(screen.getAllByText("일부만 반영").length).toBe(3);
   });
 
-  it("네 항목 모두 조작할 수 있다 — 근거가 없다고 잠그면 이번엔 반대로 거짓말이 된다", () => {
+  it("모든 항목을 조작할 수 있다 — 근거가 없다고 잠그면 이번엔 반대로 거짓말이 된다", () => {
     renderScreen();
 
-    for (const name of [/가격/, /입지/, /가치/, /리스크/]) {
+    for (const name of [/가격/, /입지/, /가치/, /리스크/, /재건축/]) {
       const slider = screen.getByRole("slider", { name }) as HTMLInputElement;
       expect(slider.disabled).toBe(false);
     }
@@ -244,16 +244,91 @@ describe("조정 가능한 항목은 그대로 동작한다", () => {
     expect(prefs.weights.price).toBeGreaterThan(0.3); // 올린 만큼 비중이 커졌다
   });
 
-  it("잠긴 항목의 저장값은 사용자가 손대지 않는 한 그대로 보존된다", async () => {
+  /**
+   * 손대지 않은 항목의 **상대 비율**은 그대로다.
+   *
+   * ⚠️ 절대값은 그대로가 아니다 — 그리고 그게 맞다. 저장값에 `redevelopment` 키가 없으면
+   *    서버가 기본 15% 를 넣어 순위를 매기고 있고(scoring.py DEFAULT_AXIS_WEIGHTS),
+   *    화면은 **지금 적용 중인 값**을 보여줘야 한다(effectiveWeights). 그래서 30:30:25:15 가
+   *    25.5:25.5:21.25:12.75 로 눌리며 재건축 15% 가 들어온다. 비율은 한 치도 안 변한다.
+   *    지켜야 할 것은 "화면이 서버 값을 몰래 0 으로 만들지 않는다"이고, 그건 그대로다.
+   */
+  it("손대지 않은 항목은 서로의 비율이 보존된다 — 몰래 0 으로 만들지 않는다", async () => {
     const user = userEvent.setup();
     const onSave = renderScreen();
 
     await user.click(screen.getByRole("button", { name: "저장하고 다시 계산" }));
 
     const [, prefs] = onSave.mock.calls[0] as [Profile, Preferences];
-    // 화면이 잠겼다고 서버 값을 몰래 0 으로 만들지 않는다 — 입지 데이터가 들어오면 살아난다
-    expect(prefs.weights.location).toBeCloseTo(0.3, 2);
-    expect(prefs.weights.risk).toBeCloseTo(0.15, 2);
+    const w = prefs.weights;
+    expect(w.location).toBeGreaterThan(0); // 입지 데이터가 들어오면 살아나야 할 값이다
+    expect(w.risk).toBeGreaterThan(0);
+    // 저장값 30:30:25:15 의 비율이 그대로 유지된다
+    expect(w.location! / w.price!).toBeCloseTo(1, 3);
+    expect(w.value! / w.price!).toBeCloseTo(25 / 30, 3);
+    expect(w.risk! / w.price!).toBeCloseTo(15 / 30, 3);
+  });
+
+  /**
+   * FE-5 — **"안 보냄"과 "0"이 다르다.**
+   * 저장된 조건에 재건축 키가 없으면 서버는 기본 15% 를 적용한다. 화면이 그 사실을
+   * 0% 로 그리면, 사용자는 "안 보고 있다"고 읽는데 실제로는 15% 가 순위를 바꾸고 있다.
+   */
+  it("저장값에 재건축 키가 없어도 화면은 서버가 적용 중인 15% 를 보여준다", () => {
+    renderScreen(vi.fn(), {
+      preferences: { ...PREFS, weights: { price: 0.3, location: 0.3, value: 0.25, risk: 0.15 } },
+    });
+
+    const slider = screen.getByRole("slider", { name: /재건축/ }) as HTMLInputElement;
+    expect(Number(slider.value)).toBe(15);
+  });
+
+  it("사용자가 명시한 0 은 존중한다 — 기본값으로 되살리지 않는다", () => {
+    renderScreen(vi.fn(), {
+      preferences: {
+        ...PREFS,
+        weights: { price: 0.4, location: 0.3, value: 0.2, risk: 0.1, redevelopment: 0 },
+      },
+    });
+
+    const slider = screen.getByRole("slider", { name: /재건축/ }) as HTMLInputElement;
+    expect(Number(slider.value)).toBe(0);
+  });
+
+  /**
+   * ⚠️ 이 테스트가 FE-5 의 **실제 계약**이다. 슬라이더를 0 으로 내렸는데 키가 빠져서
+   *    나가면, 서버는 그것을 "언급 안 함"으로 읽고 기본 15% 를 되살린다 —
+   *    사용자가 끈 축이 조용히 켜지는 형태의 실패다.
+   */
+  it("재건축을 0 으로 내리면 **명시적 0** 이 저장된다(키가 빠지면 서버가 15% 로 되살린다)", async () => {
+    const user = userEvent.setup();
+    const onSave = renderScreen();
+
+    const slider = screen.getByRole("slider", { name: /재건축/ });
+    fireEvent.change(slider, { target: { value: "0" } });
+    await user.click(screen.getByRole("button", { name: "저장하고 다시 계산" }));
+
+    const [, prefs] = onSave.mock.calls[0] as [Profile, Preferences];
+    expect("redevelopment" in prefs.weights).toBe(true); // 키가 있어야 한다
+    expect(prefs.weights.redevelopment).toBe(0);
+    // 나머지 축은 살아 있고 합은 여전히 1 이다
+    expect(Object.values(prefs.weights).reduce((a, b) => a + (b ?? 0), 0)).toBeCloseTo(1, 3);
+  });
+
+  it("재건축 설명은 '단계가 높을수록 좋다'가 아님을 말한다(실거주와 투자가 반대로 움직인다)", async () => {
+    const user = userEvent.setup();
+    renderScreen();
+
+    // 한 줄 요약은 열지 않아도 보인다
+    expect(screen.getByText(/단계가 뒤일수록 높은 점수가 아닙니다/)).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "재건축 설명 보기" }));
+    const note = screen.getByRole("note");
+    expect(note.textContent).toContain("사업시행인가");
+    expect(note.textContent).toContain("실거주");
+    expect(note.textContent).toContain("이주");
+    // 무엇을 못 보는지도 함께 — 경기도 '정보 없음'을 '정비사업 없음'으로 읽으면 안 된다
+    expect(screen.getByText(/'정비사업이 없다'는 뜻이 아닙니다/)).toBeTruthy();
   });
 });
 

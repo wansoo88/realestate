@@ -17,9 +17,14 @@ import "./PlaceSearch.css";
 interface Props {
   /** 고른 장소로 지도를 옮긴다. [경도, 위도]. */
   onPick: (place: Place) => void;
+  /**
+   * 골랐는데 **옮기지 못했을 때** 부모가 내려 주는 안내(지도 미준비 등).
+   * 검색 자체의 실패(`error`)와 자리를 나눠 쓰지 않는다 — 원인이 다르면 문구도 달라야 한다.
+   */
+  notice?: string | null;
 }
 
-export function PlaceSearch({ onPick }: Props) {
+export function PlaceSearch({ onPick, notice = null }: Props) {
   const [keyword, setKeyword] = useState("");
   const [places, setPlaces] = useState<Place[]>([]);
   const [error, setError] = useState<PlaceSearchError | null>(null);
@@ -72,6 +77,12 @@ export function PlaceSearch({ onPick }: Props) {
       {error && (
         <p className="psearch__error" role="status">
           {placeErrorText(error)}
+        </p>
+      )}
+
+      {notice && (
+        <p className="psearch__error" role="status">
+          {notice}
         </p>
       )}
 

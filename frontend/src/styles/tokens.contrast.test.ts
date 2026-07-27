@@ -109,15 +109,22 @@ describe("디자인 토큰 — 대비(WCAG 2.1 AA)", () => {
     const bg = color(t, "--bg");
     const elev = color(t, "--bg-elev");
     const grouped = color(t, "--bg-grouped");
+    // 지도 위에 뜨는 면(바텀시트·범례·밀집 안내). **불투명이어야만** 표면으로 성립한다 —
+    // 반투명이면 실효 배경이 지도 타일에 따라 매번 달라져 여기 수치가 거짓말이 된다.
+    // 그래서 아래 "지도 위 재질은 불투명" 테스트가 이 전제를 따로 잠근다.
+    const material = color(t, "--material");
     return {
       bg,
       elev,
       grouped,
+      material,
       "badge-bg 위(기본 배경)": over(color(t, "--badge-bg"), bg),
       "badge-bg 위(카드)": over(color(t, "--badge-bg"), elev),
+      "badge-bg 위(지도 위 시트)": over(color(t, "--badge-bg"), material),
       "accent-weak 채움(기본 배경)": over(color(t, "--accent-weak"), bg),
       "accent-weak 채움(그룹 배경)": over(color(t, "--accent-weak"), grouped),
       "accent-weak 채움(카드)": over(color(t, "--accent-weak"), elev),
+      "accent-weak 채움(지도 위 시트)": over(color(t, "--accent-weak"), material),
     };
   }
 
@@ -128,13 +135,13 @@ describe("디자인 토큰 — 대비(WCAG 2.1 AA)", () => {
   const TEXT_PAIRS: Array<{ fg: string; on: string[]; why: string }> = [
     {
       fg: "--text-secondary",
-      on: ["bg", "grouped", "badge-bg 위(기본 배경)"],
+      on: ["bg", "grouped", "badge-bg 위(기본 배경)", "material", "badge-bg 위(지도 위 시트)"],
       why: "캡션(연식·세대수·기준일)",
     },
     {
       fg: "--text-estimated",
       // ⚠️ 회귀 지점. `.estimated` `.badge--estimated` `.card__asof` `.tag--unknown` 등 28곳.
-      on: ["bg", "grouped", "badge-bg 위(기본 배경)"],
+      on: ["bg", "grouped", "badge-bg 위(기본 배경)", "material", "badge-bg 위(지도 위 시트)"],
       why: "추정치 — '모른다'는 정보 자체라 장식이 아니다(F-01)",
     },
     {
@@ -146,11 +153,21 @@ describe("디자인 토큰 — 대비(WCAG 2.1 AA)", () => {
         "accent-weak 채움(기본 배경)",
         "accent-weak 채움(그룹 배경)",
         "accent-weak 채움(카드)",
+        "material",
+        "accent-weak 채움(지도 위 시트)",
       ],
       why: "강조색 **글자** — 선택된 칩·링크·보조 버튼",
     },
-    { fg: "--warn-text", on: ["bg", "badge-bg 위(기본 배경)"], why: "경고 문구" },
-    { fg: "--danger-text", on: ["bg", "badge-bg 위(기본 배경)"], why: "오류 문구" },
+    {
+      fg: "--warn-text",
+      on: ["bg", "badge-bg 위(기본 배경)", "material"],
+      why: "경고 문구",
+    },
+    {
+      fg: "--danger-text",
+      on: ["bg", "badge-bg 위(기본 배경)", "material"],
+      why: "오류 문구",
+    },
   ];
 
   for (const [mode, tokens] of [
@@ -174,6 +191,21 @@ describe("디자인 토큰 — 대비(WCAG 2.1 AA)", () => {
         // 그래서 --accent(채움)와 --accent-text(글자)를 분리했다. 여기서 그 분리를 고정한다.
         const r = contrast(color(tokens, "--on-accent"), color(tokens, "--accent"));
         expect(round2(r)).toBeGreaterThanOrEqual(4.5);
+      });
+
+      /**
+       * UX-5 — 이 테스트가 이 파일에서 **가장 중요한 한 줄**이다.
+       *
+       * `--material` 은 바텀시트·범례·밀집 안내의 배경이고, 그 뒤에는 우리가 색을 정하지
+       * 않는 카카오맵 타일이 있다. 반투명이면 실효 배경이 지도에 따라 매번 달라져
+       * 위의 모든 수치가 무의미해진다 — 실제로 다크 rgba(30,30,32,.72) 는 밝은 타일 위에서
+       * 실효 #59595b 가 됐고, 시트의 글자가 2.14~3.16 까지 떨어졌다(카카오맵은 다크 타일이
+       * 없어 뒤가 **항상** 밝다). 텍스트 토큰을 아무리 조정해도 못 고치는 종류의 결함이다.
+       *
+       * 그래서 숫자가 아니라 **전제**를 잠근다: 지도 위에 뜨는 정보면은 불투명이어야 한다.
+       */
+      it("--material(지도 위 시트) 은 불투명이다 — 지도 타일 색을 우리가 정하지 않는다", () => {
+        expect(color(tokens, "--material")[3]).toBe(1);
       });
 
       it("--accent 테두리·포커스링 ≥ 3:1 (비텍스트 1.4.11)", () => {

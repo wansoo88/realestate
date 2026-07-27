@@ -912,3 +912,110 @@ describe("관리자일 때", () => {
     expect(screen.getByText("wait0@example.com")).toBeTruthy();
   });
 });
+
+/**
+ * FE-4 — 지도 칩과 추천이 **같은 조건**으로 돌아야 한다.
+ *
+ * 서버는 조건 필드가 없으면 저장된 내 조건을 폴백으로 쓴다. 그래서 "안 보냄"은
+ * "끔"이 아니다 — 칩을 껐다는 사실을 명시적으로 보내지 않으면 지도만 풀리고
+ * 추천은 계속 걸러진다. 아래 테스트가 그 배선을 고정한다.
+ */
+describe("조건 칩이 추천까지 닿는다", () => {
+  const PREFS_AREA: Preferences = {
+    prefer: { area_min_m2: 59, area_max_m2: 84, target_price_krw: 900_000_000 },
+    avoid: {},
+    weights: {},
+  };
+
+  function mount(prefs: Preferences = PREFS_AREA) {
+    installKakaoStub();
+    vi.spyOn(api, "getProfile").mockResolvedValue(PROFILE);
+    vi.spyOn(api, "getPreferences").mockResolvedValue(prefs);
+    vi.spyOn(api, "affordability").mockResolvedValue(AFFORD);
+    vi.spyOn(api, "mapComplexes").mockResolvedValue({ level: "complex", items: [], note: "" });
+    vi.spyOn(api, "recommendation").mockResolvedValue({
+      job_id: "rec_1",
+      status: "done",
+      items: [],
+    });
+    return {
+      user: userEvent.setup(),
+      create: vi
+        .spyOn(api, "createRecommendation")
+        .mockResolvedValue({ job_id: "rec_1", status: "queued" }),
+    };
+  }
+
+  afterEach(() => forgetCamera());
+
+  it("칩이 켜져 있으면 use_saved_conditions 를 보내지 않는다(저장본 폴백 = 예전 동작)", async () => {
+    const { user, create } = mount();
+    render(<Authenticated />);
+
+    await user.click(await screen.findByRole("tab", { name: "AI 추천" }));
+    await user.click(screen.getByRole("button", { name: "AI 추천 실행" }));
+
+    await waitFor(() => expect(create).toHaveBeenCalled());
+    expect("use_saved_conditions" in create.mock.calls[0][0]).toBe(false);
+  });
+
+  it("면적 칩을 끄면 use_saved_conditions:false 가 나간다 — 안 보내면 추천만 계속 걸러진다", async () => {
+    const { user, create } = mount();
+    render(<Authenticated />);
+
+    // 지도 칩을 끈다(면적·연식은 같은 스위치다)
+    await user.click(await screen.findByRole("button", { name: "면적 59~84㎡" }));
+    await user.click(screen.getByRole("tab", { name: "AI 추천" }));
+    await user.click(screen.getByRole("button", { name: "AI 추천 실행" }));
+
+    await waitFor(() => expect(create).toHaveBeenCalled());
+    // null·생략이 아니라 **명시적 false** 여야 서버가 저장본을 무시한다
+    expect(create.mock.calls[0][0].use_saved_conditions).toBe(false);
+  });
+
+  it("칩을 꺼도 희망 매매가는 살아 있다 — 예산까지 조용히 바뀌면 더 나쁜 사고다", async () => {
+    // use_saved_conditions:false 는 저장된 target_price_krw 폴백도 죽인다.
+    // 그래서 희망가는 요청에 **명시적으로** 실려야 한다.
+    const { user, create } = mount();
+    render(<Authenticated />);
+
+    await user.click(await screen.findByRole("button", { name: "면적 59~84㎡" }));
+    await user.click(screen.getByRole("tab", { name: "AI 추천" }));
+    await user.click(screen.getByRole("button", { name: "AI 추천 실행" }));
+
+    await waitFor(() => expect(create).toHaveBeenCalled());
+    expect(create.mock.calls[0][0].budget_override_krw).toBe(900_000_000);
+  });
+
+  it("칩이 없는 조건(최소 세대수)은 칩을 꺼도 함께 죽지 않는다", async () => {
+    const { user, create } = mount({
+      prefer: { area_min_m2: 59, min_households: 1000 },
+      avoid: {},
+      weights: {},
+    });
+    render(<Authenticated />);
+
+    await user.click(await screen.findByRole("button", { name: "면적 59㎡ 이상" }));
+    await user.click(screen.getByRole("tab", { name: "AI 추천" }));
+    await user.click(screen.getByRole("button", { name: "AI 추천 실행" }));
+
+    await waitFor(() => expect(create).toHaveBeenCalled());
+    expect(create.mock.calls[0][0]).toMatchObject({
+      use_saved_conditions: false,
+      min_households: 1000,
+    });
+  });
+
+  it("결과 옆에 '어떤 조건으로 돌았는지'가 남는다 — 껐다는 사실까지", async () => {
+    const { user } = mount();
+    render(<Authenticated />);
+
+    await user.click(await screen.findByRole("button", { name: "면적 59~84㎡" }));
+    await user.click(screen.getByRole("tab", { name: "AI 추천" }));
+    await user.click(screen.getByRole("button", { name: "AI 추천 실행" }));
+
+    expect(await screen.findByText("이 결과에 적용된 조건")).toBeTruthy();
+    expect(screen.getByText("꺼 둔 조건")).toBeTruthy();
+    expect(screen.getByText(/전용 59~84㎡ — 지도와 추천 모두 적용하지 않았습니다/)).toBeTruthy();
+  });
+});

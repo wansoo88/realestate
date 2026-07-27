@@ -41,6 +41,7 @@ import { formatKrwShort } from "./lib/format";
 import { filterList } from "./lib/listFilter";
 import { effectiveBudgetKrw, filterChips, type MapFilterState } from "./lib/mapFilters";
 import { NOTICE_NOT_ADVICE, NOTICE_TRADE_DELAY } from "./lib/notices";
+import { conditionFields, conditionPlan, type ConditionPlan } from "./lib/recommendConditions";
 import { appliedScope, scopeFields, type SearchScope } from "./lib/searchScope";
 import { complexTagFacts } from "./lib/tags";
 import { ListFilterBar } from "./components/ListFilterBar";
@@ -106,6 +107,8 @@ export function Home({
   const [areaBbox, setAreaBbox] = useState<string | null>(null);
   /** 이번 분석이 실제로 돌아간 범위. 결과가 나온 뒤 조건을 바꿔도 결과 옆 표기는 남아야 한다. */
   const [appliedScopeState, setAppliedScope] = useState<SearchScope | null>(null);
+  /** 이번 분석이 실제로 쓴 "내 조건". 범위와 같은 이유로 **실행 시점에 고정**한다. */
+  const [appliedPlan, setAppliedPlan] = useState<ConditionPlan | null>(null);
 
   // 필터 스위치 — 기본은 켜짐. 끌 수 있어야 "왜 안 보이지?"에 사용자가 스스로 답한다.
   const [budgetApplied, setBudgetApplied] = useState(true);
@@ -213,19 +216,25 @@ export function Home({
     // (예전엔 아예 보내지 않아 항상 수도권 전체였고, 그래서 추천이 엉뚱하게 느껴졌다).
     // "이 주변"(bbox)이 함께 있으면 서버가 **교집합**으로 좁힌다(api-spec).
     const scope: SearchScope = { regionCodes, bbox: areaBbox };
-    // 화면에 적는 범위는 **실제로 보낸 것**과 같아야 한다 — 그래서 같은 함수로 되돌려 만든다.
+    // 화면에 적는 범위·조건은 **실제로 보낸 것**과 같아야 한다 — 그래서 같은 상태에서
+    // 같은 함수로 되돌려 만든다(추측해서 다시 쓰지 않는다).
     setAppliedScope(appliedScope(scope));
+    setAppliedPlan(conditionPlan(filters));
     void rec.start({
       purpose: PURPOSE,
       top_n: 10,
-      budget_override_krw: targetPriceKrw,
+      // 칩이 꺼져 있으면 `use_saved_conditions:false` 가 함께 나간다(FE-4).
+      // **안 보내는 것과 끄는 것은 다르다** — 안 보내면 서버가 저장된 조건으로 계속 거른다.
+      ...conditionFields(filters),
       ...scopeFields(scope),
     });
-  }, [areaBbox, rec, regionCodes, targetPriceKrw]);
+  }, [areaBbox, filters, rec, regionCodes]);
 
   const clearArea = useCallback(() => setAreaBbox(null), []);
 
   const chips = filterChips(filters);
+  /** 지금 누르면 어떤 조건으로 돌지(실행 전 표시). 결과가 나온 뒤에는 `appliedPlan` 이 이긴다. */
+  const livePlan = useMemo(() => conditionPlan(filters), [filters]);
   const toggleChip = useCallback((id: "budget" | "area" | "built") => {
     if (id === "budget") setBudgetApplied((v) => !v);
     else setPreferApplied((v) => !v);
@@ -468,6 +477,9 @@ export function Home({
                   onCaptureArea={setAreaBbox}
                   onClearArea={clearArea}
                   appliedScope={appliedScopeState}
+                  // 조건도 범위와 똑같이 다룬다: 실행 전엔 "지금 조건", 실행 후엔 "그때 조건".
+                  conditions={livePlan}
+                  appliedConditions={appliedPlan}
                   onStart={startRecommendation}
                   onCancel={rec.cancel}
                   onShowOnMap={showOnMap}

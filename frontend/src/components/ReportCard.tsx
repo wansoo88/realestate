@@ -14,7 +14,13 @@
 import type { RecommendationItem } from "../api/client";
 import { agentLabel, severityLabel } from "../lib/agentLabels";
 import { formatArea, formatKrw, formatPct } from "../lib/format";
-import { dongView, findingView, priceView, scoreView } from "../lib/recommendation";
+import {
+  dongView,
+  findingView,
+  priceView,
+  scoreView,
+  summaryBasisView,
+} from "../lib/recommendation";
 import { coverageView } from "../lib/scoreAxes";
 import type { TagId } from "../lib/tags";
 import { ConfidenceDots, Price } from "./Price";
@@ -29,14 +35,21 @@ interface Props {
   tags?: TagId[];
   /** 판정할 수 없어 함께 보인 특성. */
   unknownTags?: TagId[];
+  /**
+   * 이번 결과에서 AI 요약이 **한 건이라도** 쓰였는가(RecommendPanel 이 계산해 내려준다).
+   * 이 값이 false 면 모든 카드가 규칙 기반이므로 카드에는 아무 표기도 하지 않는다 —
+   * 그 사실은 결과 전체 고지가 이미 한 번 말한다(CR31-2).
+   */
+  llmActive?: boolean;
   onShowOnMap?: (complexId: number) => void;
 }
 
-export function ReportCard({ item, tags, unknownTags, onShowOnMap }: Props) {
+export function ReportCard({ item, tags, unknownTags, llmActive = false, onShowOnMap }: Props) {
   const price = priceView(item);
   const score = scoreView(item);
   const dong = dongView(item.dong_valuation);
   const band = item.price_band;
+  const summary = summaryBasisView(item, { llmActive });
 
   const coverage = coverageView(item);
   const views = item.findings.map((f) => ({ finding: f, view: findingView(f) }));
@@ -147,6 +160,16 @@ export function ReportCard({ item, tags, unknownTags, onShowOnMap }: Props) {
       )}
 
       <p className="report__headline">{item.headline}</p>
+
+      {/* 이 카드의 문장을 누가 썼는가 — **다른 카드는 AI 인데 이것만 규칙 기반일 때만** 뜬다.
+          경고가 아니라 출처 표기다(농도 규칙: 약하게). 사유는 서버가 카드 단위로 주지
+          않으므로 지어내지 않고 하단 고지를 가리킨다. */}
+      {summary.degraded && (
+        <p className="report__basis">
+          <span className="badge badge--estimated">{summary.label}</span>
+          <span className="report__basis-why">{summary.note}</span>
+        </p>
+      )}
 
       {/* 판단 보류 — 숨기면 "분석했다"는 인상만 남는다. 무엇을 못 봤는지 앞에 둔다. */}
       {pending.length > 0 && (

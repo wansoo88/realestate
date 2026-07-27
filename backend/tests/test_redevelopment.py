@@ -1004,3 +1004,175 @@ def test_목적이_투자면_같은_단지의_재건축_점수가_달라진다()
         return out["items"][0]["redevelopment"]["score"]
 
     assert redev_score(PURPOSE_INVEST) > redev_score(PURPOSE_LIVE)
+
+
+# ===========================================================================
+# CR31-1 — 도메인 lint 가 **외부 수집 문자열** 때문에 job 을 죽이지 않는다
+#
+# 배경: CR-030 통과 조건으로 검사 창을 '필드 전체'로 넓혔더니, `rationale` 은
+#       `COST_DISCLOSURE` 때문에 주제어가 **항상 참**이라 사실상
+#       "rationale 에 금액 토큰이 하나라도 있으면 예외"가 됐다. 그 rationale 에는
+#       수집 원문(구역명·원문 단계명)이 그대로 인용된다 → `제3원구역` 하나로
+#       `CostEstimateError` → 아무도 안 잡음 → **추천 job 전체가 failed + 빈 결과.**
+#
+# 여기 테스트가 고정하는 것은 두 가지다:
+#   ① 인용된 **수집 원문**은 이 lint 의 검사 대상이 아니다(우리가 지어낸 게 아니다).
+#   ② 그럼에도 **우리가 쓴 문장**의 금액은 그대로 막힌다 — 인용문 제외가 우회로가
+#      되면 이 검사는 껍데기가 된다.
+# ===========================================================================
+
+@pytest.mark.parametrize("field, value", [
+    # CR-031 이 실제로 재현한 3종
+    ("zone_name", "1억원지구"),
+    ("raw_stage", "조합설립(추정 5000만원)"),
+    ("zone_name", "제3원구역"),
+    # 운영 DB 616행에 실재하는 표기(현재는 발화하지 않지만 형태를 고정해 둔다)
+    ("zone_name", "장위4구역"),
+    ("zone_name", "수원역구역"),
+    # 경기도 추가 시 들어올 수 있는 형태
+    ("zone_name", "1억5천만원구역"),
+    ("raw_stage", "사업시행인가(2,000,000원 부과)"),
+])
+def test_수집_원문에_금액이_있어도_판정이_죽지_않는다(field, value):
+    """★ 변이 가드 — `assess_redevelopment` 에서 `source_quotes=quotes` 를 빼면 죽는다.
+
+    외부 값에 금액처럼 보이는 글자가 있어도 그건 **우리가 지어낸 금액이 아니다.**
+    죽이면 후보 한 건의 구역명 때문에 추천 전체가 사라진다.
+    """
+    project = _project("조합설립", STAGE_ASSOCIATION, **{field: value})
+    out = assess_redevelopment(project, purpose=PURPOSE_LIVE, as_of=TODAY)
+
+    assert out.available is True
+    # 원문은 지우지 않는다 — 인용은 그대로 사용자에게 간다.
+    assert value in out.rationale
+    assert value in out.source_quotes
+
+
+def test_수집_원문_제외가_우회로가_되지_않는다():
+    """★ 이 테스트가 없으면 위 완화는 그냥 검사를 끄는 것과 같다.
+
+    인용문을 선언해도 **우리 서술 부분**의 금액은 그대로 걸려야 한다.
+    """
+    with pytest.raises(CostEstimateError):
+        assert_no_cost_estimate(
+            "제3원구역의 추가분담금은 세대당 1억 2천만 원으로 예상됩니다",
+            source_quotes=("제3원구역", "조합설립"))
+
+
+def test_인용문이_짧으면_도려내지_않는다():
+    """한두 글자 인용을 지우면 검사 문장이 걸레가 되고 그 구멍으로 금액이 샌다."""
+    with pytest.raises(CostEstimateError):
+        # '원'(1글자)을 인용문이라 주장해도 문장에서 지워지지 않는다.
+        assert_no_cost_estimate("분담금 3억원", source_quotes=("원", "억"))
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("제3원구역", ()),                       # ← CR31-1 이 지목한 무의미 매칭
+    ("3원", ()),
+    ("10원", ()),
+    ("300원", ()),
+    ("3000원", ("3000원",)),
+    ("700,000,000원", ("700,000,000원",)),
+    ("3억원", ("3억원",)),
+    ("5000만원", ("5000만원",)),
+    ("1.2억 원", ("1.2억 원",)),
+])
+def test_단위없는_원은_자릿수_하한이_있다(text, expected):
+    """★ 변이 가드 — `_MONEY_RE` 를 옛 형태(`|원`)로 되돌리면 '제3원구역'이 걸린다."""
+    from app.domain.redevelopment.analysis import money_like_tokens
+
+    assert money_like_tokens(text) == expected
+
+
+def test_분담금_방어가_걸려도_추천은_살아남는다(monkeypatch):
+    """★ 그물 — 도메인이 뚫려 예외가 나도 **그 후보의 재건축 블록만** 내려놓는다.
+
+    CR31-1 이 보고한 사고 경로 그대로다: 예외 → 아무도 안 잡음 →
+    `run_recommendation_job` 포괄 except → job failed + 빈 결과.
+    """
+    from app.agents import orchestrator as O
+    from app.agents.orchestrator import run_mvp_pipeline
+    from app.domain.redevelopment.analysis import CostEstimateError
+
+    def boom(*_a, **_kw):
+        raise CostEstimateError("일부러 터뜨린 lint")
+
+    monkeypatch.setattr(O, "assess_redevelopment", boom)
+
+    cand = _pipeline_candidate(1, "재건축단지",
+                               redevelopment=_project("조합설립", STAGE_ASSOCIATION))
+    out = run_mvp_pipeline(_pipeline_ctx([cand]), llm=None)
+
+    # ① 추천이 사라지지 않는다.
+    assert len(out["items"]) == 1
+    top = out["items"][0]
+    assert top["est_price_krw"]                      # 가격 근거는 그대로다
+    # ② 재건축 블록만 '판정 보류'로 내려간다 — **미확보와 문구가 다르다**.
+    redev = top["redevelopment"]
+    assert redev["available"] is False
+    assert redev["detail"]["cost_guard_blocked"] is True
+    assert "판정하지 못했다" in " ".join(redev["missing"])
+    # ③ '정비사업이 없다'로 읽히면 안 된다.
+    assert "뜻이 아니라" in " ".join(redev["missing"])
+    # ④ 조용히 넘어가지 않는다 — 결과 notes 에 몇 건인지 적힌다.
+    assert any("내부 금액 검사" in n and "1건" in n for n in out["notes"]), out["notes"]
+
+
+def test_Finding_변환에서_걸려도_추천은_살아남는다(monkeypatch):
+    """판정은 통과했는데 Finding 변환에서 걸리는 경로도 같은 대우를 받는다.
+
+    (여기서 안 잡으면 카드에는 재건축 블록이 있는데 findings 에는 없는 반쪽 결과가 난다.)
+    """
+    from app.agents import orchestrator as O
+    from app.agents.orchestrator import run_mvp_pipeline
+    from app.domain.redevelopment.analysis import CostEstimateError
+
+    real = O.redevelopment_finding
+    calls = {"n": 0}
+
+    def flaky(assessment):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise CostEstimateError("변환 단계에서 터뜨림")
+        return real(assessment)
+
+    monkeypatch.setattr(O, "redevelopment_finding", flaky)
+
+    cand = _pipeline_candidate(1, "재건축단지",
+                               redevelopment=_project("조합설립", STAGE_ASSOCIATION))
+    out = run_mvp_pipeline(_pipeline_ctx([cand]), llm=None)
+
+    assert len(out["items"]) == 1
+    top = out["items"][0]
+    assert top["redevelopment"]["available"] is False
+    # 카드의 findings 에도 재건축 에이전트가 '판단 보류'로 남아 있다(사라지지 않는다).
+    agents = {f["agent_id"] for f in top["findings"]}
+    assert "redevelopment-analyst" in agents
+
+
+def test_강등되지_않은_경우에는_그_고지가_뜨지_않는다():
+    """늘 뜨는 고지는 읽히지 않는다 — 정상 경로에는 붙지 않아야 한다."""
+    from app.agents.orchestrator import run_mvp_pipeline
+
+    cand = _pipeline_candidate(1, "재건축단지",
+                               redevelopment=_project("조합설립", STAGE_ASSOCIATION))
+    out = run_mvp_pipeline(_pipeline_ctx([cand]), llm=None)
+    assert not any("내부 금액 검사" in n for n in out["notes"]), out["notes"]
+
+
+def test_새_외부필드를_문장에_끼우면_인용목록에도_있어야_한다():
+    """★ 구조 가드 — rationale 에 보간되는 수집 값은 전부 `source_quotes` 에 있어야 한다.
+
+    이 검사가 없으면 다음 사람이 문장에 새 외부 필드를 끼우고 `_source_quotes` 갱신을
+    잊는다. 그러면 그 필드가 조용히 '우리가 쓴 말'로 취급돼 CR31-1 이 재현된다.
+    """
+    project = _project("조합설립(추정 5000만원)", STAGE_ASSOCIATION,
+                       zone_name="1억원지구", sigungu="수원시 장안구",
+                       raw_biz_type="주택정비형재개발")
+    out = assess_redevelopment(project, purpose=PURPOSE_LIVE, as_of=TODAY)
+
+    for value in (project.zone_name, project.sigungu, project.raw_stage):
+        if value and value in out.rationale:
+            assert value in out.source_quotes, (
+                f"{value!r} 가 rationale 에 인용되는데 source_quotes 에 없습니다 — "
+                "app/domain/redevelopment/analysis.py::_source_quotes 를 갱신하세요")

@@ -155,6 +155,41 @@ class ProfileRecord:
     household_size: int = 1
 
 
+@dataclass(frozen=True)
+class NearestStationFact:
+    """최근접 역 — **값이지 판정이 아니다.**
+
+    임계값(역세권 500m)은 표시 관례라 바뀐다. 서버가 boolean 으로 굳혀 보내면
+    과거에 저장된 결과에 옛 임계값이 박히고 되돌릴 수 없다. 그래서 거리(m)를 준다.
+    블록 자체가 `None` 이면 **"역이 없다"가 아니라 "탐색 반경 안에서 못 찾았다"** 이다.
+    거리는 직선거리(geography)이며 도보 거리가 아니다 — `basis` 가 그것을 못박는다.
+    """
+
+    distance_m: float
+    name: str | None = None
+    lines: tuple[str, ...] = ()
+    basis: str = "straight_line"
+
+    @property
+    def line_count(self) -> int:
+        return len(self.lines)
+
+
+@dataclass(frozen=True)
+class RedevelopmentFact:
+    """정비사업 구역 매칭 **사실**(단계 해석은 도메인이 한다).
+
+    ⚠️ `available=False` 는 **'정비사업이 없다'가 아니라 '확인되지 않았다'** 이다
+       (수집 범위: 서울·인천. 경기도 미수집 · 대표지번 파싱 실패분 존재).
+       이 구분이 무너지면 화면이 "이 단지는 재건축 아님"이라고 **거짓 단언**을 한다.
+    """
+
+    available: bool = False
+    stage: str = "unknown"
+    raw_stage: str = ""
+    zone_name: str | None = None
+
+
 @dataclass
 class ComplexSummary:
     id: int
@@ -171,6 +206,12 @@ class ComplexSummary:
     recent_price_krw: int | None = None
     price_as_of: str | None = None
     active_listings: int = 0
+    #: 지도 화면의 특성 태그(🚇역세권·🔨재건축)용 사실. **지도 조회에만** 채워진다
+    #: (`complexes_in_bbox`). 추천 경로는 같은 값을 입지·정비사업 분석에서 얻으므로
+    #: 여기서 다시 재지 않는다 — 같은 숫자를 두 곳에서 만들면 언젠가 어긋난다.
+    #: `None` 은 **모름**이다. 0·False 로 접지 않는다.
+    nearest_station: NearestStationFact | None = None
+    redevelopment: RedevelopmentFact | None = None
 
 
 @dataclass

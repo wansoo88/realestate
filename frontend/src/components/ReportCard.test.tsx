@@ -395,3 +395,34 @@ describe("내부 식별자는 화면에 나가지 않는다", () => {
       .toBeTruthy();
   });
 });
+
+/**
+ * CR31-2 — 요약이 규칙 기반으로 **강등**된 사실이 카드까지 닿는가.
+ *
+ * 서버는 AI 요약이 분담금 표현을 쓰면 요약 전체를 폐기하고 규칙 문장으로 바꾼다.
+ * 화면이 그걸 말하지 않으면 사용자는 AI 가 쓴 문장으로 읽는다.
+ * 반대로 LLM 미연결이라 전부 규칙 기반인 상태에서 카드마다 띄우면 아무도 안 읽는다.
+ */
+describe("요약 출처(summary_basis)", () => {
+  it("AI 가 돌았는데 이 카드만 규칙 기반이면 카드에 표기된다", () => {
+    render(<ReportCard item={{ ...TRADE, summary_basis: "fallback" }} llmActive />);
+    expect(screen.getByText("규칙 기반 요약")).toBeTruthy();
+    // 순위·근거는 영향받지 않는다는 사실도 함께 — 안 그러면 결과 전체를 의심한다
+    expect(screen.getByText(/순위·가격 근거·제외 사유는/)).toBeTruthy();
+  });
+
+  it("결과 전체가 규칙 기반이면(LLM 미연결) 카드에는 띄우지 않는다 — job 고지와 중복", () => {
+    render(<ReportCard item={{ ...TRADE, summary_basis: "fallback" }} llmActive={false} />);
+    expect(screen.queryByText("규칙 기반 요약")).toBeNull();
+  });
+
+  it("AI 요약 카드에는 아무 표기도 없다", () => {
+    render(<ReportCard item={{ ...TRADE, summary_basis: "llm" }} llmActive />);
+    expect(screen.queryByText("규칙 기반 요약")).toBeNull();
+  });
+
+  it("서버가 값을 안 주는 구버전에서는 단정하지 않는다", () => {
+    render(<ReportCard item={TRADE} llmActive />);
+    expect(screen.queryByText("규칙 기반 요약")).toBeNull();
+  });
+});

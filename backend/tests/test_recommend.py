@@ -964,3 +964,79 @@ def test_예산상한은_희망가가_없으면_최대구매가로_폴백한다(
                            candidates=[]).effective_budget_krw == 837_750_000
     assert AnalysisContext(affordability=afford, candidates=[],
                            budget_krw=600_000_000).effective_budget_krw == 600_000_000
+
+
+# ---------------------------------------------------------------------------
+# REC-7 — 후보 조회 상한
+#
+# 실측(운영 DB · 강남 11680 · 단지 506개, 2026-07-28):
+#   · 후보 조회 SQL 자체는 상한과 **거의 무관**했다(50/100/200/400 전부 0.8~1.3초).
+#     `ORDER BY 매물수·예산내 거래수` 가 전 행을 훑은 뒤에야 LIMIT 이 걸리기 때문이다
+#     → 상한 50 은 DB 부하를 **하나도 줄이지 않고** 있었다.
+#   · 실제 비용은 단지당 조립(호가·실거래·입지·정비사업 조회) 21~23ms.
+#     50→120 은 +1.0초, 200 이면 +2.8초. 파이썬 피크 메모리 1.5MiB · DB 정렬 78kB.
+#   · 120 위로는 `MAX_CANDIDATES`(200)가 먼저 걸려 추가 조회가 버려진다
+#     (송파 실측: 단지 100개에서 이미 후보 200개).
+# ---------------------------------------------------------------------------
+
+def test_후보_조회_상한이_보고된_조건충족_단지수를_덮는다():
+    """★ 회귀 — 강남에서 조건 충족 단지가 96개인데 50개만 보던 상태(REC-7).
+
+    숫자를 바꿀 때 **왜 그 숫자인지**가 함께 바뀌어야 한다. 96 은 실측값이고,
+    상한이 그 아래로 내려가면 같은 사고가 되돌아온다.
+    """
+    from app.agents.recommend import CANDIDATE_COMPLEX_LIMIT, MAX_CANDIDATES
+
+    assert CANDIDATE_COMPLEX_LIMIT >= 96, (
+        "강남 실측 조건 충족 단지 96개를 덮지 못합니다 — 상한을 내리려면 "
+        "그 근거(실측)를 함께 남기세요")
+    assert CANDIDATE_COMPLEX_LIMIT <= MAX_CANDIDATES, (
+        "단지 상한이 후보 상한보다 크면 조회한 단지가 버려집니다(시간만 늘어난다)")
+
+
+def test_상한에_걸리면_무슨_기준의_상위_N인지_말한다():
+    """★ "일부는 안 봤다"만 적으면 사용자는 빠진 단지가 무작위인지 알 수 없다.
+
+    상한 자체는 남길 수밖에 없다 — 그렇다면 **무슨 순서로 골랐는지**가 답이다.
+    """
+    from app.agents import recommend as R
+
+    repo = InMemoryRepository()
+    for i in range(1, R.CANDIDATE_COMPLEX_LIMIT + 1):
+        repo.add_complex(ComplexSummary(
+            id=i, name=f"단지{i}", lon=127.0, lat=37.5, region_code=REGION,
+            built_year=2005, total_households=500))
+
+    out = R._assemble_candidates(repo, {"region_codes": [REGION]}, None)
+    note = next((n for n in out.notes if "조회 상한" in n), None)
+    assert note, out.notes
+    assert str(R.CANDIDATE_COMPLEX_LIMIT) in note
+    for basis in ("활성 매물", "예산", "실거래 표본"):
+        assert basis in note, f"선정 기준 '{basis}' 가 고지에 없습니다: {note}"
+
+
+def test_상한_아래에서는_그_고지가_뜨지_않는다():
+    """늘 뜨는 고지는 읽히지 않는다."""
+    from app.agents import recommend as R
+
+    repo = InMemoryRepository()
+    repo.add_complex(ComplexSummary(id=1, name="단지", lon=127.0, lat=37.5,
+                                    region_code=REGION, built_year=2005,
+                                    total_households=500))
+    out = R._assemble_candidates(repo, {"region_codes": [REGION]}, None)
+    assert not any("조회 상한" in n for n in out.notes), out.notes
+
+
+def test_리포지토리에_넘기는_상한이_상수와_같다():
+    """★ 변이 가드 — 상수를 올리고 호출부에 숫자를 박아 두면 아무 일도 안 일어난다."""
+    from app.agents import recommend as R
+
+    seen: dict[str, int] = {}
+
+    def fake_query(*, region_codes, max_price_krw, limit, bbox, **kw):
+        seen["limit"] = limit
+        return []
+
+    R._query_candidates(fake_query, region_codes=[REGION], budget=None, bbox=None,
+                        conditions=R.FilterConditions())
+    assert seen["limit"] == R.CANDIDATE_COMPLEX_LIMIT

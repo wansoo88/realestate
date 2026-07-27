@@ -42,7 +42,10 @@ _TRUNCATE = """
 TRUNCATE complex, trade, listing, unit_type, building, region,
          app_user, recommendation_job, recommendation_item, agent_finding,
          user_profile, user_preference,
-         poi, school_district, transit_plan, road_segment
+         poi, school_district, transit_plan, road_segment,
+         -- 014. `complex` CASCADE 로 링크는 지워지지만 `redev_project` 본체는 남아
+         -- (source, source_key) 유일 제약이 다음 테스트에서 충돌한다.
+         redev_project
 RESTART IDENTITY CASCADE
 """
 
@@ -432,13 +435,56 @@ def test_bbox_조회가_GiST_인덱스를_탄다(repo, engine):
     """
     _seed_complex(engine, name="플랜확인", lon=127.05, lat=37.50)
     params = {"min_lon": 127.0, "min_lat": 37.4, "max_lon": 127.1, "max_lat": 37.6,
-              "built_after": None, "area_min": None, "area_max": None, "limit": 500}
+              "built_after": None, "area_min": None, "area_max": None, "limit": 500,
+              "station_category": "subway", "station_deg": 0.027, "station_radius": 3000.0}
     with engine.connect() as conn:
         conn.execute(text("SET enable_seqscan = off"))
         plan = "\n".join(
             r[0] for r in conn.execute(
                 text("EXPLAIN " + PostgisRepository._BBOX_SQL.text), params))
     assert "idx_complex_geom" in plan, f"GiST 인덱스를 타지 않습니다:\n{plan}"
+    # MAP-2 로 붙인 역 조회도 GiST 를 타야 한다 — 여기서 순차 스캔이 되면
+    # 상한 500단지 × 전건 스캔이 되어 지도가 느려진다(태그보다 나쁘다).
+    assert "idx_poi_geom" in plan, f"역 조회가 GiST 를 타지 않습니다:\n{plan}"
+
+
+def test_MAP2_지도_조회가_역과_정비사업을_같은_문장으로_가져온다(repo, engine):
+    """★ 회귀 — 이 두 값이 없으면 주변 단지 태그가 항상 '판정 불가'가 된다.
+
+    ⚠️ 매칭이 없는 단지도 **`available=False` 블록**을 받는다. 블록을 빼면
+       '정비사업 없음'과 '확인되지 않음'이 같은 모양이 된다.
+    """
+    near = _seed_complex(engine, name="역세권단지", lon=127.0500, lat=37.5000)
+    far = _seed_complex(engine, name="역먼단지", lon=127.0900, lat=37.5400)
+    _seed_poi(engine, category="subway", name="가나역", lon=127.0505, lat=37.5000,
+              attrs='{"lines":["2호선","수인분당선"]}')
+    with engine.begin() as conn:
+        pid = conn.execute(text("""
+            INSERT INTO redev_project (source, source_key, zone_name, sigungu,
+                                       raw_stage, stage, biz_type, as_of)
+            VALUES ('test', 'k1', '가나구역', '강남구', '조합설립인가',
+                    'association', 'rebuild', DATE '2026-05-31')
+            RETURNING id
+        """)).one().id
+        conn.execute(text("""
+            INSERT INTO redev_project_complex (project_id, complex_id, match_method)
+            VALUES (:p, :c, 'pnu_exact')
+        """), {"p": pid, "c": near})
+
+    rows = {r.id: r for r in repo.complexes_in_bbox(
+        min_lon=127.0, min_lat=37.4, max_lon=127.1, max_lat=37.6)}
+
+    assert rows[near].nearest_station is not None
+    assert rows[near].nearest_station.distance_m == pytest.approx(44, abs=25)
+    assert rows[near].nearest_station.line_count == 2
+    assert rows[near].redevelopment.available is True
+    assert rows[near].redevelopment.raw_stage == "조합설립인가"
+
+    # 반경(3km) 밖이면 **None(모름)** 이지 0 이 아니다.
+    assert rows[far].nearest_station is None
+    # 매칭이 없어도 블록은 온다 — '없음'이 아니라 '확인되지 않음'.
+    assert rows[far].redevelopment is not None
+    assert rows[far].redevelopment.available is False
 
 
 def test_최근_실거래와_활성매물이_함께_온다(repo, engine):
@@ -1358,6 +1404,42 @@ def test_013_공동학구는_후보_수가_2_이상으로_나온다(repo, engine
     assert school.name == "가초등학교"        # 최근접 (기존 동작 그대로)
     assert school.candidate_count == 2        # 그러나 후보가 2곳임을 함께 낸다
     assert school.zone_count == 2
+
+
+def test_PERF1_세_급을_한_쿼리로_묻어도_후보_수가_섞이지_않는다(repo, engine):
+    """★ 변이 가드 (PERF-1) — `candidate_count`/`zone_count` 의 급 필터를 지우면 깨진다.
+
+    3벌 조회를 1벌로 합치면서 부속질의가 **전체 후보**를 세게 되기 쉽다. 그러면
+    초등 카드에 "배정 후보 6곳"이 찍히고, 도메인은 그 숫자로 '배정 단정 불가'를
+    판단한다 — 숫자 하나가 판정을 통째로 바꾸는 자리다.
+
+    운영 DB 표본 200단지에서 이 필터를 지우면 600건 중 596건이 3벌 조회와 달라진다.
+    """
+    cid = _seed_complex(engine, name="세급단지", lon=127.05, lat=37.50)
+    elem = _seed_poi(engine, category="school", name="한초등학교",
+                     lon=127.0501, lat=37.5001)
+    _seed_district(engine, school_poi_id=elem, level="초등학교", zone_kind="통학구역",
+                   zone_name="한초통학구역")
+    d_mid = _seed_district(engine, school_poi_id=None, level="중학교",
+                           zone_kind="학교군", zone_name="중학군")
+    for name, lon in (("가중", 127.0502), ("나중", 127.0503), ("다중", 127.0504)):
+        _seed_member(engine, d_mid,
+                     _seed_poi(engine, category="school", name=name, lon=lon, lat=37.50))
+    d_high = _seed_district(engine, school_poi_id=None, level="고등학교",
+                            zone_kind="학교군", zone_name="고교학군")
+    for name, lon in (("가고", 127.0505), ("나고", 127.0506)):
+        _seed_member(engine, d_high,
+                     _seed_poi(engine, category="school", name=name, lon=lon, lat=37.50))
+
+    facts = repo.location_facts(cid)
+    # 급마다 **자기 급의 후보만** 센다(합계 6 이 아니다).
+    assert facts.school.candidate_count == 1, "초등 후보에 중·고가 섞였다"
+    assert facts.school.zone_count == 1
+    assert facts.middle_school.candidate_count == 3
+    assert facts.high_school.candidate_count == 2
+    # 이름도 급을 넘지 않는다 — 더 가까운 중학교가 초등 자리에 오면 안 된다.
+    assert facts.school.name == "한초등학교"
+    assert facts.middle_school.name == "가중"
 
 
 def test_013_학교군_행에는_단수_배정학교를_적을_수_없다(engine):

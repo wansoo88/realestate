@@ -364,6 +364,53 @@ def _check_area_range(area_min_m2: float | None, area_max_m2: float | None) -> N
         )
 
 
+#: `redevelopment.available:false` 의 뜻. 추천의 `NO_PROJECT_REASON` 과 **같은 뜻**이다.
+#:
+#: ⚠️ **항목마다가 아니라 응답에 한 번** 싣는다. 지도 한 화면은 최대 500단지이고 그중
+#:    대다수가 미매칭이라(운영 실측 500 중 470), 같은 문장을 470번 실으면 응답이
+#:    64KiB 커진다 — 지도는 팬할 때마다 다시 부르는 모바일 화면이다. 뜻은 한 번만
+#:    말하면 되고, 항목에 필요한 것은 **플래그**다.
+REDEV_MAP_UNKNOWN_NOTE = (
+    "redevelopment.available=false 는 '정비사업이 없다'가 아니라 "
+    "'확인되지 않았다'는 뜻입니다 — 수집 범위는 서울·인천이며 경기도는 미수집입니다."
+)
+
+
+def _map_tag_facts(c: Any) -> dict[str, Any]:
+    """지도 항목의 특성 태그용 사실 — `nearest_station` · `redevelopment` (MAP-2).
+
+    **판정이 아니라 값을 준다.** '역세권(500m)'·'대단지(1,000세대)' 임계값은 표시
+    관례라 바뀌고, 서버가 boolean 으로 굳혀 보내면 화면이 기준을 되돌릴 수 없다.
+
+    ⚠️ `redevelopment` 는 매칭이 없어도 **블록을 실어 보낸다.** `available:false` 는
+       '정비사업 없음'이 아니라 **'확인되지 않음'** 이고(수집 범위: 서울·인천),
+       프론트는 그 false 를 "모름"으로 접는다(`lib/tags.ts:redevelopmentFact`).
+       블록 자체를 빼면 '없다'와 '모른다'가 같은 모양이 되어 구분이 사라진다.
+    """
+    station = c.nearest_station
+    redev = c.redevelopment
+    return {
+        "nearest_station": (None if station is None else {
+            "name": station.name,
+            "distance_m": station.distance_m,
+            "line_count": station.line_count,
+            "lines": list(station.lines),
+            # 직선거리다. 도보 거리가 아니라는 사실을 값 옆에 붙여 보낸다.
+            "basis": station.basis,
+        }),
+        # 지도에는 **판정(verdict)·점수를 싣지 않는다.** 그 둘은 목적(실거주/투자)에
+        # 따라 정반대가 되는데 지도는 사용자의 목적을 모른다 — 목적 없이 만든
+        # 판정을 화면에 올리면 추천 카드와 다른 말을 하게 된다.
+        # `available:false` 의 뜻은 응답의 `redevelopment_note` 에 한 번 적는다.
+        "redevelopment": (None if redev is None else {
+            "available": redev.available,
+            "stage": redev.stage,
+            "raw_stage": redev.raw_stage,
+            "zone_name": redev.zone_name,
+        }),
+    }
+
+
 @router.get("/map/complexes", tags=["map"])
 def map_complexes(
     user: CurrentUser,
@@ -447,10 +494,17 @@ def map_complexes(
                 "active_listings": c.active_listings,
                 "over_budget": bool(max_price_krw and c.recent_price_krw
                                     and c.recent_price_krw > max_price_krw),
+                # --- 화면 배지용 값 (MAP-2) --------------------------------
+                # 추천 카드(`RecommendationItem`)와 **같은 이름·같은 모양**이다.
+                # 지도와 추천이 다른 이름을 쓰면 프론트가 태그 판정을 두 벌 갖게 되고,
+                # 두 벌은 반드시 어긋난다(임계값은 프론트 `lib/tags.ts` 한 곳에 있다).
+                **_map_tag_facts(c),
             }
             for c in rows
         ],
         "note": "실거래는 신고까지 최대 30일이 걸립니다. 최근 거래가 반영되지 않았을 수 있습니다.",
+        # 항목마다 반복하지 않고 여기 한 번 — 500단지 × 같은 문장은 64KiB 다(MAP-2).
+        "redevelopment_note": REDEV_MAP_UNKNOWN_NOTE,
     }
 
 

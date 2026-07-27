@@ -12,10 +12,12 @@ import {
   dongView,
   findingView,
   jobPhase,
+  llmSummaryActive,
   priceView,
   progressText,
   resolvePollPath,
   scoreView,
+  summaryBasisView,
   usableEvidence,
 } from "./recommendation";
 
@@ -44,6 +46,50 @@ function item(over: Partial<RecommendationItem> = {}): RecommendationItem {
     ...over,
   };
 }
+
+/**
+ * CR31-2 — 요약을 누가 썼는가(`summary_basis`)가 화면에 닿아야 한다.
+ *
+ * 서버는 AI 요약이 분담금 표현을 쓰면 **요약 전체를 폐기**하고 규칙 문장으로 강등한다.
+ * 그 사실이 화면에 안 닿으면 사용자는 강등된 걸 모른다. 반대로 LLM 미연결이라 전부
+ * 규칙 기반인 상태에서 카드마다 경고를 띄우면 아무도 안 읽는다 — 그건 job 고지가 말한다.
+ */
+describe("summaryBasisView — 강등은 알리되 소음은 만들지 않는다", () => {
+  it("AI 가 돌았는데 이 카드만 규칙 기반이면 알린다", () => {
+    const v = summaryBasisView(item({ summary_basis: "fallback" }), { llmActive: true });
+    expect(v.degraded).toBe(true);
+    expect(v.label).toBe("규칙 기반 요약");
+    expect(v.note).toContain("순위");
+  });
+
+  it("전부 규칙 기반이면(LLM 미연결) 카드에는 아무 말도 하지 않는다 — job 고지와 중복", () => {
+    const v = summaryBasisView(item({ summary_basis: "fallback" }), { llmActive: false });
+    expect(v.fallback).toBe(true); // 사실은 사실대로 안다
+    expect(v.degraded).toBe(false); // 다만 카드에는 표기하지 않는다
+    expect(v.label).toBeNull();
+  });
+
+  it("AI 요약 카드에는 표기하지 않는다", () => {
+    expect(summaryBasisView(item({ summary_basis: "llm" }), { llmActive: true }).degraded).toBe(
+      false,
+    );
+  });
+
+  it("서버가 값을 안 주면(구버전) 단정하지 않는다", () => {
+    const v = summaryBasisView(item(), { llmActive: true });
+    expect(v.fallback).toBe(false);
+    expect(v.degraded).toBe(false);
+  });
+
+  it("한 건이라도 AI 요약이 있으면 LLM 은 살아 있었다고 본다", () => {
+    expect(llmSummaryActive([item({ summary_basis: "fallback" })])).toBe(false);
+    expect(
+      llmSummaryActive([item({ summary_basis: "fallback" }), item({ summary_basis: "llm" })]),
+    ).toBe(true);
+    expect(llmSummaryActive([])).toBe(false);
+    expect(llmSummaryActive(null)).toBe(false);
+  });
+});
 
 describe("priceView — 호가와 실거래는 같은 숫자가 아니다", () => {
   it("호가 기준이면 호가와 갭을 그대로 쓴다", () => {

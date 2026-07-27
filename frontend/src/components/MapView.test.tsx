@@ -229,3 +229,119 @@ describe("키가 없을 때", () => {
     expect(screen.getByText(/목록으로 단지를 확인할 수 있습니다/)).toBeTruthy();
   });
 });
+
+/**
+ * SDK 로드 실패 — **조용히 삼키지 않는다.**
+ *
+ * 배경(2026-07-28 진단): 카카오 JS 키에 웹 도메인이 등록돼 있지 않으면 카카오는
+ * `sdk.js` 를 **HTTP 401 + JSON 본문**으로 돌려준다. jsdom 은 외부 스크립트를 받지 않으므로
+ * 여기서는 붙은 <script> 를 가로채 브라우저가 하는 일(onerror / onload)을 직접 재현한다.
+ */
+describe("SDK 로드가 실패할 때", () => {
+  /** 붙은 <script> 를 가로채서 로드 결과를 우리가 정한다. */
+  function interceptScript() {
+    const appended: HTMLScriptElement[] = [];
+    const spy = vi
+      .spyOn(document.head, "appendChild")
+      .mockImplementation(((node: Node) => {
+        appended.push(node as HTMLScriptElement);
+        return node;
+      }) as typeof document.head.appendChild);
+    return { appended, restore: () => spy.mockRestore() };
+  }
+
+  it("401(도메인 미등록)로 스크립트가 실패하면 **어디를 고쳐야 하는지**까지 말한다", async () => {
+    kakao.restore(); // window.kakao 를 지워 실제 로드 경로를 타게 한다
+    const s = interceptScript();
+    render(<MapView onBoundsChange={vi.fn()} items={[]} />);
+
+    await waitFor(() => expect(s.appended.length).toBe(1));
+    expect(s.appended[0].src).toContain("dapi.kakao.com/v2/maps/sdk.js");
+    s.appended[0].onerror?.(new Event("error"));
+
+    expect(await screen.findByText("지도를 표시할 수 없습니다")).toBeTruthy();
+    // "로드 실패"만 적으면 고칠 곳을 알 수 없다 — 콘솔 도메인 등록을 가리켜야 한다.
+    expect(screen.getByText(/도메인이 등록됐는지/)).toBeTruthy();
+    s.restore();
+  });
+
+  /**
+   * 200 으로 왔지만 SDK 가 아닌 경우. 예전 코드는 onload 에서 곧장
+   * `window.kakao.maps.load(...)` 를 불러 TypeError 를 던졌고, 그 예외는 Promise 를
+   * 이행도 거부도 하지 못했다 — `ready` 도 `error` 도 영원히 그대로라 지도는 **빈 회색
+   * 화면**으로 남고 아무 메시지도 뜨지 않았다. 그 무한 대기를 여기서 막는다.
+   */
+  it("SDK 가 아닌 응답이 200 으로 와도 영원히 기다리지 않고 상황을 말한다", async () => {
+    kakao.restore();
+    const s = interceptScript();
+    render(<MapView onBoundsChange={vi.fn()} items={[]} />);
+
+    await waitFor(() => expect(s.appended.length).toBe(1));
+    // window.kakao 가 정의되지 않은 채 load 이벤트만 온 상태 = 오류 본문을 받은 경우
+    s.appended[0].onload?.(new Event("load"));
+
+    expect(await screen.findByText("지도를 표시할 수 없습니다")).toBeTruthy();
+    expect(screen.getByText(/올바르지 않습니다/)).toBeTruthy();
+    s.restore();
+  });
+
+  /**
+   * 로더는 첫 줄에서 `window.kakao.maps = {}` 를 만들고 본체는 나중에 채운다.
+   * 그 사이에 재마운트되면(조건 화면 ↔ 지도 왕복) 예전 코드는 `window.kakao?.maps` 가
+   * 참이라는 이유로 곧장 `new kakao.maps.Map(...)` 을 불러 터졌다.
+   */
+  /**
+   * 사용자 제보의 모호한 절반 — "결과는 뜨는데 지도가 안 움직인다".
+   *
+   * 지도가 아직 안 만들어진 동안에도 검색 상자는 이미 화면에 있다. 그때 결과를 누르면
+   * 예전 `moveTo` 는 `if (!map) return;` 으로 **아무 일도 하지 않았다.** 무반응은
+   * 사용자에게 "내가 잘못 눌렀나"로 읽힌다 — 못 옮기면 못 옮긴다고 말해야 한다.
+   */
+  it("지도가 준비되기 전에 결과를 고르면, 무반응 대신 못 옮겼다고 말한다", async () => {
+    kakao.restore();
+    const s = interceptScript();
+    render(<MapView onBoundsChange={vi.fn()} items={[]} />);
+    await waitFor(() => expect(s.appended.length).toBe(1));
+
+    // 지도 본체는 아직 안 왔지만(스크립트 미완료 → mapRef 는 null) 검색은 쓸 수 있는 상태.
+    (window as unknown as { kakao: unknown }).kakao = {
+      maps: {
+        services: {
+          Places: class {
+            keywordSearch(_kw: string, cb: (d: unknown, st: string, p: unknown) => void) {
+              cb([{ id: "1", place_name: "강남역", address_name: "역삼동", x: "127.0279", y: "37.4971" }], "OK", {});
+            }
+          },
+          Status: { OK: "OK", ZERO_RESULT: "ZERO_RESULT", ERROR: "ERROR" },
+        },
+      },
+    };
+
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText("장소·역 검색"), "강남역");
+    await user.click(screen.getByRole("button", { name: "찾기" }));
+    await user.click(await screen.findByRole("button", { name: /강남역/ }));
+
+    expect(await screen.findByText(/이동할 수 없습니다/)).toBeTruthy();
+
+    s.restore();
+    delete (window as unknown as { kakao?: unknown }).kakao;
+  });
+
+  it("로더만 실행된 상태(본체 로드 중)에서는 스크립트를 또 붙이지 않고 그 로드를 기다린다", async () => {
+    kakao.restore();
+    const s = interceptScript();
+    const pending: Array<() => void> = [];
+    // 로더가 막 실행된 모습 — maps 는 있지만 Map 은 아직 없다.
+    (window as unknown as { kakao: unknown }).kakao = {
+      maps: { load: (cb: () => void) => pending.push(cb) },
+    };
+
+    render(<MapView onBoundsChange={vi.fn()} items={[]} />);
+
+    await waitFor(() => expect(pending.length).toBe(1));
+    expect(s.appended.length).toBe(0); // 두 번째 <script> 를 붙이지 않았다
+    s.restore();
+    delete (window as unknown as { kakao?: unknown }).kakao;
+  });
+});

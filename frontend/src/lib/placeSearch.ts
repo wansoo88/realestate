@@ -9,9 +9,19 @@
  * 그래서 **JS SDK 의 `services` 라이브러리**만 쓴다. SDK 는 이미 허용된 출처
  * (`script-src https://dapi.kakao.com`)에서 로드되고, JS 앱키로 동작한다.
  *
- * ⚠️ 운영 확인 필요(보고 항목): `services.Places` 가 내부적으로 XHR 을 쓰면
- *    `connect-src 'self'` 에 막힌다(JSONP 면 `script-src` 로 통과). 실브라우저 검증 전까지는
- *    **실패를 조용히 삼키지 않고** 사용자에게 상태를 알린다(아래 `PlaceSearchError`).
+ * ✅ 검증 완료(2026-07-28) — **CSP 는 범인이 아니다.**
+ *    `services.js 1.1.1` 실물을 받아 확인했다: 전송은 **XHR**이고(JSONP 아님, 스크립트 주입 0건)
+ *    대상은 `https://dapi.kakao.com/v2/local/search/keyword.json` 이다. 그 출처는 이미
+ *    `connect-src` 에 있고, 프리플라이트 `OPTIONS` 도 `204 + Access-Control-Allow-Origin: *`
+ *    로 통과한다. 요청은 **나간다. 그리고 401 로 돌아온다.**
+ *
+ * ⚠️ 진짜 원인은 **카카오 콘솔의 웹 도메인 미등록**이다(코드로 못 고친다).
+ *    `services.js` 는 `KA` 헤더에 `origin/<우리 도메인>` 을 **직접 실어 보낸다** —
+ *    nginx 의 `Referrer-Policy: no-referrer` 로 Referer 를 지워도 이건 못 지운다.
+ *    그래서 지도 SDK 로드(Referer 없음 → 도메인 판별 불가 → 통과)는 되는데
+ *    장소 검색만 `AccessDeniedError: domain mismatched` 로 거부된다.
+ *    → 콘솔에 도메인을 등록하기 전까지 이 기능은 **절대** 동작하지 않는다.
+ *    그러므로 실패를 조용히 삼키지 않고, "다시 시도"가 아니라 **할 일**을 말한다.
  *
  * ⚠️ 이것은 "역세권 분석"이 아니다. 우리 `poi` 테이블은 0행이라 역 기반 필터·분석은
  *    존재하지 않는다. 이 기능은 **지도 이동**만 한다 — UI 문구도 그렇게 적는다.
@@ -34,11 +44,21 @@ export type PlaceSearchError =
   /** 그 외 실패(네트워크·CSP 차단 등) */
   | "failed";
 
-/** 카카오 services 를 느슨하게 타입핑한다(전용 타입 패키지를 쓰지 않는다). */
+/**
+ * 카카오 services 를 느슨하게 타입핑한다(전용 타입 패키지를 쓰지 않는다).
+ *
+ * ⚠️ 콜백 인자가 **성공과 실패에서 서로 다르다**(services.js 1.1.1 실물에서 확인):
+ *     성공  cb(documents, "OK",          pagination)
+ *     0건   cb([],        "ZERO_RESULT", pagination)
+ *     실패  cb("ERROR",   null,          null)      ← 인자가 한 칸씩 **밀린다**
+ * 즉 실패하면 `status` 는 `null` 이고 상태 문자열은 `data` 자리에 온다.
+ * `status` 만 보고 판단하면 실패를 "알 수 없는 값"으로 읽게 되므로 data 의 모양을 먼저 본다.
+ * 그래서 타입도 `unknown[]` 이 아니라 `unknown` 이다 — 배열이 아닐 수 있다.
+ */
 interface PlacesLike {
   keywordSearch(
     keyword: string,
-    cb: (data: unknown[], status: string) => void,
+    cb: (data: unknown, status: string | null) => void,
     opts?: Record<string, unknown>,
   ): void;
 }
@@ -106,6 +126,15 @@ export function searchPlaces(keyword: string, limit = 8): Promise<PlaceSearchRes
   return new Promise((resolve) => {
     try {
       new services.Places().keywordSearch(q, (data, status) => {
+        // 실패는 인자가 밀려서 온다(위 PlacesLike 주석) — data 가 배열이 아니면 그게 실패다.
+        //
+        // 아래 `catch` 는 이걸 대신해 주지 못한다. 실제 SDK 는 XHR 콜백에서 **비동기로**
+        // 부르므로 예외가 이 try 블록 밖에서 터진다. 그러면 Promise 는 이행도 거부도 되지
+        // 않고 버튼이 "찾는 중…" 에서 영영 돌아오지 않는다. 모양을 먼저 확인하는 이유다.
+        if (!Array.isArray(data)) {
+          resolve({ places: [], error: "failed" });
+          return;
+        }
         if (status === services.Status.OK) {
           const places = (data as Record<string, unknown>[])
             .map(toPlace)
@@ -131,6 +160,9 @@ export function placeErrorText(error: PlaceSearchError): string {
     case "empty":
       return "검색 결과가 없습니다.";
     default:
-      return "장소 검색에 실패했습니다. 잠시 후 다시 시도해 주세요.";
+      // "잠시 후 다시 시도"라고 말하지 않는다 — 이 실패의 실제 원인(카카오 콘솔 웹 도메인
+      // 미등록, 파일 머리말 참고)에서는 **몇 번을 다시 눌러도 되지 않는다.** 고칠 수 있는
+      // 곳을 가리키는 편이 정직하다. 이 앱은 쓰는 사람이 곧 운영자다.
+      return "장소 검색이 거부됐습니다(실패). 카카오 개발자 콘솔에 이 사이트 도메인이 등록됐는지 확인해 주세요.";
   }
 }

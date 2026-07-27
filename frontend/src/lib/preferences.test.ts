@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_AXIS_WEIGHTS,
   DEFAULT_WEIGHTS,
   SERVER_APPLIES_WEIGHTS,
   WEIGHT_KEYS,
   WEIGHT_META,
+  effectiveWeights,
   isWeightAdjustable,
   normalizeWeights,
   weightStatus,
@@ -29,6 +31,42 @@ describe("normalizeWeights", () => {
     expect(w.price).toBe(0);
     expect(w.location).toBe(0);
     expect(w.value).toBeCloseTo(0.5, 4);
+  });
+
+  /**
+   * FE-5 의 핵심 계약. 서버는 **키가 없는 축**에만 기본 비중을 넣는다
+   * (`scoring.py::DEFAULT_AXIS_WEIGHTS`). 그래서 화면이 0 을 "생략"으로 보내면
+   * 사용자가 끈 축이 15% 로 되살아난다 — 조용히 켜지는 실패다.
+   */
+  it("0 인 축도 **키는 남긴다** — 생략하면 서버가 기본값으로 되살린다", () => {
+    const w = normalizeWeights({ price: 1, location: 0, value: 0, risk: 0, redevelopment: 0 });
+    for (const key of WEIGHT_KEYS) expect(key in w).toBe(true);
+    expect(w.redevelopment).toBe(0);
+    expect(w.price).toBe(1);
+  });
+});
+
+describe("effectiveWeights — 화면은 '지금 적용 중인 값'을 보여준다", () => {
+  it("재건축 키가 없으면 서버 기본 15% 를 드러낸다(0% 로 그리면 화면이 거짓말한다)", () => {
+    const w = effectiveWeights({ price: 0.3, location: 0.3, value: 0.25, risk: 0.15 });
+    expect(w.redevelopment).toBeCloseTo(DEFAULT_AXIS_WEIGHTS.redevelopment!, 3);
+  });
+
+  it("나머지 축의 **상대 비율**은 손대지 않는다(사용자 설정을 바꾸는 게 아니다)", () => {
+    const w = effectiveWeights({ price: 0.3, location: 0.3, value: 0.25, risk: 0.15 });
+    expect(w.location / w.price).toBeCloseTo(1, 3);
+    expect(w.value / w.price).toBeCloseTo(25 / 30, 3);
+    expect(w.price + w.location + w.value + w.risk + w.redevelopment).toBeCloseTo(1, 3);
+  });
+
+  it("사용자가 명시한 0 은 되살리지 않는다 — 키의 존재로 판단한다", () => {
+    const w = effectiveWeights({ price: 0.5, location: 0.3, value: 0.1, risk: 0.1, redevelopment: 0 });
+    expect(w.redevelopment).toBe(0);
+  });
+
+  it("아직 정한 적이 없으면 기본값(서버도 폴백한다)", () => {
+    expect(effectiveWeights({})).toEqual(DEFAULT_WEIGHTS);
+    expect(effectiveWeights(undefined)).toEqual(DEFAULT_WEIGHTS);
   });
 });
 
@@ -75,6 +113,27 @@ describe("가중치 설명", () => {
     // "호가만 들어오면 리스크가 다 반영된다"는 오해를 막는 문장이 반드시 있어야 한다
     expect(WEIGHT_META.risk.coverageGap).toContain("권리관계");
     expect(WEIGHT_META.risk.coverageGap).toContain("호가가 들어와도");
+  });
+
+  /**
+   * 재건축 축은 다른 넷과 성질이 다르다 — "높을수록 좋다"가 성립하지 않는다.
+   * 이 설명이 없으면 사용자는 비중을 올리는 것을 "재건축 단지를 위로"라고 읽는데,
+   * 실거주 기준에서는 오히려 이주·철거 임박 단지가 아래로 내려간다.
+   */
+  it("재건축은 '단계가 뒤일수록 좋다'가 아니라는 점을 설명에 담는다", () => {
+    const meta = WEIGHT_META.redevelopment;
+    expect(meta.summary).toContain("단계가 뒤일수록 높은 점수가 아닙니다");
+    expect(meta.detail).toContain("실거주");
+    expect(meta.detail).toContain("사업시행인가");
+    expect(meta.signal).toContain("단계");
+  });
+
+  it("재건축 축도 무엇을 못 보는지 밝힌다(분담금 · 경기도 미수집)", () => {
+    const gap = WEIGHT_META.redevelopment.coverageGap ?? "";
+    expect(WEIGHT_META.redevelopment.coverage).toBe("partial");
+    expect(gap).toContain("추가분담금");
+    // 확인되지 않은 것을 '없다'로 접으면 안 된다
+    expect(gap).toContain("'정비사업이 없다'는 뜻이 아닙니다");
   });
 
   it("full 축은 빠진 것이 없으므로 gap 문구를 만들지 않는다", () => {

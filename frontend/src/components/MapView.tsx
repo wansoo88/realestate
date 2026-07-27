@@ -52,17 +52,61 @@ declare global {
   }
 }
 
+/**
+ * SDK 가 **실제로 쓸 수 있는** 상태인가.
+ *
+ * `window.kakao.maps` 가 있다는 것만으로는 부족하다. 로더 스크립트는 **첫 줄에서**
+ * `window.kakao.maps = {}` 를 만들어 두고 본체(`kakao.js`)는 그 뒤에 비동기로 채운다.
+ * 그 사이에 `new kakao.maps.Map(...)` 을 부르면 TypeError 다 — 지도를 다녀오는 왕복
+ * (조건 화면 ↔ 지도)마다 재마운트되므로 이 창은 실제로 열린다.
+ */
+function sdkUsable(): boolean {
+  return typeof window.kakao?.maps?.Map === "function";
+}
+
+/** SDK 가 200 으로 왔는데 SDK 가 아닌 경우(카카오가 오류 본문을 돌려주는 경우)의 문구. */
+const SDK_BROKEN =
+  "카카오맵 SDK 응답이 올바르지 않습니다. 지도 키와 등록 도메인을 확인해 주세요.";
+
 function loadSdk(key: string): Promise<void> {
-  if (window.kakao?.maps) return Promise.resolve();
+  if (sdkUsable()) return Promise.resolve();
+
   return new Promise((resolve, reject) => {
+    // 로더는 실행됐지만 본체가 아직 로드 중인 상태(readyState 0/1). 스크립트를 **또** 붙이지
+    // 않고 그 로드에 올라탄다 — 재마운트마다 <script> 를 쌓으면 요청만 늘고 경합이 생긴다.
+    const pending = window.kakao?.maps?.load;
+    if (typeof pending === "function") {
+      pending(() => (sdkUsable() ? resolve() : reject(new Error(SDK_BROKEN))));
+      return;
+    }
+
     const script = document.createElement("script");
     // `services` 는 장소·역 검색용(PlaceSearch). REST API 를 브라우저에서 부르지 않기 위해
-    // SDK 쪽을 쓴다 — REST 키는 서버 전용이고, CSP `connect-src 'self'` 에도 막힌다.
-    // 출처는 그대로 `dapi.kakao.com`(이미 script-src 에 허용됨)이라 CSP 변경이 필요 없다.
+    // SDK 쪽을 쓴다 — REST 키는 서버 전용이다. 출처는 `dapi.kakao.com`(script-src 에 허용됨)이고
+    // 검색 XHR 도 같은 출처(connect-src 에 허용됨)라 CSP 변경은 필요 없다(lib/placeSearch 머리말).
     script.src =
       `https://dapi.kakao.com/v2/maps/sdk.js?appkey=${key}&autoload=false&libraries=services,clusterer`;
-    script.onload = () => window.kakao.maps.load(() => resolve());
-    script.onerror = () => reject(new Error("카카오맵 SDK 로드 실패"));
+    script.onload = () => {
+      // ⚠️ 예전에는 여기서 곧장 `window.kakao.maps.load(...)` 를 불렀다. 스크립트가 200 으로
+      //    왔지만 SDK 가 아니면(카카오는 인증 실패를 JSON 본문으로 돌려준다) 이 줄이 TypeError 를
+      //    던졌고, 그 예외는 **Promise 를 이행도 거부도 하지 못했다** — `ready` 도 `error` 도
+      //    영원히 그대로라 지도는 빈 회색 화면으로 남고 아무 메시지도 뜨지 않았다.
+      //    조용히 삼키지 않는다: 쓸 수 없으면 쓸 수 없다고 말한다.
+      if (typeof window.kakao?.maps?.load !== "function") {
+        reject(new Error(SDK_BROKEN));
+        return;
+      }
+      window.kakao.maps.load(() => (sdkUsable() ? resolve() : reject(new Error(SDK_BROKEN))));
+    };
+    // 도메인이 콘솔에 등록돼 있지 않으면 카카오는 이 스크립트를 **401** 로 돌려주고,
+    // 브라우저는 그걸 로드 실패로 처리해 여기로 온다. 그때 "로드 실패"만 적으면
+    // 어디를 고쳐야 하는지 알 수 없다 — 실제로 고칠 곳을 적는다.
+    script.onerror = () =>
+      reject(
+        new Error(
+          "카카오맵 SDK 를 불러오지 못했습니다. 카카오 개발자 콘솔에 이 사이트 도메인이 등록됐는지 확인해 주세요.",
+        ),
+      );
     document.head.appendChild(script);
   });
 }
@@ -79,6 +123,8 @@ export function MapView({
   const ref = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
+  /** 장소를 골랐는데 옮기지 못했을 때의 안내. 조용한 무반응을 만들지 않기 위한 것이다. */
+  const [moveNotice, setMoveNotice] = useState<string | null>(null);
   /** 우리 규약(클수록 확대)의 현재 줌. 표현 단계를 고르는 입력이다. */
   const [zoom, setZoom] = useState(() => 20 - lastCamera().level);
 
@@ -157,7 +203,13 @@ export function MapView({
    */
   const moveTo = useCallback((place: Place) => {
     const map = mapRef.current;
-    if (!map) return;
+    if (!map) {
+      // 예전에는 여기서 그냥 return 했다. 그러면 결과를 눌렀는데 **아무 일도 일어나지 않고**
+      // 사용자는 자기가 잘못 눌렀다고 생각한다. 못 옮기면 못 옮긴다고 말한다.
+      setMoveNotice("지도를 아직 불러오지 못해 이동할 수 없습니다.");
+      return;
+    }
+    setMoveNotice(null);
     // [경도, 위도] → LatLng(위도, 경도). 한 번만 뒤집혀도 태평양으로 간다(CR18-5).
     map.setCenter(new window.kakao.maps.LatLng(place.point[1], place.point[0]));
     if (map.getLevel() > 5) map.setLevel(5);
@@ -224,7 +276,7 @@ export function MapView({
       {/* 지도 위 레이어. 컨테이너는 클릭을 통과시키고(pointer-events:none) 자식만 받는다. */}
       <div className="map__overlays">
         {/* 역·장소로 지도를 옮긴다. **필터가 아니다** — 문구가 그렇게 말한다. */}
-        <PlaceSearch onPick={moveTo} />
+        <PlaceSearch onPick={moveTo} notice={moveNotice} />
 
         {/* 무엇을 왜 줄였는지 — 조용히 줄이면 그건 숨긴 것이다(markerTiers) */}
         {notice && (

@@ -71,7 +71,22 @@ logger = logging.getLogger("app.agents.recommend")
 JOB_FAILED = "failed"
 
 #: 후보로 볼 단지 상한 — LLM/통계 비용을 태우는 대상이라 넉넉하되 유한하게.
-CANDIDATE_COMPLEX_LIMIT = 50
+#:
+#: ⚠️ 50 → 120 (REC-7, 2026-07-28). **무엇이 병목인지 재고 올렸다.**
+#: 운영 DB(강남 11680 · 단지 506개) 실측:
+#:   · 후보 조회 SQL 자체는 상한과 **거의 무관**하다(50/100/200/400 전부 0.8~1.3초).
+#:     `ORDER BY 매물수·예산내 거래수` 가 전 행을 훑은 뒤에야 LIMIT 이 걸리기 때문이다
+#:     — 즉 예전 상한 50 은 DB 부하를 **하나도 줄이지 않고** 있었다.
+#:   · 실제 비용은 단지당 조립(호가·실거래·입지·정비사업 조회) 약 21~23ms 다.
+#:     50→120 은 +1.0초(2.3s→3.3s, 면적조건 2.9s→3.9s). 200 이면 +2.8초.
+#:   · 메모리: 조립 루프 파이썬 피크 1.5MiB · DB 정렬 78kB. db 컨테이너 192MB 와
+#:     무관하다(예전 OOM 은 이 경로가 아니다). 개별 문장은 전부 `statement_timeout`
+#:     10초의 1/8 이하다.
+#: 120 을 고른 이유: 보고된 사례(강남에서 조건 충족 96개)를 여유 있게 덮으면서,
+#: 그 위로는 `MAX_CANDIDATES`(200)가 먼저 걸려 추가 조회가 버려지기 시작한다
+#: (송파 실측: 단지 100개에서 이미 후보 200개 = 상한). 상한을 더 올리면 시간만 늘고
+#: 사용자가 보는 결과는 같아진다.
+CANDIDATE_COMPLEX_LIMIT = 120
 #: 조립된 Candidate 총량 상한(단지 × 면적그룹이 폭증하지 않게).
 MAX_CANDIDATES = 200
 #: 추천 개수. 상한은 API 스키마(`RecommendationIn.top_n`)와 같은 값이어야 한다 —
@@ -623,9 +638,12 @@ def _assemble_candidates(repo: Any, criteria: dict[str, Any],
 
     trades_of = getattr(repo, "trades_for_complex", None)
     location_of = getattr(repo, "location_facts", None)
-    # ⚠️ duck-typing 인 이유: 인메모리 리포지토리(테스트용)에는 이 메서드가 없다.
-    #    없으면 정비사업 판정이 전부 '미확보'가 되는데, 그건 **거짓이 아니라 사실**이다
-    #    (그 리포지토리에는 실제로 정보가 없다). 다만 조용히 지나가지 않도록 한 번 알린다.
+    # ⚠️ duck-typing 인 이유: 정비사업은 뒤에 붙은 기능이라 이 메서드가 없는 리포지토리
+    #    구현(스크립트·부분 스텁)이 올 수 있다. 없으면 정비사업 판정이 전부 '미확보'가
+    #    되는데, 그건 **거짓이 아니라 사실**이다(그 구현에는 실제로 정보가 없다).
+    #    다만 조용히 지나가지 않도록 한 번 알린다.
+    #    ※ PostGIS·인메모리 두 리포지토리에는 **둘 다 있다** — 그래야 재건축 가중치가
+    #      결과를 바꾸는지 API 전 구간에서 증명할 수 있다(test_condition_reach).
     redev_of = getattr(repo, "redevelopment_for_complex", None)
     if redev_of is None:
         logger.info("repo 에 redevelopment_for_complex 가 없어 정비사업 판정은 "
@@ -652,9 +670,15 @@ def _assemble_candidates(repo: Any, criteria: dict[str, Any],
     if len(complexes) >= CANDIDATE_COMPLEX_LIMIT:
         # 조회 상한에 걸렸다 = **지역에 단지가 더 있는데 보지 않았다.** 말하지 않으면
         # 사용자는 이 목록이 지역 전체를 본 결과라고 믿는다(실측 강남구: 단지 506개).
+        # ⚠️ **무슨 기준으로 고른 상위 N 인지 함께 말한다** (REC-7). "일부는 안 봤다"만
+        #    적으면 사용자는 빠진 단지가 무작위인지 이유가 있는지 알 수 없고, 그러면
+        #    "내가 아는 그 단지가 왜 없나"에 여전히 답이 안 된다.
         out.notes.append(
             f"조회 상한({CANDIDATE_COMPLEX_LIMIT}개 단지)에 걸려 지역 내 일부 단지는 "
-            "분석하지 않았습니다. 지역을 좁히면 더 정확합니다.")
+            "분석하지 않았습니다. 상한 안에 넣는 순서는 ① 활성 매물이 있는 단지 "
+            "② 예산 안에서 체결된 실거래가 많은 단지 ③ 최근 실거래 표본이 많은 단지 "
+            "입니다 — 무작위가 아니라 '지금 살 수 있고 가격을 판단할 근거가 있는' "
+            "순서입니다. 지역을 좁히면 더 정확합니다.")
 
     # 깔때기: 어디서 후보가 사라지는지 로그로 남긴다("그냥 0건" 보고를 막는다).
     funnel = {"complexes": len(complexes), "with_listings": 0, "trade_only": 0,

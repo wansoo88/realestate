@@ -163,6 +163,60 @@ export function findingView(f: Finding): FindingView {
 }
 
 /* ─────────────────────────────────────────────────────────────────────────
+ * 요약을 누가 썼나 — `summary_basis` (CR31-2)
+ *
+ * 서버는 카드의 문장(headline/why/why_not)을 AI 가 썼는지(`"llm"`) 규칙이 썼는지
+ * (`"fallback"`) 카드마다 밝힌다. 그런데 이 값이 화면에 닿지 않으면, **AI 요약이 폐기당해
+ * 규칙 기반으로 강등된 사실**이 사용자에게 전달되지 않는다. 강등은 조용한 사건이 아니다 —
+ * 예를 들어 AI 가 추가분담금 표현을 쓰면 서버는 요약 전체를 폐기하고 규칙 문장으로 바꾼다.
+ *
+ * ⚠️ 다만 **모든 카드에 배지를 달면 안 된다.** LLM 미연결(ANTHROPIC_API_KEY 없음)이면
+ *    모든 카드가 fallback 이고, 그 사실은 job `notes` 가 이미 한 번 말한다. 카드마다
+ *    같은 말을 반복하면 아무도 읽지 않게 되고, 그러면 **정말 강등된 한 건**도 묻힌다.
+ *    그래서 기준은 하나다: **이번 결과에 AI 요약이 하나라도 있는데 이 카드만 규칙 기반인가.**
+ *    (문자열로 notes 를 뒤지지 않는다 — 고지 문구가 바뀌면 조용히 깨진다.)
+ * ───────────────────────────────────────────────────────────────────────── */
+
+export const SUMMARY_BASIS_LLM = "llm";
+export const SUMMARY_BASIS_FALLBACK = "fallback";
+
+/** 이번 결과에서 AI 요약이 실제로 쓰였는가. 한 건이라도 있으면 LLM 은 살아 있었다. */
+export function llmSummaryActive(items: RecommendationItem[] | null | undefined): boolean {
+  return (items ?? []).some((i) => i.summary_basis === SUMMARY_BASIS_LLM);
+}
+
+export interface SummaryBasisView {
+  /** 이 카드의 문장이 규칙 기반인가. */
+  fallback: boolean;
+  /** **이 카드만** 강등됐는가 — 화면에 표기할지를 정하는 값. */
+  degraded: boolean;
+  /** 표기할 짧은 라벨. 표기하지 않을 상황이면 null. */
+  label: string | null;
+  /** 라벨 옆 한 줄 설명. 사유를 **지어내지 않는다**(서버가 사유를 카드에 주지 않는다). */
+  note: string | null;
+}
+
+export function summaryBasisView(
+  item: RecommendationItem,
+  opts: { llmActive: boolean },
+): SummaryBasisView {
+  const basis = item.summary_basis;
+  // 서버가 값을 안 주는 구버전 → 아무 말도 하지 않는다(모르는 것을 단정하지 않는다).
+  const fallback = basis === SUMMARY_BASIS_FALLBACK;
+  const degraded = fallback && opts.llmActive;
+  if (!degraded) return { fallback, degraded: false, label: null, note: null };
+
+  return {
+    fallback,
+    degraded: true,
+    label: "규칙 기반 요약",
+    note:
+      "이 카드의 요약 문장만 AI 대신 규칙으로 만들었습니다(사유는 결과 하단 안내 참조). " +
+      "순위·가격 근거·제외 사유는 규칙과 실거래 통계로 계산하므로 영향받지 않습니다.",
+  };
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
  * 폴링 경로
  * ───────────────────────────────────────────────────────────────────────── */
 

@@ -14,10 +14,10 @@ import { ApiException, type Preferences, type Profile } from "../api/client";
 import { readTargetPrice, withTargetPrice } from "../lib/affordability";
 import { NOTICE_TRUST } from "../lib/notices";
 import {
-  DEFAULT_WEIGHTS,
   WEIGHT_KEYS,
   WEIGHT_LABELS,
   WEIGHT_META,
+  effectiveWeights,
   normalizeWeights,
   weightStatus,
   weightStatusNote,
@@ -97,9 +97,13 @@ export function ConditionsScreen({
    */
   const targetPrice = readTargetPrice(prefer);
   const [avoid, setAvoid] = useState<Preferences["avoid"]>(preferences.avoid ?? {});
-  const [weights, setWeights] = useState<Weights>(
-    Object.keys(preferences.weights ?? {}).length > 0 ? preferences.weights : DEFAULT_WEIGHTS,
-  );
+  /**
+   * 가중치 초기값은 저장값이 아니라 **지금 서버가 적용 중인 값**이다(effectiveWeights).
+   * 저장값에 `redevelopment` 가 없는 기존 사용자에게 0% 를 보여주면, 화면은 0 이라고 하고
+   * 서버는 15% 로 순위를 매기는 상태가 된다 — 그리고 그대로 저장하면 의도한 적 없는
+   * 명시적 0 이 저장된다(FE-5).
+   */
+  const [weights, setWeights] = useState<Weights>(effectiveWeights(preferences.weights));
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);

@@ -58,6 +58,7 @@ from app.domain.redevelopment.analysis import (
     redact_cost_topic,
 )
 from app.domain.redevelopment.models import RedevProject
+from app.domain.redevelopment.stages import STAGE_UNKNOWN
 from app.domain.valuation.models import DongValuation, Liquidity, ListingRow, TradeRow
 from app.domain.valuation.stats import (
     ask_gap_pct,
@@ -528,11 +529,91 @@ def location_finding(candidate: Candidate, as_of: dt.date, *,
 # ---------------------------------------------------------------------------
 AGENT_REDEV = "redevelopment-analyst"
 
+#: 분담금 lint 가 발화해 이 후보의 재건축 블록만 내려놓았을 때의 사유.
+#: **'정비사업이 없다'가 아니라 '이번 실행에서 판정을 내지 못했다'** 이다 —
+#: 미확보(NO_PROJECT_REASON)와 문구를 구분해야 사용자가 원인을 짐작할 수 있다.
+COST_GUARD_DEGRADED_REASON = (
+    "정비사업 판정 문장이 내부 금액 검사에 걸려 이 단지의 재건축 분석만 내려놓았습니다 "
+    "— '정비사업이 없다'는 뜻이 아니라 '이번 분석에서 판정하지 못했다'는 뜻입니다. "
+    "정비사업 여부는 관할 구청 주거정비과 또는 정비사업 정보몽땅에서 확인하세요."
+)
+
+
+#: `detail` 에 남기는 강등 표식. 문구가 아니라 **이 키**로 센다 —
+#: 사유 문장으로 세면 문구를 다듬는 순간 집계가 조용히 0이 된다.
+COST_GUARD_DETAIL_KEY = "cost_guard_blocked"
+
+
+def is_cost_guard_degraded(assessment: RedevAssessment) -> bool:
+    """이 판정이 분담금 방어 때문에 내려간 것인가(= 미확보와 구분된다)."""
+    return bool((assessment.detail or {}).get(COST_GUARD_DETAIL_KEY))
+
+
+def _cost_guard_degraded(exc: BaseException) -> RedevAssessment:
+    """분담금 방어가 걸린 후보의 표준 반환 — **판정만 비우고 후보는 살린다.**"""
+    return RedevAssessment(
+        available=False, stage=STAGE_UNKNOWN, raw_stage="", score=None, confidence=0.0,
+        verdict="정비사업 판정 보류",
+        rationale=COST_GUARD_DEGRADED_REASON,
+        missing=(COST_GUARD_DEGRADED_REASON,),
+        must_verify=("정비사업 여부·단계는 관할 구청 주거정비과 또는 정비사업 "
+                     "정보몽땅에서 직접 확인하세요.",),
+        detail={COST_GUARD_DETAIL_KEY: True, "cost_guard_error": str(exc)},
+    )
+
 
 def redevelopment_assessment(candidate: Candidate, as_of: dt.date, *,
                              purpose: str = PURPOSE_LIVE) -> RedevAssessment:
-    """이 후보의 정비사업 판정. 매칭된 구역이 없으면 '미확보' 판정을 낸다."""
-    return assess_redevelopment(candidate.redevelopment, purpose=purpose, as_of=as_of)
+    """이 후보의 정비사업 판정. 매칭된 구역이 없으면 '미확보' 판정을 낸다.
+
+    ⚠️ **분담금 방어가 걸려도 추천을 죽이지 않는다** (CR31-1, 2026-07-28)
+    -------------------------------------------------------------------
+    `assert_no_cost_estimate` 는 개발자 문장에 대한 lint 다. 그런데 그 검사가 도는
+    문장에는 수집 원문(구역명·원문 단계명)이 인용돼 있어서, 예전에는 `제3원구역`
+    같은 값 하나로 `CostEstimateError` 가 나고 **아무도 잡지 않아 job 전체가
+    'failed' + 빈 결과**가 됐다. 후보 한 건의 구역명 때문에 추천이 통째로 사라지는 것은
+    lint 가 낼 수 있는 대가가 아니다.
+
+    1차 방어는 도메인 쪽 `source_quotes`(인용문을 검사 대상에서 뺀다)이고, 여기는
+    **그물**이다 — 새 필드를 문장에 끼우고 `_source_quotes` 갱신을 잊는 날을 대비한다.
+    걸리면 그 후보의 재건축 블록만 '판정 보류'로 내려놓고, 왜 그랬는지 사유 문장과
+    `logger.exception` 을 남긴다. 요약 한 줄 때문에 추천 전체를 날리지 않는다는
+    `portfolio_summary` 의 원칙과 같은 판단이다.
+    """
+    try:
+        return assess_redevelopment(candidate.redevelopment, purpose=purpose, as_of=as_of)
+    except CostGuardError as exc:
+        # 운영자가 원인을 찾을 수 있도록 스택까지 남긴다. 여기 실리는 것은 구역명·단계명
+        # 같은 공개 수집값이지 사용자 자산이 아니다(마스킹 대상 아님).
+        logger.exception(
+            "정비사업 판정이 분담금 검사에 걸려 이 후보만 판정 보류로 내립니다 "
+            "(complex_id=%s)", candidate.complex_id)
+        return _cost_guard_degraded(exc)
+
+
+def redevelopment_pair(candidate: Candidate, as_of: dt.date, *,
+                       purpose: str = PURPOSE_LIVE
+                       ) -> tuple[RedevAssessment, "Finding", bool]:
+    """정비사업 판정 + Finding 을 **한 묶음으로** 만든다. 반환 3번째는 강등 여부.
+
+    둘을 따로 만들면 판정은 통과했는데 Finding 변환에서 lint 가 걸리는 상태가 생기고,
+    그러면 카드에는 재건축 블록이 있는데 findings 에는 없는 **반쪽 결과**가 나간다.
+    한 자리에서 만들고, 걸리면 **둘 다** 판정 보류로 내린다.
+
+    ⚠️ 강등 여부는 **판정 객체에서 읽는다**(`is_cost_guard_degraded`). 여기서 잡은
+       예외만 세면, 한 단계 앞(`redevelopment_assessment`)에서 이미 잡아 강등한 건은
+       **세어지지 않아 고지가 빠진다** — 조용한 강등이 되는 자리다.
+    """
+    assessment = redevelopment_assessment(candidate, as_of, purpose=purpose)
+    try:
+        return (assessment, redevelopment_finding(assessment),
+                is_cost_guard_degraded(assessment))
+    except CostGuardError as exc:
+        logger.exception(
+            "정비사업 Finding 변환이 분담금 검사에 걸려 이 후보만 판정 보류로 내립니다 "
+            "(complex_id=%s)", candidate.complex_id)
+        degraded = _cost_guard_degraded(exc)
+        return degraded, redevelopment_finding(degraded), True
 
 
 def redevelopment_finding(assessment: RedevAssessment) -> Finding:
@@ -541,9 +622,12 @@ def redevelopment_finding(assessment: RedevAssessment) -> Finding:
         return insufficient(AGENT_REDEV, list(assessment.missing))
 
     # 이중 방어 — 도메인을 우회해 만들어진 문장이 섞여 들어올 여지를 남기지 않는다.
+    # 검사 경계는 도메인과 **같아야 한다**: 수집 원문 인용분은 여기서도 뺀다.
+    # (같은 문장을 여기서만 다른 기준으로 보면, 도메인을 통과한 판정이 여기서 죽는다.)
     assert_no_cost_estimate(assessment.rationale, assessment.verdict,
                             *(detail for _, detail in assessment.risks),
-                            *assessment.upsides)
+                            *assessment.upsides,
+                            source_quotes=assessment.source_quotes)
 
     evidence = [Evidence(claim=e["claim"], source=e["source"], as_of=e.get("as_of"),
                          source_url=e.get("source_url"))
@@ -1046,6 +1130,9 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
     items: list[dict[str, Any]] = []
     excluded: list[dict[str, Any]] = []
     scores: list[ScoreResult] = []  # 결과 전체 고지를 만들 때 다시 훑는다
+    #: 분담금 방어에 걸려 재건축 블록만 내려놓은 후보 수. **0 이 아니면 반드시 말한다** —
+    #: 조용히 '미확보'로 섞이면 수집 범위 밖(경기도)과 구분되지 않는다.
+    cost_guard_degraded = 0
 
     for cand in ctx.candidates:
         rep = cand.group.representative if cand.group is not None else None
@@ -1087,7 +1174,12 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
             continue
 
         # 정비사업 판정은 **제외 판정보다 먼저** 필요하다(초기 단계 기피가 여기서 걸린다).
-        redev_assess = redevelopment_assessment(cand, ctx.as_of, purpose=ctx.purpose)
+        # 판정과 Finding 을 한 번에 만든다 — 분담금 방어가 걸리면 **이 후보의 재건축
+        # 블록만** 판정 보류로 내려가고(available=False), 추천 자체는 계속된다(CR31-1).
+        redev_assess, redev_f, redev_blocked = redevelopment_pair(
+            cand, ctx.as_of, purpose=ctx.purpose)
+        if redev_blocked:
+            cost_guard_degraded += 1
 
         # 하드 제외 ③ — '초기 단계 재건축 기피'(api-spec §2). 감점이 아니라 제외다.
         # ⚠️ **확인된 초기 단계일 때만** 뺀다. 정보가 없는 단지를 "초기일지도 모르니"
@@ -1113,7 +1205,6 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
                     else insufficient("location-analyst",
                                       ["입지 데이터(학군·교통·인프라) 미수집"]))
         listing_f = listing_finding(cand, median, ctx.as_of)
-        redev_f = redevelopment_finding(redev_assess)
         findings = [finance, listing_f, valuation, location, redev_f]
 
         # 총점: 사용자 가중치(가격·입지·가치·리스크·재건축)를 실제로 곱한다.
@@ -1241,6 +1332,13 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
         notes.append(
             "재건축 판정은 고시된 진행 단계만 봅니다. **추가분담금은 조합 내부 자료라 "
             "공개 데이터에 없어 반영하지 않았습니다** — 금액은 조합에 직접 확인하세요.")
+    if cost_guard_degraded:
+        # 후보 전체(items+excluded) 기준이다. 상위 N 만 세면 "3건 보류"라고 해 놓고
+        # 화면의 10건 어디에도 그 표시가 없는 상태가 생긴다.
+        notes.append(
+            f"후보 {cost_guard_degraded}건은 정비사업 판정 문장이 내부 금액 검사에 걸려 "
+            "재건축 분석만 내려놓았습니다(해당 후보의 순위·가격 근거는 그대로입니다). "
+            "'정비사업이 없다'는 뜻이 아닙니다.")
     if any(it["price_basis"] == PRICE_BASIS_TRADE for it in items[:top_n]):
         notes.append(
             "일부 후보는 현재 등록된 매물이 없어 최근 실거래 기준으로 세운 추정입니다"

@@ -229,7 +229,22 @@ export interface Preferences {
     main_road_noise?: boolean;
     redevelopment_early_stage?: boolean;
   };
-  weights: { price?: number; location?: number; value?: number; risk?: number };
+  /**
+   * 순위 가중치. 축 이름은 서버 `scoring.py::AXIS_SPECS` 와 **같은 문자열**이어야 한다.
+   *
+   * ⚠️ `redevelopment`(재건축)는 나중에 추가된 축이라 특별한 규칙이 있다:
+   *    **키를 아예 안 보내면** 서버가 기본 15% 를 넣고 그 사실을 notes 로 고지한다.
+   *    **0 을 명시해서 보내면** 서버가 존중한다(그 축을 안 본다).
+   *    즉 "안 보냄"과 "0"은 다른 뜻이다 — 그래서 화면은 `normalizeWeights` 로
+   *    **모든 축을 항상 실어 보낸다**(0 도 값이다).
+   */
+  weights: {
+    price?: number;
+    location?: number;
+    value?: number;
+    risk?: number;
+    redevelopment?: number;
+  };
 }
 
 /* ── 추천 (F1·F3·F6) ─────────────────────────────────────────────────── */
@@ -351,6 +366,18 @@ export interface RecommendationItem {
   score_axes?: ScoreAxis[] | null;
   /** 이 후보에서 반영되지 못한 가중치 고지. 결과 전체 notes 와 **양쪽 다** 보여준다. */
   score_notes?: string[] | null;
+  /**
+   * 이 카드의 요약 문장(headline/why/why_not)을 **누가 썼는가**.
+   *   `"llm"`      — AI 요약
+   *   `"fallback"` — 규칙 기반. LLM 미연결·호출 실패·상한 초과일 수도 있고,
+   *                  **AI 요약이 분담금 표현을 써서 폐기당한 경우**일 수도 있다.
+   *
+   * ⚠️ 이 값이 화면에 닿지 않으면 강등 사실이 사용자에게 전달되지 않는다(CR31-2).
+   *    다만 LLM 미연결 상태에서는 **모든 카드가 fallback** 이라 카드마다 경고를 띄우면
+   *    소음이 된다 — 그건 job 단위 notes 가 이미 말한다. 판단은 `lib/recommendation.ts`
+   *    의 `summaryBasisView` 한 곳에서 한다.
+   */
+  summary_basis?: string | null;
   timing_signal: string;
   headline: string;
   why: string[];
@@ -399,6 +426,23 @@ export interface RecommendationRequest {
   purpose?: "live" | "invest";
   budget_override_krw?: number | null;
   top_n?: number;
+
+  /* ── 내 조건(선호) — **끄는 방법이 있어야 한다** ─────────────────────────
+   * 서버는 이 필드들을 안 보내면 저장된 `user_preference.prefer` 를 **폴백**으로 쓴다
+   * (`app/domain/conditions.py`). 프론트가 한 줄 빠뜨려도 조건이 증발하지 않게 한
+   * 안전장치다. 그런데 그 폴백 때문에 **조건을 끄는 방법이 사라졌다** —
+   * 지도에서 면적 칩을 꺼도 추천은 저장된 면적으로 계속 걸렀다(FE-4).
+   *
+   * ⚠️ 그래서 `null`(안 보냄)과 "끔"은 **다른 뜻**이다:
+   *      · 키 없음        → 저장된 내 조건을 그대로 쓴다
+   *      · use_saved_conditions=false → 이번 요청에서는 저장된 조건을 쓰지 않는다
+   *    화면이 이 둘을 구분해 보내는 곳은 `lib/recommendConditions.ts` 한 곳뿐이다. */
+  area_min_m2?: number;
+  area_max_m2?: number;
+  built_after?: number;
+  min_households?: number;
+  /** false = 이번 요청에 저장된 "내 조건"을 쓰지 않는다(칩 OFF). 생략 = 예전대로 폴백. */
+  use_saved_conditions?: boolean;
 }
 
 const BASE = "/api/v1";

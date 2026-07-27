@@ -24,7 +24,9 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -44,6 +46,8 @@ from app.domain.redevelopment.stages import (
     STAGE_UNKNOWN,
     STAGE_ZONE_DESIGNATED,
 )
+
+logger = logging.getLogger("app.domain.redevelopment")
 
 PURPOSE_LIVE = "live"
 PURPOSE_INVEST = "invest"
@@ -66,7 +70,20 @@ COST_DISCLOSURE = (
 #: **주제 자체**를 잡는다. 금액 표기는 무한히 변형되지만 주제어는 몇 개 안 된다.
 _COST_TOPIC_RE = re.compile(r"분담|부담|환급|추가\s*비용")
 #: 금액으로 읽히는 토큰(숫자 + 단위). 연도(2026)·세대수(1,588)는 단위가 없어 안 걸린다.
-_MONEY_RE = re.compile(r"\d[\d,.]*\s*(?:억\s*원?|천만\s*원?|백만\s*원?|만\s*원|원)")
+#:
+#: ⚠️ 맨 뒤의 **단위 없는 `원`** 에는 자릿수 하한이 붙어 있다 (CR31-1, 2026-07-28).
+#:    예전에는 `\d…원` 이면 무엇이든 금액으로 읽어서 `제3원구역` 의 '3원',
+#:    `수원역 1번지` 류의 '1원' 까지 걸렸다. 이 도메인에서 **단위 없이 쓰는 금액**은
+#:    쉼표를 넣은 원 단위 표기(`700,000,000원`)이거나 최소 네 자리다 —
+#:    `3원`·`50원` 은 부동산 금액이 아니라 잡음이고, 잡음에 반응하는 검사는
+#:    "진짜 금액"에 반응할 자격을 잃는다(오탐이 쌓이면 검사를 꺼 버리게 된다).
+#:    억/천만/백만/만 이 붙은 표기는 한 자리라도 그대로 잡는다(`3억원`·`5000만원`).
+_MONEY_RE = re.compile(
+    # ① 단위(억·천만·백만·만원)가 붙으면 자릿수와 무관하게 금액이다.
+    r"\d[\d,.]*\s*(?:억\s*원?|천만\s*원?|백만\s*원?|만\s*원)"
+    # ② 단위 없는 '원' 은 숫자·쉼표가 **네 글자 이상**일 때만(`3000원`·`700,000,000원`).
+    r"|\d[\d,]{3,}\s*원"
+)
 #: 문장 경계. 마침표류 뒤의 공백 또는 줄바꿈에서 자른다(프롬프트 재료 삭제용).
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
 
@@ -102,7 +119,32 @@ def redact_cost_topic(text: str | None) -> str:
     return " ".join(kept).strip()
 
 
-def assert_no_cost_estimate(*texts: str | None) -> None:
+#: 수집 원문을 도려낸 자리에 남기는 표식. 낱말 경계가 사라지지 않게 공백을 둔다
+#: ("…{zone}구역" 에서 zone 만 지우면 앞뒤 글자가 붙어 없던 낱말이 생긴다).
+_QUOTE_PLACEHOLDER = " ⟦수집원문⟧ "
+#: 인용문 하나가 이보다 짧으면 도려내지 않는다. 한두 글자짜리 값('원'·'1')이
+#: 문장 곳곳에서 지워지면 검사 대상 문장이 걸레가 되고, 그 구멍으로 우리 금액이 샌다.
+_MIN_QUOTE_LEN = 2
+
+
+def strip_source_quotes(text: str, quotes: Iterable[str | None]) -> str:
+    """문장에서 **수집 원문 그대로 인용된 부분**을 도려낸다.
+
+    우리 문장은 `f"{project.sigungu} {project.zone_name} … 원문 '{raw_stage}'"` 처럼
+    외부 값을 그대로 끼워 만든다. 분담금 **금액 lint** 는 "우리가 지어낸 숫자"를
+    찾는 검사이므로, 검사 전에 외부에서 온 조각을 빼는 것이 정확한 대상 설정이다.
+    """
+    out = str(text)
+    for quote in quotes:
+        body = str(quote or "").strip()
+        if len(body) < _MIN_QUOTE_LEN or body not in out:
+            continue
+        out = out.replace(body, _QUOTE_PLACEHOLDER)
+    return out
+
+
+def assert_no_cost_estimate(*texts: str | None,
+                            source_quotes: Iterable[str | None] = ()) -> None:
     """**우리 코드가 만든** 문장에 분담금 금액이 들어갔는지 검사한다. 있으면 즉시 예외.
 
     적용 대상
@@ -115,6 +157,19 @@ def assert_no_cost_estimate(*texts: str | None) -> None:
        넣는 것만으로 뚫렸다. 검사 단위는 **문자열 하나 전체**다. 우리 문장은 짧은
        고지·판정문이라 창을 넓혀도 오탐 비용이 없다.
 
+    ⚠️ `source_quotes` — **수집 원문은 검사 대상이 아니다** (CR31-1, 2026-07-28)
+    ---------------------------------------------------------------------------
+    창을 필드 전체로 넓힌 순간 이 lint 가 **외부 문자열을 보게 됐다.** `rationale` 은
+    `COST_DISCLOSURE` 때문에 주제어가 **항상** 참이므로, 실질적으로 "rationale 안에
+    금액처럼 읽히는 토큰이 하나라도 있으면 예외"가 됐다. 그런데 그 rationale 에는
+    구역명·원문 단계명이 그대로 인용된다 — `제3원구역` 하나로 `CostEstimateError` 가
+    나고, 아무도 그 예외를 잡지 않아 **추천 job 전체가 죽었다.**
+
+    이 함수의 존재 이유는 *"우리가 없는 금액을 지어내는 것"* 을 막는 것이다.
+    수집한 구역명에 숫자와 '원'이 들어 있는 것은 **우리가 지어낸 것이 아니라 사실의
+    인용**이다. 그래서 검사 전에 인용문을 도려낸다 — 검사를 약하게 만드는 게 아니라
+    **검사 대상을 원래 의도대로 되돌리는** 것이다. 우리 서술 부분은 그대로 다 본다.
+
     ⚠️ LLM 출력에는 이 함수를 쓰지 않는다 — `assert_no_cost_topic` 을 쓴다.
        LLM 에게는 분담금 재료를 주지 않으므로, 주제를 꺼내는 것 자체가 이상 신호다.
 
@@ -123,10 +178,13 @@ def assert_no_cost_estimate(*texts: str | None) -> None:
     사용자는 이 리포트를 근거로 수억 원을 쓴다. "분담금 약 1.2억 예상" 한 줄이면
     없는 확신을 만든다. 경고 로그는 아무도 안 보지만 예외는 테스트가 잡는다.
     """
+    quotes = [q for q in source_quotes if q]
     for text in texts:
         if not text:
             continue
         body = str(text)
+        if quotes:
+            body = strip_source_quotes(body, quotes)
         topic = _COST_TOPIC_RE.search(body)
         money = _MONEY_RE.search(body)
         if topic and money:
@@ -135,6 +193,16 @@ def assert_no_cost_estimate(*texts: str | None) -> None:
                 f"없습니다(주제어 {topic.group(0)!r} + 금액 {money.group(0)!r}). "
                 "사업성의 '방향'(세대수 증가율 등)만 서술하세요."
             )
+
+
+def money_like_tokens(text: str | None) -> tuple[str, ...]:
+    """이 문자열에서 금액처럼 읽히는 토큰들. **판정이 아니라 관측**이다.
+
+    수집 원문(구역명·원문 단계명)에 이런 토큰이 있어도 그건 우리가 지어낸 금액이
+    아니므로 막지 않는다. 다만 **말은 한다** — 조용히 통과시키면 "왜 이 카드에
+    금액처럼 보이는 글자가 있나"에 아무도 답할 수 없다.
+    """
+    return tuple(m.group(0) for m in _MONEY_RE.finditer(str(text or "")))
 
 
 def assert_no_cost_topic(*texts: str | None) -> None:
@@ -283,6 +351,11 @@ class RedevAssessment:
     #: 초기 단계인가(기피 조건 판정에 쓰인다).
     early_stage: bool = False
     detail: dict[str, Any] = field(default_factory=dict)
+    #: 위 문장들에 **수집 원문 그대로 인용된** 조각들(구역명·시군구·원문 단계명 등).
+    #: 하류에서 분담금 금액 lint 를 다시 돌릴 때 검사 대상에서 빼기 위해 들고 다닌다
+    #: — 어디서 검사하든 "우리가 쓴 말"과 "인용한 말"의 경계가 같아야 한다(CR31-1).
+    #: 응답 payload 에는 싣지 않는다(사용자에게 의미 없는 내부 출처 표식이다).
+    source_quotes: tuple[str, ...] = ()
 
 
 # --- 데이터가 없을 때의 표준 반환 -------------------------------------------
@@ -403,6 +476,35 @@ def _verdict(stage: str, purpose: str) -> str:
     return f"{label} — 확실하지만 가격 반영 구간"
 
 
+def _source_quotes(project: RedevProject) -> tuple[str, ...]:
+    """이 판정 문장에 **원문 그대로 인용되는** 수집 값들.
+
+    여기 빠진 필드를 문장에 새로 끼우면 그 값은 분담금 금액 lint 의 검사 대상이 된다
+    — 즉 "우리가 쓴 말"로 취급된다. 문장에 외부 값을 추가할 때는 **여기도 함께** 늘려야
+    하고, 그게 잊히면 lint 가 외부 데이터에 발화한다(CR31-1 이 정확히 그 사고였다).
+    """
+    return tuple(str(v) for v in (project.zone_name, project.sigungu,
+                                  project.raw_stage, project.raw_biz_type) if v)
+
+
+def _log_money_like_quotes(project: RedevProject, quotes: Iterable[str]) -> None:
+    """수집 원문에 금액처럼 읽히는 토큰이 있으면 **기록한다**(막지는 않는다).
+
+    막지 않는 이유는 그 값이 사실의 인용이기 때문이고, 기록하는 이유는 그것이
+    화면에 그대로 나가기 때문이다 — 사용자가 "이 금액은 뭐냐"고 물을 때 답할 근거가
+    어디엔가는 있어야 한다. 조용히 넘어가는 것과 막지 않는 것은 다르다.
+    """
+    hits = {q: money_like_tokens(q) for q in quotes}
+    hits = {q: t for q, t in hits.items() if t}
+    if not hits:
+        return
+    logger.warning(
+        "정비사업 수집 원문에 금액 표기가 있습니다(우리가 만든 금액이 아니라 원문 "
+        "인용이라 그대로 둡니다): source=%s source_key=%s %s",
+        project.source, getattr(project, "source_key", None) or project.zone_name,
+        "; ".join(f"{q!r}→{list(t)}" for q, t in hits.items()))
+
+
 def assess_redevelopment(project: RedevProject | None, *, purpose: str = PURPOSE_LIVE,
                          as_of: dt.date | None = None) -> RedevAssessment:
     """매칭된 정비사업 구역 → 판정.
@@ -417,6 +519,10 @@ def assess_redevelopment(project: RedevProject | None, *, purpose: str = PURPOSE
     as_of = as_of or dt.date.today()
     purpose = purpose if purpose in STAGE_PROFILE else PURPOSE_LIVE
     stage = project.stage
+    # 이 판정의 문장들에 그대로 인용될 수집 원문. 금액 lint 의 검사 대상에서 빼되,
+    # 금액처럼 읽히는 값이 섞여 있으면 로그로 남긴다(막지 않되 조용히 넘기지 않는다).
+    quotes = _source_quotes(project)
+    _log_money_like_quotes(project, quotes)
 
     if stage == STAGE_UNKNOWN:
         # 구역은 찾았는데 단계를 못 읽었다. **구역이 있다는 사실은 남기고** 점수는 안 준다.
@@ -431,6 +537,7 @@ def assess_redevelopment(project: RedevProject | None, *, purpose: str = PURPOSE
             must_verify=_must_verify(project),
             basis=BASIS_STAGE_MEASURED,
             detail=_detail(project, purpose, None, None),
+            source_quotes=quotes,
         )
 
     base = STAGE_PROFILE[purpose][stage]
@@ -482,8 +589,10 @@ def assess_redevelopment(project: RedevProject | None, *, purpose: str = PURPOSE
     # ⚠️ 구조적 방어: 이 모듈이 만든 문장에 분담금 **금액**이 섞이면 여기서 멈춘다.
     #    `must_verify` 도 함께 본다 — 이 목록은 추천 카드의 `next_actions` 에 그대로
     #    합쳐져 나가므로(orchestrator `_merge_actions`) 검사 밖에 두면 구멍이 된다.
+    #    `source_quotes` 로 **수집 원문 인용분은 빼고** 본다 — 검사 대상은 우리가 쓴
+    #    말이지 우리가 인용한 사실이 아니다(CR31-1).
     assert_no_cost_estimate(rationale, verdict, *(d for _, d in risks), *upsides,
-                            *must_verify)
+                            *must_verify, source_quotes=quotes)
 
     return RedevAssessment(
         available=True,
@@ -502,6 +611,7 @@ def assess_redevelopment(project: RedevProject | None, *, purpose: str = PURPOSE
         basis=BASIS_STAGE_MEASURED,
         early_stage=stage in EARLY_STAGES,
         detail=_detail(project, purpose, base, score),
+        source_quotes=quotes,
     )
 
 
