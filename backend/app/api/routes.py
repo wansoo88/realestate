@@ -345,14 +345,36 @@ CLUSTER_ZOOM_THRESHOLD = 13
 _MAX_BBOX_DEGREES = 2.0
 
 
+def _check_area_range(area_min_m2: float | None, area_max_m2: float | None) -> None:
+    """전용면적 최소>최대는 **거절한다**(400).
+
+    조용히 뒤집으면 사용자는 자기가 넣지 않은 조건의 결과를 자기 조건이라고 믿는다.
+    조용히 무시하면 조건이 없는 결과를 조건이 걸린 결과라고 믿는다. 둘 다 이 제품이
+    가장 경계하는 '실패가 실패로 보이지 않는' 형태다 — 그래서 되돌려 준다.
+    지도(`/map/complexes`)와 추천(`POST /recommendations`)이 **같은 규칙**을 쓴다.
+    """
+    if area_min_m2 is None or area_max_m2 is None:
+        return
+    if area_min_m2 > area_max_m2:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail={"code": "INVALID_PARAM",
+                    "message": ("전용면적 최소값이 최대값보다 큽니다 "
+                                f"({area_min_m2:g}㎡ > {area_max_m2:g}㎡)")},
+        )
+
+
 @router.get("/map/complexes", tags=["map"])
 def map_complexes(
     user: CurrentUser,
     bbox: str = Query(description="minLon,minLat,maxLon,maxLat"),
     zoom: int = Query(ge=1, le=22),
     max_price_krw: int | None = Query(default=None, ge=0),
-    area_min_m2: float | None = Query(default=None, gt=0),
-    area_max_m2: float | None = Query(default=None, gt=0),
+    # ⚠️ `allow_inf_nan=False` — `Infinity` 는 `gt=0` 을 **통과한다**(inf > 0). 그러면
+    #    하류에서 조건이 조용히 사라지고 사용자는 조건 없는 결과를 조건이 걸린 결과로
+    #    읽는다(SR24-6). `NaN`·`-Infinity` 는 이미 422 이므로 여기서 규칙을 맞춘다.
+    area_min_m2: float | None = Query(default=None, gt=0, allow_inf_nan=False),
+    area_max_m2: float | None = Query(default=None, gt=0, allow_inf_nan=False),
     built_after: int | None = Query(default=None, ge=1900, le=2100),
     repo=Depends(get_repo),
 ) -> dict[str, Any]:
@@ -377,6 +399,7 @@ def map_complexes(
             status.HTTP_400_BAD_REQUEST,
             detail={"code": "INVALID_PARAM", "message": "조회 범위가 너무 넓습니다"},
         )
+    _check_area_range(area_min_m2, area_max_m2)
 
     rows = repo.complexes_in_bbox(
         min_lon=min_lon, min_lat=min_lat, max_lon=max_lon, max_lat=max_lat,
@@ -450,6 +473,10 @@ def create_recommendation(body: schemas.RecommendationIn, user: CurrentUser,
     키가 없으면 `build_llm` 이 `None` 을 돌려주고 동작은 그대로다 —
     **다만 그 사실이 결과 `notes` 에 남는다**(조용히 규칙 기반으로 도는 상태를 없앤다).
     """
+    # 면적 조건이 뒤집혀 있으면 여기서 거절한다 — 지도와 **같은 규칙**(400).
+    # 접수한 뒤 러너가 조용히 무시하면, 사용자는 조건이 걸린 줄 알고 결과를 읽는다.
+    _check_area_range(body.area_min_m2, body.area_max_m2)
+
     job_id = "rec_" + secrets.token_urlsafe(16)
     criteria = body.model_dump()
     criteria["requested_at"] = dt.datetime.now(dt.timezone.utc).isoformat()

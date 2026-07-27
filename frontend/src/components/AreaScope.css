@@ -23,7 +23,7 @@
 .scope__catch {
   min-height: var(--touch-min);
   padding: 0 var(--sp-2);
-  color: var(--accent);
+  color: var(--accent-text);
   font-size: var(--fs-caption);
   font-weight: 600;
   text-align: right;

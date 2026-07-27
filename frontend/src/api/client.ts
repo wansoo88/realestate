@@ -64,11 +64,53 @@ export interface AdminUserListResponse {
   active_admins?: number;
 }
 
+/**
+ * 최근접 역. `distance_m` 은 **직선거리**(basis="straight_line")지 도보 거리가 아니다.
+ * 값이 없으면 블록 자체가 `null` 로 온다 — "역이 없다"가 아니라 **모른다**는 뜻이다.
+ */
+export interface NearestStation {
+  name?: string | null;
+  distance_m: number;
+  line_count?: number | null;
+  lines?: string[];
+  basis?: string;
+}
+
+/**
+ * 정비사업(재건축·재개발) 블록.
+ *
+ * ⚠️ `available === false` 는 **"정비사업이 없다"가 아니라 "확인되지 않았다"** 이다
+ *    (수집 범위: 서울·인천. 경기도는 미수집 — 서버 `NO_PROJECT_REASON`).
+ *    그래서 false 를 "재건축 아님"으로 접으면 안 된다(lib/tags.ts).
+ */
+export interface RedevelopmentInfo {
+  available: boolean;
+  stage?: string;
+  raw_stage?: string;
+  score?: number | null;
+  confidence?: number;
+  verdict?: string;
+  /** 초기 단계인가(기피 조건 판정에 쓰인다). */
+  early_stage?: boolean;
+  years_since_milestone?: number | null;
+  supply_ratio?: number | null;
+  upsides?: string[];
+  risks?: RiskNote[];
+  must_verify?: string[];
+  missing?: string[];
+}
+
 export interface ComplexItem {
   id: number;
   name: string;
   point: [number, number];
   households: number | null;
+  /**
+   * 특성 태그(역세권·재건축)용 사실값. **지도 응답에는 아직 오지 않는다** —
+   * 없으면 모름으로 다뤄 태그를 달지 않는다. 서버가 실어 주는 날 자동으로 붙는다.
+   */
+  nearest_station?: NearestStation | null;
+  redevelopment?: RedevelopmentInfo | null;
   built_year: number | null;
   recent_price_krw: number | null;
   price_as_of: string | null;
@@ -278,6 +320,14 @@ export interface ScoreAxis {
 export interface RecommendationItem {
   rank?: number;
   complex: { id: number; name: string };
+  /* ── 특성 태그(대단지·역세권·재건축) 판정용 사실값 ──────────────────────
+   * 서버는 **판정이 아니라 값**을 준다(임계값은 표시 관례라 바뀌므로 화면이 정한다).
+   * 없으면(`undefined`·`null`) **모름**이고, 모르면 태그를 달지 않는다 — lib/tags.ts. */
+
+  /** 총 세대수. null = 모름(**대단지 아님이 아니다** — 미확보가 16.2%다). */
+  total_households?: number | null;
+  nearest_station?: NearestStation | null;
+  redevelopment?: RedevelopmentInfo | null;
   unit_type: { area_m2: number; type_name?: string | null } | null;
   building: { id?: number | null; name?: string | null; confidence?: number; basis?: string } | null;
   dong_valuation: DongValuation | null;

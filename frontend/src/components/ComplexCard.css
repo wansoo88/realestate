@@ -44,7 +44,6 @@
 }
 
 .card__conf {
-  font-family: var(--ff);
   font-weight: 400;
   align-self: center;
 }
@@ -66,7 +65,7 @@
   padding: 0 6px;
   border-radius: var(--r-pill);
   background: var(--accent-weak);
-  color: var(--accent);
+  color: var(--accent-text);
   font-size: var(--fs-caption);
   font-weight: 600;
 }
@@ -174,8 +173,14 @@
     font-size: var(--fs-caption);
   }
 
-  .card__meta {
+  /* 캡션 + 특성 배지가 한 칸을 쓴다. 좁아지면 배지가 다음 줄로 접힌다
+     (행 높이가 늘어도 배지를 지우지 않는다 — 태그는 이 화면의 새 정보다). */
+  .card__metarow {
     grid-area: meta;
+    min-width: 0;
+  }
+
+  .card__meta {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

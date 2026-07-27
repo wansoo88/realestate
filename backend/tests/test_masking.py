@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import importlib.util
 import logging
@@ -123,7 +124,13 @@ def test_masking_keeps_non_secret_text_readable():
 
 class _StubHttp:
     """`httpx` 모듈 대역. 실제 `httpx.Response.raise_for_status()` 를 쓴다 —
-    예외 문자열 포맷을 우리가 흉내내면 테스트가 현실을 검증하지 못한다."""
+    예외 문자열 포맷을 우리가 흉내내면 테스트가 현실을 검증하지 못한다.
+
+    ⚠️ `get()` 이 아니라 `stream()` 이다(SR25-1). MOLIT 응답을 상한 없이 `.text` 로
+       읽던 것을 스트리밍 + 상한으로 바꿨으므로, 대역도 실제 호출 모양을 따라간다.
+       실제 `httpx.Response` 를 그대로 쓰므로 `raise_for_status()` 의 예외 문자열
+       (= URL 이 통째로 들어간, 이 테스트가 검증하려는 그 문자열)은 변하지 않는다.
+    """
 
     def __init__(self, status: int, body: str = "<error/>") -> None:
         self.status = status
@@ -132,6 +139,10 @@ class _StubHttp:
     def get(self, url, params=None, timeout=None):   # noqa: ANN001 - httpx 시그니처 흉내
         request = httpx.Request("GET", url, params=params)
         return httpx.Response(self.status, request=request, text=self.body)
+
+    @contextlib.contextmanager
+    def stream(self, method, url, params=None, timeout=None, **kw):  # noqa: ANN001
+        yield self.get(url, params=params, timeout=timeout)
 
 
 @pytest.mark.parametrize("status", [403, 500])
@@ -161,7 +172,7 @@ def test_fetch_wraps_http_error_without_the_key(status):
 
 def test_fetch_masks_transport_errors_too():
     class _Boom:
-        def get(self, url, params=None, timeout=None):   # noqa: ANN001
+        def stream(self, method, url, params=None, timeout=None, **kw):  # noqa: ANN001
             raise httpx.ConnectError(
                 f"failed to connect to {url}?serviceKey={quote(FAKE_KEY, safe='')}")
 

@@ -240,9 +240,51 @@ class InMemoryRepository:
     def add_trades(self, complex_id: int, trades: list[TradeRow]) -> None:
         self._trades.setdefault(complex_id, []).extend(trades)
 
+    #: 면적 근거로 볼 실거래 창(일). PostGIS 구현(`_CANDIDATE_TRADE_WINDOW_DAYS`)과 같다 —
+    #: 여기만 넓으면 인메모리 테스트가 프로덕션보다 관대해져 회귀를 못 잡는다.
+    _AREA_TRADE_WINDOW_DAYS = 36 * 30
+
+    def _area_evidence(self, complex_id: int) -> list[float]:
+        """이 단지에서 **실제로 확인된 면적들**(활성 호가 + 최근 실거래).
+
+        PostGIS 구현은 여기에 `unit_type` 도 본다. 인메모리에는 타입 테이블이 없어
+        후보를 세우는 근거(호가·실거래)만 본다 — 판정 **의미**는 같다.
+        """
+        cutoff = dt.date.today() - dt.timedelta(days=self._AREA_TRADE_WINDOW_DAYS)
+        areas = [li.area_m2 for li in self._listings.get(complex_id, ())
+                 if li.status == "active" and li.area_m2]
+        areas += [t.area_m2 for t in self._trades.get(complex_id, ())
+                  if t.area_m2 and not t.is_cancelled and t.contract_date >= cutoff]
+        return [float(a) for a in areas]
+
+    def _area_ok(self, complex_id: int, area_min: float | None,
+                 area_max: float | None) -> bool:
+        """조건에 맞는 면적 근거가 **하나라도** 있나. 근거가 없으면 False(미상은 통과 아님)."""
+        if area_min is None and area_max is None:
+            return True
+        for a in self._area_evidence(complex_id):
+            if (area_min is None or a >= area_min) and (area_max is None or a <= area_max):
+                return True
+        return False
+
+    @staticmethod
+    def _built_ok(c: ComplexSummary, built_after: int | None) -> bool:
+        if built_after is None:
+            return True
+        return c.built_year is not None and c.built_year >= built_after
+
+    @staticmethod
+    def _households_ok(c: ComplexSummary, min_households: int | None) -> bool:
+        if min_households is None:
+            return True
+        return (c.total_households is not None
+                and c.total_households >= min_households)
+
     def recommendation_candidates(
         self, *, region_codes: list[str], max_price_krw: int | None = None,
         limit: int = 50, bbox: BBox | None = None,
+        area_min_m2: float | None = None, area_max_m2: float | None = None,
+        built_after: int | None = None, min_households: int | None = None,
     ) -> list[ComplexSummary]:
         """조건에 맞는 후보 단지. 예산으로 **걸러내지 않는다** — 초과 단지도 넘기고
         파이프라인이 사유와 함께 제외한다(ux/README.md §4).
@@ -251,6 +293,9 @@ class InMemoryRepository:
         ⚠️ bbox 는 **좌표가 있는 단지만** 찾는다 — geom NULL 인 단지가 PostGIS 에서
         `&&` 로 자연히 빠지는 것과 같게, 여기서도 lon/lat 이 None 이면 뺀다.
         (여기서만 통과시키면 인메모리 테스트가 프로덕션을 대표하지 못한다.)
+
+        ⚠️ **내 조건(평수·연식·세대수)은 예산과 달리 여기서 거른다.** 미상은 통과시키지
+        않는다 — PostGIS 구현과 같은 규칙이어야 테스트가 프로덕션을 대표한다.
         """
         wanted = {r for r in (region_codes or [])}
         out: list[ComplexSummary] = []
@@ -259,10 +304,44 @@ class InMemoryRepository:
                 continue
             if bbox is not None and not _within(c, bbox):
                 continue
+            if not self._built_ok(c, built_after):
+                continue
+            if not self._households_ok(c, min_households):
+                continue
+            if not self._area_ok(c.id, area_min_m2, area_max_m2):
+                continue
             out.append(c)
             if len(out) >= limit:
                 break
         return out
+
+    def candidate_scope_stats(
+        self, *, region_codes: list[str] | None = None, bbox: BBox | None = None,
+        area_min_m2: float | None = None, area_max_m2: float | None = None,
+        built_after: int | None = None, min_households: int | None = None,
+    ) -> dict[str, int]:
+        """조건 때문에 조회에서 빠진 단지 수(PostGIS 구현과 같은 키·같은 판정)."""
+        wanted = {r for r in (region_codes or [])}
+        stats = {"scope_total": 0, "area_dropped": 0, "built_dropped": 0,
+                 "built_unknown": 0, "households_dropped": 0,
+                 "households_unknown": 0}
+        for c in self._complexes:
+            if wanted and not any(str(c.region_code or "").startswith(r) for r in wanted):
+                continue
+            if bbox is not None and not _within(c, bbox):
+                continue
+            stats["scope_total"] += 1
+            if not self._area_ok(c.id, area_min_m2, area_max_m2):
+                stats["area_dropped"] += 1
+            if not self._built_ok(c, built_after):
+                stats["built_dropped"] += 1
+            if built_after is not None and c.built_year is None:
+                stats["built_unknown"] += 1
+            if not self._households_ok(c, min_households):
+                stats["households_dropped"] += 1
+            if min_households is not None and c.total_households is None:
+                stats["households_unknown"] += 1
+        return stats
 
     def geocode_coverage(
         self, *, region_codes: list[str] | None = None) -> tuple[int, int]:

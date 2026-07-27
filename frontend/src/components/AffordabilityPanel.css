@@ -132,7 +132,7 @@
   padding: 0;
   border: none;
   background: none;
-  color: var(--accent);
+  color: var(--accent-text);
   font-size: var(--fs-caption);
   text-decoration: underline;
 }
@@ -166,10 +166,12 @@
   line-height: 1.5;
 }
 
+/* 굵기 700 → 600: 같은 26px 금액인 .card__price 와 통일.
+   Windows 폴백(맑은고딕)은 400/700 두 종뿐이라 600↔700 차이가 아예 렌더되지 않는다. */
 .plan__target {
   margin: var(--sp-1) 0 var(--sp-3);
   font-size: var(--fs-price);
-  font-weight: 700;
+  font-weight: 600;
 }
 
 /* 추정 근거일 때는 강도를 낮춘다("확신의 농도") */
@@ -273,6 +275,6 @@
   border-radius: var(--r-btn);
   border: 0.5px solid var(--hairline);
   background: transparent;
-  color: var(--accent);
+  color: var(--accent-text);
   font-size: var(--fs-footnote);
 }

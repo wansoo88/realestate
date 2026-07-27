@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from app.core.masking import SecretSafeError
 from app.ingest import normalize
 from app.ingest.geocode import build_query
 from app.ingest.loader import InMemoryTradeLoader
@@ -225,38 +226,113 @@ def test_지오코딩_질의는_법정동_단지명(trades):
 # 실행 배선(run_molit) — DB 없이 검증 가능한 부분
 # ---------------------------------------------------------------------------
 
+# ⚠️ 대역이 `get()` 이 아니라 `stream()` 인 이유(SR25-1): MOLIT 응답을 상한 없이
+#    `.text` 로 읽던 것을 스트리밍 + 상한(`app.core.http.request_capped`)으로 바꿨다.
+#    대역이 옛 모양을 유지하면 테스트만 옛 경로를 검증하게 된다.
+class _FakeStreamResp:
+    def __init__(self, body: bytes = b"<response/>", *, boom: bool = False) -> None:
+        self._body = body
+        self._boom = boom
+        self.headers = {"content-length": str(len(body))}
+        self.charset_encoding = "utf-8"
+
+    def raise_for_status(self):
+        if self._boom:
+            raise RuntimeError("503")
+
+    def iter_bytes(self, chunk_size=None):
+        yield self._body
+
+
+class _FakeStreamClient:
+    def __init__(self, resp: _FakeStreamResp | None = None) -> None:
+        self.calls: list[tuple] = []
+        self._resp = resp or _FakeStreamResp()
+
+    def stream(self, method, url, params=None, timeout=None):
+        self.calls.append((url, params, method))
+
+        class _Ctx:
+            def __init__(self, resp): self._resp = resp
+            def __enter__(self): return self._resp
+            def __exit__(self, *exc): return False
+
+        return _Ctx(self._resp)
+
+
 def test_http_fetch_는_params로_GET하고_text를_돌려준다():
     from app.ingest.run_molit import make_http_fetch
 
-    class FakeResp:
-        text = "<response/>"
-        def raise_for_status(self): pass
-
-    class FakeClient:
-        def __init__(self): self.calls = []
-        def get(self, url, params, timeout):
-            self.calls.append((url, params)); return FakeResp()
-
-    client = FakeClient()
+    client = _FakeStreamClient()
     fetch = make_http_fetch("https://x/api", client=client)
     body = fetch({"LAWD_CD": "11680", "DEAL_YMD": "202606"})
     assert body == "<response/>"
     assert client.calls[0][0] == "https://x/api"
     assert client.calls[0][1]["LAWD_CD"] == "11680"
+    assert client.calls[0][2] == "GET"
 
 
 def test_http_fetch_는_전송오류를_올린다():
     from app.ingest.run_molit import make_http_fetch
 
-    class FakeResp:
-        text = ""
-        def raise_for_status(self): raise RuntimeError("503")
-
-    class FakeClient:
-        def get(self, url, params, timeout): return FakeResp()
-
+    client = _FakeStreamClient(_FakeStreamResp(b"", boom=True))
     with pytest.raises(RuntimeError):
-        make_http_fetch("https://x", client=FakeClient())({"a": "b"})
+        make_http_fetch("https://x", client=client)({"a": "b"})
+
+
+def test_http_fetch_는_응답이_상한을_넘으면_읽다가_멈춘다(monkeypatch):
+    """★ SR25-1 회귀 — 상한이 **읽는 도중** 걸리는지 본다(존재 검사가 아니다).
+
+    `.text` 로 되돌리면 여기서 깨진다: 그 경로는 본문을 이미 전부 읽은 뒤라
+    `ResponseTooLarge` 자체가 나오지 않는다. 청크를 100개로 쪼개 주고
+    **소비가 중간에 멈추는지**까지 확인한다.
+    """
+    from app.core import http as core_http
+    from app.ingest.run_molit import make_http_fetch
+
+    consumed: list[int] = []
+
+    class _Big(_FakeStreamResp):
+        def __init__(self):
+            super().__init__(b"")
+            self.headers = {}                      # content-length 선언 없음
+
+        def iter_bytes(self, chunk_size=None):
+            for i in range(100):
+                consumed.append(i)
+                yield b"x" * 1024
+
+    monkeypatch.setattr(core_http, "MAX_RESPONSE_BYTES", 4096)
+    fetch = make_http_fetch("https://x", client=_FakeStreamClient(_Big()))
+    # 이 계층은 **모든** 예외를 마스킹해서 올린다(SR17-1) — 상한 위반도 예외가 아니다.
+    with pytest.raises(SecretSafeError) as caught:
+        fetch({"a": "b"})
+    assert "상한" in str(caught.value)
+    assert len(consumed) < 100, "상한을 넘겼는데도 끝까지 읽었다"
+
+
+def test_http_fetch_는_Content_Length_선언만으로도_거절한다(monkeypatch):
+    """한 바이트도 읽지 않고 막는 경로(선언값 검사)."""
+    from app.core import http as core_http
+    from app.ingest.run_molit import make_http_fetch
+
+    consumed: list[int] = []
+
+    class _Declared(_FakeStreamResp):
+        def __init__(self):
+            super().__init__(b"")
+            self.headers = {"content-length": "99999999"}
+
+        def iter_bytes(self, chunk_size=None):
+            consumed.append(1)
+            yield b"x"
+
+    monkeypatch.setattr(core_http, "MAX_RESPONSE_BYTES", 4096)
+    fetch = make_http_fetch("https://x", client=_FakeStreamClient(_Declared()))
+    with pytest.raises(SecretSafeError) as caught:
+        fetch({"a": "b"})
+    assert "상한" in str(caught.value)
+    assert consumed == [], "선언값이 상한을 넘는데도 본문을 읽었다"
 
 
 def test_시군구코드_정규화는_유효한것만_남긴다():

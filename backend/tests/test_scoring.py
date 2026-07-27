@@ -22,16 +22,19 @@ from app.agents.orchestrator import AnalysisContext, Candidate, run_mvp_pipeline
 from app.agents.scoring import (
     AXIS_LOCATION,
     AXIS_PRICE,
+    AXIS_REDEV,
     AXIS_RISK,
     AXIS_SPECS,
     AXIS_VALUE,
     BASIS_AGENT_SCORES,
     BASIS_USER_WEIGHTED,
+    DEFAULT_AXIS_WEIGHTS,
     STATUS_APPLIED,
     STATUS_NO_SIGNAL,
     TURNOVER_FULL_SCORE_PCT,
     WEIGHT_AXES,
     AxisSignal,
+    defaulted_axes,
     liquidity_score,
     normalize_weights,
     score_item,
@@ -59,12 +62,19 @@ def test_축_키가_프론트_슬라이더와_같다():
         pytest.skip("프론트 소스가 없는 환경")
     src = frontend.read_text(encoding="utf-8")
     for axis in WEIGHT_AXES:
+        if axis in DEFAULT_AXIS_WEIGHTS:
+            # 서버가 기본값을 넣어 주는 축은 슬라이더가 아직 없어도 반영된다.
+            # 다만 **사용자가 끌 방법이 없으므로**, 슬라이더가 생기기 전까지는
+            # `summary_notes` 가 "기본 비중을 적용했다"고 반드시 말해야 한다
+            # (test_기본값이_적용된_축은_그_사실을_말한다 가 그걸 고정한다).
+            continue
         assert f"{axis}:" in src, f"프론트 DEFAULT_WEIGHTS 에 {axis} 가 없다"
 
 
 def test_모든_축에_담당_에이전트와_신호_설명이_있다():
     """'가격 축이 뭘 보는 건데'에 답할 수 없으면 가중치는 그냥 숫자 장난이다."""
-    assert set(WEIGHT_AXES) == {AXIS_PRICE, AXIS_LOCATION, AXIS_VALUE, AXIS_RISK}
+    assert set(WEIGHT_AXES) == {AXIS_PRICE, AXIS_LOCATION, AXIS_VALUE, AXIS_RISK,
+                                AXIS_REDEV}
     for axis, spec in AXIS_SPECS.items():
         assert spec.agent_ids, f"{axis}: 담당 에이전트가 없다"
         assert spec.signal, f"{axis}: 어떤 신호인지 설명이 없다"
@@ -79,19 +89,49 @@ def test_리스크축은_미구현_범위를_숨기지_않는다():
     assert "risk-auditor" in gap and "2차" in gap
 
 
+def test_재건축축은_분담금을_안_본다는_사실을_숨기지_않는다():
+    """이 축이 '재건축을 다 따졌다'로 읽히면 안 된다. 분담금·경기도 미수집을 명시한다."""
+    spec = AXIS_SPECS[AXIS_REDEV]
+    assert spec.coverage == "partial"
+    assert "분담금" in spec.coverage_gap
+    assert "경기" in spec.coverage_gap
+    # 신호 설명이 '단계가 뒤일수록 좋다'로 읽히면 도메인적으로 틀린다.
+    assert "단계가 뒤일수록 높은 점수가 아닙니다" in spec.signal
+
+
 # ---------------------------------------------------------------------------
 # 가중치 정규화 — 클라이언트를 믿지 않는다
 # ---------------------------------------------------------------------------
 
 def test_가중치는_합1로_정규화된다():
+    """사용자가 준 축들의 **상대 비율**은 그대로 유지된다(기본값 축이 붙어도)."""
     w, unknown = normalize_weights({"price": 3, "value": 1})
     assert unknown == []
-    assert w == {"price": 0.75, "value": 0.25}
     assert sum(w.values()) == pytest.approx(1.0)
+    # 3:1 비율이 그대로다.
+    assert w["price"] / w["value"] == pytest.approx(3.0)
+    # 언급하지 않은 재건축 축에는 기본 비중이 들어간다(그 사실은 notes 로 알린다).
+    assert w[AXIS_REDEV] == pytest.approx(DEFAULT_AXIS_WEIGHTS[AXIS_REDEV])
+
+
+def test_재건축_가중치를_명시하면_기본값이_덮어쓰지_않는다():
+    """사용자가 **0 을 준** 축을 되살리면 그건 설정 무시다."""
+    w, _ = normalize_weights({"price": 1, AXIS_REDEV: 0})
+    assert AXIS_REDEV not in w
+    assert w == {"price": 1.0}
+
+    w2, _ = normalize_weights({"price": 1, AXIS_REDEV: 1})
+    assert w2[AXIS_REDEV] == pytest.approx(0.5)
+
+
+def test_기본값이_적용될_축을_말할_수_있다():
+    assert defaulted_axes({"price": 1}) == (AXIS_REDEV,)
+    assert defaulted_axes({"price": 1, AXIS_REDEV: 0}) == ()
 
 
 def test_음수_NaN_은_버린다():
-    w, ignored = normalize_weights({"price": -5, "value": float("nan"), "risk": 2})
+    w, ignored = normalize_weights({"price": -5, "value": float("nan"), "risk": 2,
+                                    AXIS_REDEV: 0})
     assert w == {"risk": 1.0}
     # NaN 은 "안 본다"가 아니라 **못 쓴 값**이다 — 조용히 삼키지 않고 보고한다.
     assert ignored == ["value"]
@@ -107,7 +147,7 @@ def test_전부_0이면_빈_가중치다():
 
 def test_모르는_키는_버리되_조용히_버리지_않는다():
     """한글 키('가격') 등으로 저장돼 있으면 사용자는 반영된 줄 안다 — 목록으로 돌려준다."""
-    w, ignored = normalize_weights({"가격": 0.5, "price": 0.5})
+    w, ignored = normalize_weights({"가격": 0.5, "price": 0.5, AXIS_REDEV: 0})
     assert w == {"price": 1.0}
     assert ignored == ["가격"]
 
@@ -170,13 +210,15 @@ def _sig(axis, score, conf=0.8, missing=()):
     return AxisSignal(axis=axis, score=score, confidence=conf, missing=tuple(missing))
 
 
-def _signals(price=None, location=None, value=None, risk=None):
+def _signals(price=None, location=None, value=None, risk=None, redev=None):
     return {
         AXIS_PRICE: _sig(AXIS_PRICE, price, missing=() if price is not None else ("호가 없음",)),
         AXIS_LOCATION: _sig(AXIS_LOCATION, location,
                             missing=() if location is not None else ("입지 데이터 미수집",)),
         AXIS_VALUE: _sig(AXIS_VALUE, value, missing=() if value is not None else ("세대수 없음",)),
         AXIS_RISK: _sig(AXIS_RISK, risk, missing=() if risk is not None else ("호가 없음",)),
+        AXIS_REDEV: _sig(AXIS_REDEV, redev,
+                         missing=() if redev is not None else ("정비사업 구역 미확인",)),
     }
 
 
@@ -316,7 +358,7 @@ def test_가중치를_섞으면_총점도_그_사이에_있다():
 
 def test_입지_가중치는_데이터가_없어_반영되지_않는다고_말한다():
     """입지 100% → 근거가 없으니 점수를 만들지 않고, **왜 없는지**를 응답에 남긴다."""
-    out, _ = _ranked({AXIS_LOCATION: 1.0})
+    out, _ = _ranked({AXIS_LOCATION: 1.0, AXIS_REDEV: 0})
 
     assert all(it["total_score"] is None for it in out["items"])
     notes = " ".join(out["notes"])
@@ -365,7 +407,7 @@ def test_반영조차_못한_축도_안_보는_범위를_말한다():
 def test_기본_가중치는_근거있는_축만_반영하고_비율을_고지한다():
     """프론트 기본값(가격 30·입지 30·가치 25·리스크 15)으로 돌렸을 때."""
     out, _ = _ranked({AXIS_PRICE: 0.3, AXIS_LOCATION: 0.3,
-                      AXIS_VALUE: 0.25, AXIS_RISK: 0.15})
+                      AXIS_VALUE: 0.25, AXIS_RISK: 0.15, AXIS_REDEV: 0})
     top = out["items"][0]
 
     assert top["score_basis"] == BASIS_USER_WEIGHTED
@@ -385,7 +427,7 @@ def test_가중치가_없으면_기존_순위규칙_그대로다():
 
 
 def test_알수없는_가중치키는_notes에_남는다():
-    out, _ = _ranked({"가격": 1.0})
+    out, _ = _ranked({"가격": 1.0, AXIS_REDEV: 0})
     assert any("가격" in n and "무시했습니다" in n for n in out["notes"]), out["notes"]
     # 쓸 수 있는 가중치가 하나도 없으므로 기존 동작으로 폴백한다.
     assert out["items"][0]["score_basis"] == BASIS_AGENT_SCORES

@@ -30,7 +30,7 @@
   color: var(--on-accent);
   font-size: var(--fs-caption);
   font-weight: 600;
-  font-family: var(--ff-num);
+  font-variant-numeric: tabular-nums; /* 1~10위 자릿수 정렬. 등폭 패밀리는 쓰지 않는다 */
 }
 
 .report__title {
@@ -68,7 +68,6 @@
 }
 
 .report__score-cov {
-  font-family: var(--ff);
   font-size: 11px;
   font-weight: 400;
   color: var(--warn-text);
@@ -131,7 +130,7 @@
 }
 
 .report__axis-applied {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .report__axis-score {
@@ -147,6 +146,16 @@
   font-size: var(--fs-caption);
   line-height: 1.5;
   color: var(--text-secondary);
+}
+
+/* ── 근거 "문장"은 본문 크기(15px)로 ──────────────────────────────────────
+   이 화면에서 읽어야 하는 건 문장인데 전부 13px 캡션이라 모든 정보가 주석처럼 보였다.
+   13px 선언 112개를 통째로 키우는 대신(칩 폭·2줄 접힘·시트 높이가 전부 흔들린다)
+   **문장만** 15px 로 올린다. 기준일·출처·가중치 같은 메타데이터는 13px 로 남겨
+   "읽을 것"과 "확인할 것"의 위계가 오히려 선명해진다.
+   ⚠️ 여기서 올리는 건 산문뿐이다 — 라벨·배지·숫자는 건드리지 않는다. */
+.report__axis-why {
+  font-size: var(--fs-footnote); /* 이 축이 왜 이 점수인지 = 근거 문장 */
 }
 
 .report__axis-gap {
@@ -188,9 +197,12 @@
   line-height: 1.6;
 }
 
+/* 출처·부가 수치는 **메타데이터**다 — 문장이 15px 로 올라가도 여기는 캡션에 남는다
+   (`.report__evidence-src` 는 15px 문장 안에 인라인으로 들어가므로 명시하지 않으면 같이 커진다) */
 .report__band-meta,
 .report__dong-detail,
 .report__evidence-src {
+  font-size: var(--fs-caption);
   color: var(--text-estimated);
 }
 
@@ -263,11 +275,17 @@
   padding-left: 0;
 }
 
+/* 좋은 점 · 리스크 · 다음에 할 일 — 목록처럼 생겼지만 내용은 전부 문장이다 */
+.report__list {
+  font-size: var(--fs-footnote);
+}
+
 .report__risk {
   display: flex;
   gap: var(--sp-2);
   padding: var(--sp-2) 0 var(--sp-2) var(--sp-3);
   border-left: 2px solid var(--warn);
+  font-size: var(--fs-footnote);
 }
 
 .report__risk--low {
@@ -305,9 +323,11 @@
   color: var(--text-secondary);
 }
 
+/* 전문가별 판단 근거 — 이 카드에서 가장 길게 읽는 산문 */
 .report__rationale,
 .report__evidence {
   margin: var(--sp-1) 0 0;
+  font-size: var(--fs-footnote);
   line-height: 1.6;
 }
 
@@ -317,7 +337,7 @@
   min-height: var(--touch-min);
   border-radius: var(--r-btn);
   background: var(--accent-weak);
-  color: var(--accent);
+  color: var(--accent-text);
   font-size: var(--fs-footnote);
   font-weight: 600;
 }

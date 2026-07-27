@@ -3,10 +3,10 @@
  * 추천 패널 — "왜 이건 안 나왔지"에 답하는 부분을 못박는다.
  * 제외 사유가 안 보이면 사용자는 결과를 신뢰할 수 없고, 신뢰 못 하면 이 도구를 안 쓴다.
  */
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { RecommendationJob } from "../api/client";
+import type { RecommendationItem, RecommendationJob } from "../api/client";
 import type { SearchScope } from "../lib/searchScope";
 import { RecommendPanel } from "./RecommendPanel";
 
@@ -115,6 +115,164 @@ describe("결과", () => {
     };
     render(<RecommendPanel {...base({ phase: "done", job })} />);
     expect(screen.getByText(/좌표가 없는 단지 5.5%/)).toBeTruthy();
+  });
+});
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * 예산 토글 · 특성 칩
+ *
+ * 여기서 지키는 것은 두 가지다.
+ *  ① **순위를 다시 매기지 않는다.** 3위만 남았으면 화면에도 3위여야 한다 —
+ *     1위로 다시 붙이면 "이게 1등"이라는 없는 사실을 만들어낸다.
+ *  ② **가린 건 숫자로 말한다.**
+ * ───────────────────────────────────────────────────────────────────────── */
+
+function recItem(over: Partial<RecommendationItem> = {}): RecommendationItem {
+  return {
+    rank: 1,
+    complex: { id: 1, name: "가나아파트" },
+    unit_type: { area_m2: 84 },
+    building: null,
+    dong_valuation: null,
+    price_basis: "trade",
+    ask_price_krw: null,
+    est_price_krw: 800_000_000,
+    price_estimated: true,
+    price_note: null,
+    ask_gap_pct: null,
+    price_band: null,
+    total_score: 70,
+    score_basis: "user_weighted",
+    timing_signal: "unknown",
+    headline: "요약",
+    why: [],
+    why_not: [],
+    next_actions: [],
+    findings: [],
+    ...over,
+  };
+}
+
+describe("결과 목록 필터", () => {
+  const OVER_THEN_WITHIN = [
+    recItem({
+      rank: 1,
+      complex: { id: 1, name: "비싼아파트" },
+      total_households: 1500,
+      nearest_station: { name: "가나역", distance_m: 300, basis: "straight_line" },
+      est_price_krw: 1_500_000_000,
+    }),
+    recItem({
+      rank: 2,
+      complex: { id: 2, name: "싼아파트" },
+      total_households: 300,
+      nearest_station: { name: "다라역", distance_m: 900, basis: "straight_line" },
+      est_price_krw: 700_000_000,
+    }),
+  ];
+
+  function job(items: RecommendationItem[]): RecommendationJob {
+    return { job_id: "rec_1", status: "done", items, excluded: [], notes: [] };
+  }
+
+  it("예산 내 토글로 가려도 **순위 번호는 그대로**다(2위가 1위가 되지 않는다)", () => {
+    render(
+      <RecommendPanel
+        {...base({
+          phase: "done",
+          job: job(OVER_THEN_WITHIN),
+          budgetOnly: true,
+          listBudgetKrw: 1_000_000_000,
+        })}
+      />,
+    );
+
+    expect(screen.getByText("싼아파트")).toBeTruthy();
+    expect(screen.queryByText("비싼아파트")).toBeNull();
+    // 남은 카드의 순위는 서버가 준 2위 그대로
+    expect(screen.getByLabelText("2순위")).toBeTruthy();
+    expect(screen.queryByLabelText("1순위")).toBeNull();
+  });
+
+  it("가린 추천이 몇 건인지 말한다", () => {
+    render(
+      <RecommendPanel
+        {...base({
+          phase: "done",
+          job: job(OVER_THEN_WITHIN),
+          budgetOnly: true,
+          listBudgetKrw: 1_000_000_000,
+        })}
+      />,
+    );
+    expect(screen.getByText(/예산 초과 1건 숨김/)).toBeTruthy();
+  });
+
+  it("특성 칩을 누르면 그 특성만 남고 순위는 유지된다", async () => {
+    const user = userEvent.setup();
+    render(<RecommendPanel {...base({ phase: "done", job: job(OVER_THEN_WITHIN) })} />);
+
+    await user.click(screen.getByRole("button", { name: /대단지 1건/ }));
+
+    expect(screen.getByText("비싼아파트")).toBeTruthy();
+    expect(screen.queryByText("싼아파트")).toBeNull();
+    expect(screen.getByLabelText("1순위")).toBeTruthy();
+  });
+
+  it("특성이 확인된 후보에는 배지가 붙고, 아닌 후보에는 안 붙는다", () => {
+    render(<RecommendPanel {...base({ phase: "done", job: job(OVER_THEN_WITHIN) })} />);
+
+    // 칩 줄에도 같은 낱말이 있으므로 **카드 안에서만** 찾는다
+    const big = screen.getByText("비싼아파트").closest("article") as HTMLElement;
+    expect(within(big).getByText(/대단지/)).toBeTruthy();
+    expect(within(big).getByText(/역세권/)).toBeTruthy();
+
+    // 300세대·900m 는 둘 다 기준 미달 — 배지를 붙이지 않는다
+    const small = screen.getByText("싼아파트").closest("article") as HTMLElement;
+    expect(small.querySelector(".tags")).toBeNull();
+  });
+
+  it("필터로 전부 가려지면 '추천이 없다'가 아니라 '가려졌다'고 말한다", () => {
+    render(
+      <RecommendPanel
+        {...base({
+          phase: "done",
+          job: job([recItem({ est_price_krw: 5_000_000_000 })]),
+          budgetOnly: true,
+          listBudgetKrw: 1_000_000_000,
+        })}
+      />,
+    );
+    expect(screen.getByText(/필터에 걸려 추천 1건이 모두 가려졌습니다/)).toBeTruthy();
+    // 0건 안내(조건에 맞는 후보가 없습니다)와 섞이면 안 된다 — 원인이 다르다
+    expect(screen.queryByText("조건에 맞는 후보가 없습니다.")).toBeNull();
+  });
+
+  /**
+   * 서버가 세대수·역 거리를 아직 안 싣는 현재 상태.
+   * 이때 칩이 "0" 이라고만 적히면 "이 결과엔 대단지가 없다"는 **거짓 단언**이 된다.
+   */
+  it("판정에 필요한 사실이 없으면 '없다'가 아니라 '모른다'고 말한다", () => {
+    render(
+      <RecommendPanel
+        {...base({
+          phase: "done",
+          job: job([recItem({ complex: { id: 1, name: "가나아파트" } })]),
+        })}
+      />,
+    );
+
+    const chip = screen.getByRole("button", { name: /대단지 0건/ }) as HTMLButtonElement;
+    expect(chip.disabled).toBe(true);
+    expect(screen.getByText(/해당 단지가 없는 게 아니라 판정할 정보가 없습니다/)).toBeTruthy();
+    // 사실이 없으면 카드에 배지도 달지 않는다(지어내지 않는다)
+    const card = screen.getByText("가나아파트").closest("article") as HTMLElement;
+    expect(card.querySelector(".tags")).toBeNull();
+  });
+
+  it("결과가 없으면 필터 줄 자체를 만들지 않는다(거를 게 없으면 조작도 없다)", () => {
+    render(<RecommendPanel {...base({ phase: "done", job: DONE })} />);
+    expect(screen.queryByRole("switch", { name: /예산 내/ })).toBeNull();
   });
 });
 

@@ -1,10 +1,19 @@
-"""초등학교 **학구도** 원천 내려받기 (공공데이터포털 파일데이터 · 인증키 불필요).
+"""학구도 원천 내려받기 (공공데이터포털 파일데이터 · 인증키 불필요).
 
-받는 것 3종 — 한국교육시설안전원 2026-03-20 판
+받는 것 5종 — 한국교육시설안전원 2026-03-20 판
 -----------------------------------------------
   zone     초등학교통학구역 SHP(zip)   15159265   ~35 MB
+  middle   중학교학교군 SHP(zip)       15159264   ~23 MB
+  high     고등학교학교군 SHP(zip)     15159263   ~3.8 MB
   link     학교학구도연계정보 CSV      15159266   ~2 MB
   location 초중등학교위치 CSV          15159184   ~3.7 MB
+
+⚠️ **초등과 중·고는 데이터셋 이름부터 다르다.**
+   초등은 「통학구역」, 중·고는 「학교군」이다. 이건 우리가 붙인 해석이 아니라
+   원천 데이터셋의 제목이다(15159265 vs 15159264/15159263). 두 낱말의 뜻이 어떻게
+   다른지(단일배정/추첨)는 **원천 어디에도 적혀 있지 않다** — 데이터셋 설명문에도
+   배정 방식 필드가 없다. 그래서 우리는 '학교군'이라는 원천의 낱말을 그대로 옮기고
+   배정 방식은 '미확인'으로 둔다. ingest/school_zone.py `ZONE_KIND` 참조.
 
 받는 방법
 ---------
@@ -38,7 +47,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 # ⚠️ `_common` import 자체가 sys.path·로깅 억제·비밀 마스킹을 설치한다(SR17-3).
-from _common import REPO_ROOT  # noqa: E402
+from _common import REPO_ROOT, capped_get  # noqa: E402
 
 PORTAL = "https://www.data.go.kr"
 META_URL = f"{PORTAL}/tcs/dss/selectFileDataDownload.do"
@@ -74,6 +83,25 @@ DATASETS = {
             filename="elementary_zone.zip",
             kind="zip",
         ),
+        # ⚠️ detail_pk 는 각 데이터셋 페이지의 <input id="publicDataDetailPk"> 값이다.
+        #    같은 페이지에 '관련 데이터' 링크로 **다른 데이터셋의 uddi 도 섞여 있으므로**
+        #    페이지에서 아무 uddi 나 긁어 쓰면 엉뚱한 파일을 받는다.
+        Dataset(
+            key="middle",
+            title="한국교육시설안전원_중학교학교군(SHP)",
+            public_data_pk="15159264",
+            detail_pk="uddi:fff72326-2b58-46cf-bc5a-d8fdaf67d532",
+            filename="middle_zone.zip",
+            kind="zip",
+        ),
+        Dataset(
+            key="high",
+            title="한국교육시설안전원_고등학교학교군(SHP)",
+            public_data_pk="15159263",
+            detail_pk="uddi:45c7539e-a2bc-4b65-8c93-8f92472d9ede",
+            filename="high_zone.zip",
+            kind="zip",
+        ),
         Dataset(
             key="link",
             title="한국교육시설안전원_학교학구도연계정보",
@@ -104,14 +132,17 @@ def _client(timeout: float):
 
 
 def resolve_file_id(client, ds: Dataset) -> tuple[str, str, str]:
-    """(atchFileId, fileDetailSn, dataNm). 실패하면 사람이 할 일을 알려주고 멈춘다."""
-    resp = client.get(META_URL,
+    """(atchFileId, fileDetailSn, dataNm). 실패하면 사람이 할 일을 알려주고 멈춘다.
+
+    ⚠️ 메타 조회도 `capped_get` 으로 읽는다(SR25-1) — 예외를 만들면 그 예외가 관행이 된다.
+    """
+    body = capped_get(client, META_URL,
                       params={"publicDataPk": ds.public_data_pk,
                               "publicDataDetailPk": ds.detail_pk},
-                      headers={"Referer": ds.page})
-    resp.raise_for_status()
+                      headers={"Referer": ds.page},
+                      what=f"{ds.title} 파일정보")
     try:
-        meta = json.loads(resp.text)
+        meta = json.loads(body)
     except json.JSONDecodeError:
         raise SystemExit(
             f"[FAIL] {ds.title}: 파일정보 응답이 JSON 이 아닙니다 — 포털 구조가 바뀌었을 수 "
@@ -127,12 +158,11 @@ def resolve_file_id(client, ds: Dataset) -> tuple[str, str, str]:
 
 def download(client, ds: Dataset, atch_file_id: str, detail_sn: str,
              data_nm: str) -> bytes:
-    resp = client.get(FILE_URL,
+    # 상한이 걸린 읽기(SR23-1→SR24-2) — `resp.content` 는 상한 검사 전에 전부 올린다.
+    return capped_get(client, FILE_URL,
                       params={"atchFileId": atch_file_id, "fileDetailSn": detail_sn,
                               "dataNm": data_nm},
-                      headers={"Referer": ds.page})
-    resp.raise_for_status()
-    return resp.content
+                      headers={"Referer": ds.page}, what=ds.title)
 
 
 def check_payload(ds: Dataset, payload: bytes) -> str:
@@ -180,7 +210,8 @@ def check_payload(ds: Dataset, payload: bytes) -> str:
 def fetch(ds: Dataset, out_dir: Path, *, timeout: float) -> Path:
     print(f"[INFO] {ds.title}")
     with _client(timeout) as client:
-        client.get(ds.page)                        # 세션 쿠키(있으면) 확보
+        # 세션 쿠키(있으면) 확보 — 본문을 안 써도 상한은 통과시킨다(SR25-1).
+        capped_get(client, ds.page, what=f"{ds.title} 페이지")
         atch, sn, data_nm = resolve_file_id(client, ds)
         # 콘솔 인코딩이 CP949 인 개발기에서도 죽지 않게 프린트에는 ASCII 구분자만 쓴다.
         print(f"       파일 ID 확인 완료(atchFileId={atch}) - 내려받는 중")
@@ -196,7 +227,7 @@ def fetch(ds: Dataset, out_dir: Path, *, timeout: float) -> Path:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="초등학교 학구도 원천 내려받기")
+    ap = argparse.ArgumentParser(description="학구도 원천 내려받기(초·중·고)")
     ap.add_argument("--dataset", choices=(*DATASETS, "all"), default="all")
     ap.add_argument("--out-dir", default=str(OUT_DIR))
     ap.add_argument("--timeout", type=float, default=600.0)

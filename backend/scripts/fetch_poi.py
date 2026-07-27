@@ -31,7 +31,7 @@ import urllib.request
 from pathlib import Path
 
 import _common  # noqa: F401  (import 부작용: 로깅 억제·마스킹 설치)
-from _common import REPO_ROOT
+from _common import REPO_ROOT, capped_urlopen_read
 
 from app.ingest.ratelimit import RateLimiter, backoff_delays
 
@@ -113,7 +113,10 @@ def overpass(query: str, *, limiter: RateLimiter, attempts: int = 4) -> dict:
                 headers={"User-Agent": USER_AGENT,
                          "Content-Type": "application/x-www-form-urlencoded"})
             with urllib.request.urlopen(req, timeout=OVERPASS_TIMEOUT_SEC) as resp:
-                return json.loads(resp.read().decode("utf-8", "replace"))
+                # 상한이 걸린 읽기(SR22-2→SR24-2). Overpass 는 질의가 잘못 넓으면
+                # 수 GB 를 돌려줄 수 있다 — 호스트 메모리를 지키는 유일한 지점이다.
+                body = capped_urlopen_read(resp, what=f"Overpass({endpoint})")
+            return json.loads(body.decode("utf-8", "replace"))
         except urllib.error.HTTPError as exc:
             last_error = f"HTTP {exc.code} ({endpoint})"
         except Exception as exc:                       # noqa: BLE001
@@ -223,7 +226,8 @@ def _neis_get(params: dict[str, str], *, limiter: RateLimiter) -> dict:
     url = NEIS_URL + "?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(req, timeout=60) as resp:
-        return json.loads(resp.read().decode("utf-8", "replace"))
+        body = capped_urlopen_read(resp, what="NEIS 학교")
+    return json.loads(body.decode("utf-8", "replace"))
 
 
 def fetch_schools(*, limiter: RateLimiter) -> Path:

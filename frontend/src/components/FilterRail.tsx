@@ -15,6 +15,7 @@
  * DOM 은 하나이고 배치만 CSS 로 바뀐다 — 같은 버튼을 두 벌 렌더하면 접근성 이름이 중복되고
  * 상태가 두 곳으로 갈라진다.
  */
+import { formatKrwShort } from "../lib/format";
 import type { FilterChip } from "../lib/mapFilters";
 import "./FilterRail.css";
 
@@ -22,9 +23,30 @@ interface Props {
   chips: FilterChip[];
   onToggle: (id: FilterChip["id"]) => void;
   onEdit: () => void;
+  /**
+   * "내 자금"(자금계획) 진입점. 우측 패널의 탭이 아니라 **여기**에 있는 이유:
+   * 우측은 목록(주변 단지·AI 추천)을 보는 자리이고, 자금계획은 목록이 아니라
+   * 내가 넣은 조건에서 나온 **계산 결과**다 — 조건 옆에 있어야 맥락이 맞는다.
+   */
+  onOpenMoney?: () => void;
+  /** 지금 자금 화면이 열려 있는가(같은 버튼이 상태를 말한다). */
+  moneyOpen?: boolean;
+  /**
+   * 실구매 가능 금액. 버튼에 **숫자를 함께** 보여준다 —
+   * "내 자금"이라는 라벨만 있으면 눌러 보기 전엔 아무 정보도 주지 않는다.
+   * 아직 계산 전이면 null 이고, 그때는 숫자를 지어내지 않고 라벨만 남긴다.
+   */
+  maxPurchaseKrw?: number | null;
 }
 
-export function FilterRail({ chips, onToggle, onEdit }: Props) {
+export function FilterRail({
+  chips,
+  onToggle,
+  onEdit,
+  onOpenMoney,
+  moneyOpen,
+  maxPurchaseKrw,
+}: Props) {
   return (
     <aside className="rail" aria-label="내 조건">
       <h2 className="rail__title">내 조건</h2>
@@ -46,6 +68,24 @@ export function FilterRail({ chips, onToggle, onEdit }: Props) {
           </svg>
           {chips.length > 0 ? "조건 수정" : "내 조건 입력"}
         </button>
+
+        {/* 내 자금 — 조건과 같은 줄. 계산된 한도를 버튼 위에 그대로 적는다. */}
+        {onOpenMoney && (
+          <button
+            type="button"
+            className={`rail__money${moneyOpen ? " rail__money--on" : ""}`}
+            aria-pressed={moneyOpen ?? false}
+            onClick={onOpenMoney}
+          >
+            내 자금
+            {maxPurchaseKrw ? (
+              <span className="rail__money-amount num">{formatKrwShort(maxPurchaseKrw)}</span>
+            ) : (
+              // 아직 모르는 값을 0 으로 그리지 않는다 — 계산 전이라는 사실만 조용히 남긴다
+              <span className="rail__money-amount rail__money-amount--none">계산 전</span>
+            )}
+          </button>
+        )}
 
         {/* 조용히 걸린 필터는 "왜 안 보이지?"가 된다 — 그 자리에서 끌 수 있게 둔다 */}
         {chips.map((chip) => (

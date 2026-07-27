@@ -12,6 +12,9 @@
 import { useEffect, useRef } from "react";
 import type { ComplexItem } from "../api/client";
 import { formatAsOf, formatKrw } from "../lib/format";
+import type { BudgetVerdict } from "../lib/listFilter";
+import type { TagId } from "../lib/tags";
+import { TagBadges } from "./TagBadges";
 import "./ComplexCard.css";
 
 interface Props {
@@ -19,13 +22,33 @@ interface Props {
   selected?: boolean;
   /** AI 추천 순위. 없으면 배지 자체가 없다(0 이나 "-" 를 그리지 않는다). */
   rank?: number;
+  /** 확실히 만족하는 특성(대단지·역세권…). 모르는 것은 여기 들어오지 않는다. */
+  tags?: TagId[];
+  /** 필터를 걸었는데 판정할 수 없어 함께 보인 특성. "판정 불가"로 표시한다. */
+  unknownTags?: TagId[];
+  /**
+   * 예산 판정. 주면 이 값이 배지의 근거가 된다.
+   * 주지 않으면 서버의 `over_budget` 으로 폴백한다 — 다만 서버 값은 **가격을 모를 때도
+   * false** 라서(가격 미상 ≠ 예산 내), 목록에서는 항상 계산된 값을 넘긴다.
+   */
+  budget?: BudgetVerdict;
   onSelect?: (id: number) => void;
   /** 목록 ↔ 지도 동기화. 가리키는 동안 해당 마커를 지도에서 들어올린다. */
   onHover?: (id: number | null) => void;
 }
 
-export function ComplexCard({ item, selected, rank, onSelect, onHover }: Props) {
+export function ComplexCard({
+  item,
+  selected,
+  rank,
+  tags,
+  unknownTags,
+  budget,
+  onSelect,
+  onHover,
+}: Props) {
   const estimated = item.price_confidence === "estimated";
+  const overBudget = budget !== undefined ? budget === "over" : item.over_budget;
   const ref = useRef<HTMLButtonElement>(null);
 
   // 지도 마커로 선택되면 목록에서 해당 카드가 보이도록 스크롤한다(양방향 동기화, ux §3).
@@ -35,7 +58,7 @@ export function ComplexCard({ item, selected, rank, onSelect, onHover }: Props) 
 
   return (
     <article
-      className={`card${selected ? " card--selected" : ""}${item.over_budget ? " card--over" : ""}`}
+      className={`card${selected ? " card--selected" : ""}${overBudget ? " card--over" : ""}`}
       // 마우스는 hover, 키보드는 focus — 둘 다 "지금 이걸 보고 있다"는 같은 신호다.
       onMouseEnter={() => onHover?.(item.id)}
       onMouseLeave={() => onHover?.(null)}
@@ -70,15 +93,24 @@ export function ComplexCard({ item, selected, rank, onSelect, onHover }: Props) 
 
         <header className="card__head">
           <h3 className="card__name">{item.name}</h3>
-          {item.over_budget && <span className="badge card__over-badge">예산 초과</span>}
+          {overBudget && <span className="badge card__over-badge">예산 초과</span>}
         </header>
 
-        {/* 그 외 정보는 한 줄 캡션으로 눌러둔다(규칙 2: 아이콘 나열 금지) */}
-        <p className="card__meta">
-          {item.built_year ? `${item.built_year}년 준공` : "준공년도 미상"}
-          {item.households ? ` · ${item.households.toLocaleString("ko-KR")}세대` : ""}
-          {item.active_listings > 0 ? ` · 매물 ${item.active_listings}건` : " · 매물 없음"}
-        </p>
+        {/* 캡션 + 특성 배지는 한 덩어리다(데스크톱 행 배치에서 같은 칸을 쓴다) */}
+        <div className="card__metarow">
+          {/* 그 외 정보는 한 줄 캡션으로 눌러둔다(규칙 2: 아이콘 나열 금지).
+              세대수는 **모르면 모른다고** 적는다 — 빈칸으로 두면 "작은 단지"로 읽힌다. */}
+          <p className="card__meta">
+            {item.built_year ? `${item.built_year}년 준공` : "준공년도 미상"}
+            {item.households
+              ? ` · ${item.households.toLocaleString("ko-KR")}세대`
+              : " · 세대수 미상"}
+            {item.active_listings > 0 ? ` · 매물 ${item.active_listings}건` : " · 매물 없음"}
+          </p>
+
+          {/* 특성 배지 — 사실(세대수·거리)이라 색을 줄 자격이 있지만 금액보다 튀지 않는다 */}
+          <TagBadges tags={tags ?? []} unknownTags={unknownTags ?? []} />
+        </div>
 
         <p className="card__asof">{formatAsOf(item.price_as_of)}</p>
       </button>

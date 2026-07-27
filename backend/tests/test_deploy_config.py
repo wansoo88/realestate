@@ -224,29 +224,79 @@ def _deploy_md() -> str:
     return (REPO_ROOT / "deploy" / "DEPLOY.md").read_text(encoding="utf-8")
 
 
+#: DEPLOY.md 5-3b 의 손수 적용 목록에서 **실제 파일 경로**를 뽑는다.
+#: ⚠️ "번호가 문서 어딘가에 있는가"로 검사하면 안 된다 — 주석 한 줄이나 다른 문맥의
+#:    숫자로도 통과한다. 실제로 그 형태로 두 번 뚫렸다(CR-024 의 '010', SR24-5 의 '013').
+_MIGRATION_REF = re.compile(r"backend/migrations/(\d+)_([A-Za-z0-9_]+)\.sql")
+
+#: **손수 적용이 필요한 첫 마이그레이션 번호.** 기준선을 여기 고정한다(CR30-3).
+#:
+#: ⚠️ 예전에는 기준선을 `min(문서에 적힌 번호)` 로 잡았다 — 즉 **검사 대상이 검사
+#:    기준을 정했다.** 그래서 목록 아래쪽(009·010)을 지우면 요구도 같이 사라져
+#:    "이미 적용된 건 지우자"는 흔한 런북 정리가 그대로 통과했다. 결과는 DEPLOY-1 과
+#:    동일하다 — 빈 볼륨에서 재구축하면 `app_user.status` 가 없어 인증 경로가 전부 500.
+#:
+#: 왜 9 인가: 운영 볼륨은 008 까지 적용된 상태로 만들어졌고(`initdb.d` 자동 적용은
+#: **빈 볼륨 첫 기동에만** 돈다), 009 부터는 실데이터가 든 볼륨에 손수 적용해야 한다.
+#: 001~008 은 런북대로 재구축할 때 자동 적용되므로 목록에 없어도 된다.
+_MANUAL_FROM = 9
+
+
 def test_절차서가_모든_마이그레이션을_언급한다():
-    """`migrations/*.sql` 이 늘어나면 DEPLOY.md 도 따라와야 한다.
+    """`migrations/*.sql` 이 늘어나면 DEPLOY.md 의 **손수 적용 목록**도 따라와야 한다.
 
     initdb.d 자동 적용은 **빈 볼륨 첫 기동에만** 돈다. 실데이터가 든 운영 볼륨에서는
     영원히 실행되지 않으므로, 새 마이그레이션은 손수 적용해야 한다. 절차서가 그걸
     안 적으면 배포자가 코드만 올리고 → `app_user.status` 부재 → **인증 전 경로 500**
     (CR-024 DEPLOY-1: 실제로 009·010 언급이 0건이었다).
 
-    검사 대상은 **가장 최근 마이그레이션**이다. 초기분(001~)은 빈 볼륨 첫 기동에 자동 적용돼
-    문서가 개별로 적을 이유가 없고, 실제 사고는 언제나 "새로 추가하고 절차서를 안 고침"에서 난다.
-    파일 목록에서 자동으로 뽑으므로 011 이 생기면 이 테스트가 먼저 알려준다.
+    ★ 왜 '최신 하나'가 아니라 '전부'인가 (SR24-5, 2026-07-27)
+    ---------------------------------------------------------
+    예전 이 테스트는 **가장 최근 파일 번호가 문서 문자열에 있는지**만 봤다. 그래서
+    013 과 014 가 같은 라운드에 추가됐을 때 014 만 목록에 들어가고 013 이 빠졌는데도
+    통과했다(최신은 014 였으므로). 그런데 `postgis.py` 의 `_SCHOOL_SQL` 이 013 이
+    만드는 `school_district.school_level`·`school_district_member` 를 하드 참조하므로,
+    이 런북대로 DB 를 재구축하면 **모든 입지 조회가 UndefinedColumn 으로 죽는다.**
+    런북이 곧 재현 절차다 — 하나라도 빠지면 안 된다.
+
+    ★ 왜 기준선이 문서가 아니라 **디렉터리**인가 (CR30-3, 2026-07-28)
+    ---------------------------------------------------------------
+    바로 위 수정에서 기준선을 `min(문서에 적힌 번호)` 로 잡았다. 검사 대상이 검사
+    기준을 정하는 형태라, **목록 아래쪽(009·010)을 지우면 요구도 함께 사라졌다** —
+    중간(013) 삭제는 잡히는데 최저번호 삭제는 통과했다. "이미 적용됐으니 지우자"는
+    런북 정리는 흔하고, 그 결과는 DEPLOY-1 그대로다(인증 전 경로 500).
+    지금은 기준선이 `_MANUAL_FROM` 상수이고, 요구 목록은 **파일 시스템**에서 온다.
+
+    그래서 지금은 ① 문서에서 `backend/migrations/NNN_*.sql` **경로**를 뽑고
+    ② `_MANUAL_FROM` 이후의 **모든 실제 파일**이 그 안에 있는지 본다.
     """
     md = _deploy_md()
     migrations = sorted((REPO_ROOT / "backend" / "migrations").glob("[0-9]*.sql"))
     assert migrations, "마이그레이션 파일을 찾지 못했습니다"
 
-    latest = migrations[-1]
-    number = latest.stem.split("_")[0]
-    assert number in md, (
-        f"최신 마이그레이션 {latest.name} 이 DEPLOY.md 에 없습니다. "
-        "initdb.d 자동 적용은 빈 볼륨에만 도므로, 손수 적용 절차(5-3b)에 추가해야 합니다 — "
-        "빠뜨리면 코드만 올라가 인증 경로가 500 이 됩니다."
+    referenced = {f"{num}_{name}.sql" for num, name in _MIGRATION_REF.findall(md)}
+    assert referenced, (
+        "DEPLOY.md 에서 `backend/migrations/NNN_*.sql` 형태의 적용 명령을 찾지 못했습니다 — "
+        "손수 적용 절차(5-3b)가 사라졌거나 형식이 바뀌었습니다.")
+
+    # 기준선이 실재하는지부터 확인한다 — 파일이 재번호되면 상수가 조용히 무의미해진다.
+    assert any(int(p.stem.split("_")[0]) == _MANUAL_FROM for p in migrations), (
+        f"{_MANUAL_FROM:03d}번 마이그레이션이 없습니다 — `_MANUAL_FROM` 기준선을 "
+        "실제 파일 구성에 맞춰 다시 정하세요(주석의 근거도 함께 갱신할 것).")
+
+    required = [p.name for p in migrations
+                if int(p.stem.split("_")[0]) >= _MANUAL_FROM]
+    missing = [name for name in required if name not in referenced]
+    assert not missing, (
+        f"DEPLOY.md 손수 적용 목록에 없는 마이그레이션: {missing}. "
+        f"({_MANUAL_FROM:03d} 번부터는 initdb.d 가 돌지 않으므로 하나도 빠지면 안 됩니다.) "
+        "initdb.d 자동 적용은 빈 볼륨에만 도므로, 빠뜨리면 런북대로 재구축한 DB 에서 "
+        "코드가 없는 컬럼·테이블을 참조해 전면 장애가 납니다."
     )
+
+    latest = migrations[-1]
+    assert latest.name in referenced, (
+        f"최신 마이그레이션 {latest.name} 이 DEPLOY.md 손수 적용 목록에 없습니다.")
 
 
 def test_절차서가_마이그레이션이_코드보다_먼저임을_명시한다():

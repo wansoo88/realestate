@@ -461,6 +461,83 @@ def test_잘못된_희망가는_422(client, bad):
     assert _profile_and_plan(client, bad).status_code == 422
 
 
+def test_검증_실패_응답에_사용자가_보낸_값이_되돌아오지_않는다(client):
+    """★ FastAPI 기본 검증 핸들러는 `input`(원본 값)을 응답에 싣는다.
+
+    비밀번호가 짧으면 **평문 비밀번호가 응답 본문에** 담겨 돌아왔다(실측).
+    보낸 사람에게 돌려주는 것이라 유출은 아니지만, 그 값이 브라우저 콘솔·프론트
+    오류 리포팅·프록시 캐시에 남을 자리가 너무 많다. 그리고 `Infinity`·`NaN` 이
+    들어오면 그 `input` 때문에 JSON 직렬화가 깨져 **422 가 500 이 된다**(SR24-6).
+    """
+    secret = "short-pw-12"                       # 12자 미만이라 검증에서 떨어진다
+    r = client.post("/api/v1/auth/register",
+                    json={"email": "x@y.co", "password": secret})
+    assert r.status_code == 422, r.text
+    assert secret not in r.text, "검증 실패 응답에 비밀번호가 그대로 들어 있다"
+    assert "input" not in r.text
+    # 그래도 "어느 필드가 왜 틀렸는지"는 남아야 한다(진단 불가로 만들지 않는다).
+    err = r.json()["detail"][0]
+    assert err["loc"] == ["body", "password"] and err["msg"]
+
+
+def test_커스텀_검증기_메시지에도_입력값이_실리지_않는다(client):
+    """★ SR25-2 회귀 — `msg` 는 핸들러가 통과시키는 문자열이다.
+
+    위 테스트가 지키는 것은 `input` 키를 지웠다는 사실뿐이다. 그런데 커스텀 검증기가
+    `ValueError(f"... {값!r}")` 를 던지면 그 값이 **`msg` 를 타고 그대로** 돌아온다
+    (실측: 3,000자 입력 → 응답 3,127바이트 전량 반사). 지금 필드는 법정동코드지만,
+    같은 패턴이 자산·비밀번호 필드에 생기면 그날 조용히 사고가 된다.
+
+    ★ 변이 대상: `_check_region_codes` 의 메시지에 `{code!r}` 를 되돌려 넣으면 실패한다.
+    """
+    token = _register_and_login(client, "reflect@y.co")
+    marker = "MY-SECRET-VALUE-" + "A" * 3000
+    r = client.post("/api/v1/recommendations",
+                    json={"region_codes": [marker]}, headers=_auth(token))
+    assert r.status_code == 422, r.text
+    assert "MY-SECRET-VALUE" not in r.text, "검증 메시지로 입력값이 되돌아왔다"
+    assert len(r.content) < 1000, f"응답이 입력 크기를 따라 커졌다({len(r.content)}바이트)"
+    # 진단은 가능해야 한다 — 어느 필드의 몇 번째 항목이 틀렸는지는 남는다.
+    err = r.json()["detail"][0]
+    assert err["loc"][:2] == ["body", "region_codes"]
+    assert "region_codes[0]" in err["msg"]
+
+
+def test_검증_메시지는_길이_상한을_넘지_못한다(client):
+    """★ SR25-2 두 번째 그물 — 검증기가 값을 넣더라도 **되비치는 양**은 묶인다.
+
+    핸들러를 직접 호출한다. 위 테스트는 지금 검증기들이 값을 안 넣는다는 사실에
+    의존하므로, 상한을 지워도 초록이다(실측). 상한이 하중을 받게 하려면
+    "값을 넣은 검증기"를 흉내 내야 한다 — 그게 이 테스트다.
+    """
+    import asyncio
+    import json as _json
+
+    from fastapi.exceptions import RequestValidationError
+
+    from app.main import MAX_VALIDATION_MSG_CHARS
+
+    handler = client.app.exception_handlers[RequestValidationError]
+    huge = "값-" + "A" * 5000
+    exc = RequestValidationError([
+        {"type": "value_error", "loc": ("body", "x"), "msg": huge, "input": huge}])
+    resp = asyncio.run(handler(None, exc))
+
+    body = _json.loads(resp.body)
+    assert len(body["detail"][0]["msg"]) <= MAX_VALIDATION_MSG_CHARS
+    assert len(resp.body) < 1000, len(resp.body)
+    assert "input" not in resp.body.decode("utf-8")
+
+
+def test_무한대_입력도_500이_아니라_422로_돌아온다(client):
+    """검증 실패 응답 자체가 직렬화로 깨지면, 막았다는 사실이 사용자에게 500 으로 보인다."""
+    token = _register_and_login(client, "inf@y.co")
+    r = client.post("/api/v1/recommendations",
+                    content='{"area_min_m2": Infinity}',
+                    headers={**_auth(token), "Content-Type": "application/json"})
+    assert r.status_code == 422, r.text
+
+
 def test_금리를_바꾸면_월상환액이_바뀌고_terms에_드러난다(client):
     """금리 4%는 **가정**이다 — 사용자가 덮을 수 있고, 어떤 값을 썼는지 응답이 밝힌다."""
     base = _profile_and_plan(client, 600_000_000).json()["plan"]

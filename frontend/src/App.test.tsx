@@ -166,7 +166,7 @@ describe("프로필이 있을 때", () => {
 
     const user = userEvent.setup();
     render(<Authenticated />);
-    await user.click(await screen.findByRole("tab", { name: "내 자금" }));
+    await user.click(await screen.findByRole("button", { name: /내 자금/ }));
 
     expect(screen.getByText("8억 5,000만")).toBeTruthy();
     expect(screen.getByText(/한도를 결정한 건 총부채원리금상환비율\(DSR\)/)).toBeTruthy();
@@ -705,7 +705,7 @@ describe("단지를 고르면 그 단지 가격으로 계산한다", () => {
     render(<Authenticated />);
 
     await user.click(await screen.findByText("가나아파트"));
-    await user.click(screen.getByRole("tab", { name: "내 자금" }));
+    await user.click(screen.getByRole("button", { name: /내 자금/ }));
 
     const plan = await screen.findByRole("region", { name: "자금계획" });
     expect(plan.textContent).toContain("가나아파트");
@@ -733,9 +733,131 @@ describe("단지를 고르면 그 단지 가격으로 계산한다", () => {
     render(<Authenticated />);
 
     await user.click(await screen.findByText("미상아파트"));
-    await user.click(screen.getByRole("tab", { name: "내 자금" }));
+    await user.click(screen.getByRole("button", { name: /내 자금/ }));
 
     expect(await screen.findByText(/최근 실거래 근거가 없어/)).toBeTruthy();
+  });
+});
+
+/**
+ * 우측 패널 정리 — 목록 둘(주변 단지 · AI 추천)만 남기고, 내 자금은 **내 조건**의 버튼으로.
+ * 그리고 목록 위의 예산 토글 · 특성 칩.
+ */
+describe("우측 패널 · 목록 필터", () => {
+  function complexItem(over: Partial<ComplexItem> & { id: number; name: string }): ComplexItem {
+    return {
+      point: [127, 37.5],
+      households: 500,
+      built_year: 2005,
+      recent_price_krw: 700_000_000,
+      price_as_of: "2026-06-30",
+      price_confidence: "estimated",
+      active_listings: 1,
+      over_budget: false,
+      ...over,
+    };
+  }
+
+  /** 예산(8.5억) 안팎 · 세대수 있음/없음이 섞인 현실적인 목록 */
+  const ITEMS: ComplexItem[] = [
+    complexItem({ id: 1, name: "대단지아파트", households: 1500, recent_price_krw: 700_000_000 }),
+    complexItem({ id: 2, name: "비싼아파트", households: 800, recent_price_krw: 1_200_000_000 }),
+    complexItem({ id: 3, name: "미상아파트", households: null, recent_price_krw: 600_000_000 }),
+  ];
+
+  function mount(items: ComplexItem[] = ITEMS) {
+    installKakaoStub();
+    vi.spyOn(api, "getProfile").mockResolvedValue(PROFILE);
+    vi.spyOn(api, "getPreferences").mockResolvedValue(PREFS);
+    vi.spyOn(api, "affordability").mockResolvedValue(AFFORD);
+    vi.spyOn(api, "mapComplexes").mockResolvedValue({ level: "complex", items, note: "" });
+    return userEvent.setup();
+  }
+
+  afterEach(() => forgetCamera());
+
+  it("탭은 주변 단지 · AI 추천 둘뿐이다(내 자금은 탭이 아니다)", async () => {
+    mount();
+    render(<Authenticated />);
+
+    await screen.findByRole("tab", { name: "주변 단지" });
+    expect(screen.getByRole("tab", { name: "AI 추천" })).toBeTruthy();
+    expect(screen.getAllByRole("tab")).toHaveLength(2);
+    expect(screen.queryByRole("tab", { name: "내 자금" })).toBeNull();
+  });
+
+  it("내 조건의 '내 자금' 버튼으로 자금계획을 열고, 목록으로 되돌아온다", async () => {
+    const user = mount();
+    render(<Authenticated />);
+
+    // 한도를 버튼에 함께 적는다 — 누르기 전에도 정보가 있어야 한다
+    const btn = await screen.findByRole("button", { name: /내 자금/ });
+    expect(btn.textContent).toContain("8.50억");
+
+    await user.click(btn);
+    expect(await screen.findByText("최대 실구매 가능 금액")).toBeTruthy();
+    // 자금 화면에서는 목록 탭을 감춘다(지금 어디인지 분명하게)
+    expect(screen.queryByRole("tab")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "← 목록으로" }));
+    expect(await screen.findByRole("tab", { name: "주변 단지" })).toBeTruthy();
+  });
+
+  it("특성이 확인된 단지에만 배지가 붙는다(모르는 단지엔 안 붙는다)", async () => {
+    mount();
+    render(<Authenticated />);
+
+    const big = (await screen.findByText("대단지아파트")).closest("article") as HTMLElement;
+    // 단지명에도 "대단지"가 들어 있으므로 배지 요소를 직접 확인한다
+    expect(big.querySelector(".tag--large_complex")?.textContent).toContain("대단지");
+
+    const unknown = screen.getByText("미상아파트").closest("article") as HTMLElement;
+    expect(unknown.querySelector(".tags")).toBeNull();
+    // 세대수를 모른다는 사실은 캡션에 남는다(빈칸으로 두면 '작은 단지'로 읽힌다)
+    expect(unknown.textContent).toContain("세대수 미상");
+  });
+
+  it("예산 내 토글을 켜면 초과 단지가 빠지고 **몇 건 숨겼는지** 말한다", async () => {
+    const user = mount();
+    render(<Authenticated />);
+
+    await screen.findByText("비싼아파트");
+    await user.click(screen.getByRole("switch", { name: /예산 내/ }));
+
+    expect(screen.queryByText("비싼아파트")).toBeNull();
+    expect(screen.getByText(/예산 초과 1건 숨김/)).toBeTruthy();
+    expect(screen.getByText("대단지아파트")).toBeTruthy();
+  });
+
+  it("대단지 칩을 눌러도 세대수 미상 단지가 조용히 사라지지 않는다", async () => {
+    const user = mount();
+    render(<Authenticated />);
+
+    await screen.findByText("미상아파트");
+    await user.click(screen.getByRole("button", { name: /대단지 1건/ }));
+
+    // 확실히 아닌 단지(800세대)는 그냥 빠지지만, **모르는 단지는 숫자로 남는다**
+    expect(screen.queryByText("미상아파트")).toBeNull();
+    expect(screen.getByText(/세대수 정보가 없어 판정할 수 없는 1건은 제외했습니다/)).toBeTruthy();
+
+    // 그리고 볼 수 있는 길이 있다
+    await user.click(screen.getByRole("button", { name: "판정 불가 항목도 보기" }));
+    expect(screen.getByText("미상아파트")).toBeTruthy();
+    // 되살아난 항목은 '대단지'인 척하지 않는다
+    const revived = screen.getByText("미상아파트").closest("article") as HTMLElement;
+    expect(within(revived).getByText(/대단지 판정 불가/)).toBeTruthy();
+  });
+
+  it("필터로 전부 가려지면 '단지가 없다'가 아니라 '가려졌다'고 말한다", async () => {
+    const user = mount([
+      complexItem({ id: 2, name: "비싼아파트", recent_price_krw: 1_200_000_000 }),
+    ]);
+    render(<Authenticated />);
+
+    await screen.findByText("비싼아파트");
+    await user.click(screen.getByRole("switch", { name: /예산 내/ }));
+
+    expect(screen.getByText(/필터에 걸려 1건이 모두 가려졌습니다/)).toBeTruthy();
   });
 });
 

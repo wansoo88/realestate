@@ -6,12 +6,21 @@
 :root {
   color-scheme: light dark;
 
-  /* ── 강조색: 단 하나 (애플 시스템 블루) ───────────────────────── */
-  --accent: #007aff;
-  --accent-weak: rgba(0, 122, 255, 0.12); /* 선택 상태 옅은 채움 */
+  /* ── 강조색: 단 하나 (애플 시스템 블루 계열) ─────────────────────
+     ⚠️ **역할이 둘이라 값도 둘이다.** 하나로는 수학적으로 못 맞춘다.
+        · --accent      = "채움/테두리"  → 이 위에 **흰 글자**가 얹힌다. 어두울수록 유리.
+        · --accent-text = "글자"        → **밝은 배경 위**에 얹힌다. 밝을수록 불리.
+        라이트는 둘 다 어두우면 되지만, 다크는 채움(흰 글자를 받쳐야 함)과
+        글자(검은 배경 위여야 함)의 요구 방향이 정반대라 한 값으로 4.5:1 을 못 넘긴다.
+     iOS #007AFF 를 그대로 쓰면 흰 글자 CTA 가 4.02 로 AA 미달이라 apple.com 웹 값(#0071e3) 계열을 쓴다. */
+  --accent: #0071e3; /* 채움 — 흰 글자 4.70:1 */
+  --accent-text: #0060c7; /* 글자 — 흰 배경 6.00 / 옅은 파란 채움 위 5.09 */
+  --accent-weak: rgba(0, 113, 227, 0.12); /* 선택 상태 옅은 채움(--accent 에서 유도) */
   --on-accent: #ffffff;
 
-  /* 한국 금융 관습(상승 빨강/하락 파랑) 유지 · 애플 시스템 톤 */
+  /* 한국 금융 관습(상승 빨강/하락 파랑) 유지 · 애플 시스템 톤
+     ⚠️ 미사용 — 상승/하락 표기 화면이 아직 없다. 쓰기 전에 대비를 재계산할 것
+        (--price-down 은 옛 #007aff 값이라 글자로 쓰면 흰 배경 4.02 로 AA 미달) */
   --price-up: #ff3b30;
   --price-down: #007aff;
 
@@ -25,16 +34,40 @@
   --hairline: rgba(60, 60, 67, 0.18);
   --hairline-strong: rgba(60, 60, 67, 0.29);
 
-  /* 농도 3단계 (규칙 1) — 시각적 강도 = 근거의 강도 */
+  /* 농도 3단계 (규칙 1) — 시각적 강도 = 근거의 강도
+     ⚠️ **여기 값을 바꾸면 `tokens.contrast.test.ts` 가 먼저 깨진다.** 그게 의도다.
+        `--text-estimated` 는 2026-07-25 감사에서 AA 미달(F-01)로 지적돼 #667085 로
+        고치기로 했던 값이다. 그런데 그 수정은 **와이어프레임 CSS 에만 반영되고
+        이 파일에는 들어온 적이 없다**(git 이력 확인). 이후 팔레트를 애플 시스템
+        그레이(#8E8E93)로 다시 칠하면서 같은 결함이 3.26:1 로 굳었다.
+        애플이 이 회색을 쓰는 건 사실이지만 애플은 **tertiaryLabel(장식)** 에만 쓴다.
+        이 앱은 "모른다"는 **정보 자체**를 이 색으로 말하므로 본문 기준(4.5:1)을 받아야 한다.
+        → 문서가 아니라 테스트가 코드를 지키게 한다. */
   --text: #000000; /* 확정: 실거래·법정 계산. 100%, 굵기 600 */
-  --text-secondary: #636366; /* 캡션(연식·세대·기준일) — 4.5:1 이상 */
-  --text-estimated: #8e8e93; /* 추정/폴백 — 흐리게(보조 표기용) */
+  --text-secondary: #636366; /* 캡션(연식·세대·기준일) — 흰 배경 5.99 */
+  --text-estimated: #6b6b70; /* 추정/폴백 — 흰 배경 5.30 / 배지 위 4.60. 캡션보다 한 칸 흐리되 읽힌다 */
   --badge-bg: rgba(120, 120, 128, 0.12); /* 실측추정 배지: 옅은 회색 채움 */
 
   --warn: #ff9500;
   --warn-text: #b25000; /* 텍스트용(대비 확보) */
   --danger: #ff3b30;
   --danger-text: #d70015; /* 에러 텍스트(대비 확보) */
+
+  /* ── 특성 태그 색 (대단지·역세권·재건축) ─────────────────────────────
+     농도 규칙을 깨지 않도록 **채도를 낮춘 옅은 채움 + 진한 글자**로만 쓴다.
+     태그는 사실(세대수·거리)이라 확정 톤을 쓸 자격이 있지만, 이 화면의 주인공은
+     여전히 금액이다 — 13px·굵기 400 을 넘지 않고, 추정치 배지보다 커지지 않는다.
+     ⚠️ 색은 **보조 채널**이다. 아이콘(🏢🚇🔨)과 글자가 항상 함께 있어야 하고,
+        색을 다 지워도 의미가 남아야 한다(색맹 접근성 · A3). */
+  --tag-large-bg: rgba(88, 86, 214, 0.12);
+  --tag-large-fg: #4b49b5;
+  --tag-station-bg: rgba(0, 122, 145, 0.12);
+  --tag-station-fg: #0a6c7d;
+  --tag-redev-bg: rgba(175, 82, 222, 0.12);
+  --tag-redev-fg: #8a3fae;
+  /* 판정 불가 — 색을 주지 않는다. 모르는 걸 강조하면 아는 것처럼 보인다. */
+  --tag-unknown-bg: var(--badge-bg);
+  --tag-unknown-fg: var(--text-estimated);
 
   /* ── 간격: 4px 그리드(실사용은 넉넉하게) ─────────────────────── */
   --sp-1: 4px;
@@ -52,10 +85,14 @@
   --fs-title: 20px;
   --fs-price: 26px; /* 숫자가 유일한 주인공(규칙 2) */
   --fs-large-title: 32px;
+  /* 시스템 폰트만 쓴다(웹폰트 0건). 애플 기기에서는 SF Pro + Apple SD Gothic Neo 가 잡힌다.
+     ⚠️ Pretendard 를 뺐다 — @font-face 도 <link> 도 없어서 **사용자 PC에 깔려 있어야만**
+        적용됐다. 즉 같은 화면이 사람마다 다르게 렌더돼 디자인 검증이 불가능했다.
+     ⚠️ 등폭(--ff-num) 도 뺐다 — Windows/Android 에 SF Mono·Menlo 가 없어 Consolas 로 떨어지는데,
+        이 앱의 금액은 "14.8억"처럼 **숫자 + 한글**이라 한 토큰 안에서 폰트가 갈렸다.
+        자릿수 세로 정렬은 아래 `.num` 의 font-variant-numeric: tabular-nums 로 충분하다. */
   --ff: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Apple SD Gothic Neo",
-    Pretendard, system-ui, "Malgun Gothic", sans-serif;
-  /* 금액은 등폭 — 세로로 비교할 때 자릿수가 맞아야 읽힌다 */
-  --ff-num: "SF Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    system-ui, "Malgun Gothic", sans-serif;
 
   /* ── 모서리: 크고 부드럽게 ───────────────────────────────────── */
   --r-sheet: 20px;
@@ -77,8 +114,13 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --accent: #0a84ff;
-    --accent-weak: rgba(10, 132, 255, 0.22);
+    /* 다크에서 두 값의 방향이 정확히 갈린다 —
+       채움은 흰 글자를 받쳐야 하므로 **어둡게**, 글자는 검은 배경 위라 **밝게**.
+       iOS #0A84FF 를 채움에 쓰면 흰 글자가 3.65 로 미달이고,
+       글자에 쓰면 옅은 파란 채움(accent-weak) 위에서 3.54 로 미달이었다. */
+    --accent: #0a6fd8; /* 채움 — 흰 글자 4.91:1 */
+    --accent-text: #409fff; /* 글자 — 검정 위 7.62 / elev 6.17 / 옅은 채움 위 5.00 */
+    --accent-weak: rgba(10, 111, 216, 0.22);
     --on-accent: #ffffff;
     --price-up: #ff453a;
     --price-down: #0a84ff;
@@ -92,7 +134,10 @@
     --hairline-strong: rgba(84, 84, 88, 0.6);
 
     --text: #ffffff;
-    --text-secondary: #aeaeb2;
+    --text-secondary: #aeaeb2; /* 검정 위 9.50 */
+    /* 다크는 검정·elev 위에서 이미 통과(6.44 / 5.22)라 라이트처럼 바꾸지 않는다.
+       ⚠️ 다만 배지 채움이 elev 카드 위에 겹치는 경우(#323236)는 3.91 로 미달 — 미해소.
+          해당 조합이 실제로 렌더되는 화면이 확인되면 #9c9ca0(4.66) 로 올릴 것. */
     --text-estimated: #8e8e93;
     --badge-bg: rgba(120, 120, 128, 0.24);
 
@@ -100,6 +145,16 @@
     --warn-text: #ffb340;
     --danger: #ff453a;
     --danger-text: #ff6961;
+
+    /* 다크에서는 채움을 조금 올리고 글자를 밝게 — 대비를 라이트와 같은 수준으로 맞춘다 */
+    --tag-large-bg: rgba(94, 92, 230, 0.24);
+    --tag-large-fg: #b3b1ff;
+    --tag-station-bg: rgba(64, 200, 224, 0.22);
+    --tag-station-fg: #7fdcec;
+    --tag-redev-bg: rgba(191, 90, 242, 0.22);
+    --tag-redev-fg: #dfa6f5;
+    --tag-unknown-bg: var(--badge-bg);
+    --tag-unknown-fg: var(--text-estimated);
   }
 }
 
@@ -144,9 +199,10 @@ a:focus-visible,
   border-radius: var(--r-btn);
 }
 
-/* 금액 — 등폭 + 자릿수 정렬(이 앱에 중요) */
+/* 금액 — 자릿수 정렬(이 앱에 중요). 폰트는 본문과 **같은 것**을 쓴다.
+   tabular-nums 는 SF Pro · Segoe UI Variable · Roboto 모두 지원하므로
+   등폭 패밀리 없이도 세로 비교(1.2억 / 14.8억)의 자릿수가 맞는다. */
 .num {
-  font-family: var(--ff-num);
   font-variant-numeric: tabular-nums;
 }
 

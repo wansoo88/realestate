@@ -66,13 +66,43 @@ HAZARD_LABEL: dict[str, str] = {
 }
 
 #: 근접 점수 구간 (best_m 이하 100점, worst_m 이상 0점).
+#: 급이 올라갈수록 통학 반경이 넓어지므로 구간도 넓다(초등 도보 · 고교 대중교통).
+#: ⚠️ "school"(초등) 값은 **바꾸지 않는다** — 바꾸는 순간 기존 점수가 전부 흔들린다.
 PROXIMITY_BANDS: dict[str, tuple[float, float]] = {
     "station": (250, 1500),
     "school": (300, 1500),
+    "middle_school": (400, 2000),
+    "high_school": (600, 3000),
     "mart": (400, 2000),
     "park": (200, 1500),
     "hospital_er": (800, 4000),
 }
+
+#: 학군 축(0.35) **안에서의** 급별 가중치. 있는 급끼리 정규화한다(`_weighted`).
+#: 초등이 가장 무거운 이유는 성적이 좋아서가 아니라 **우리가 아는 것이 가장 확실해서**다:
+#: 초등 통학구역은 후보가 1곳인 경우가 79%(수도권 실측)라 배정을 말할 수 있고,
+#: 중(후보 평균 4.46곳)·고(14.39곳)는 배정을 말할 수 없다. 확실한 사실에 더 큰
+#: 무게를 준다. 이 값들은 규제값이 아니라 설계 휴리스틱이다.
+SCHOOL_LEVEL_WEIGHTS: dict[str, float] = {
+    "초등학교": 0.55,
+    "중학교": 0.30,
+    "고등학교": 0.15,
+}
+
+#: 급 → 근접 점수 구간 키.
+_LEVEL_BAND: dict[str, str] = {
+    "초등학교": "school",
+    "중학교": "middle_school",
+    "고등학교": "high_school",
+}
+
+#: 학구도 출처. **한국교육시설안전원**이 배포하고 공공데이터포털이 유통한다.
+#: ("학교알리미"가 아니다 — 학교알리미는 학교 공시정보 사이트로 학구도를 배포하지 않는다.)
+SCHOOL_SOURCE = "한국교육시설안전원 학구도(공공데이터포털)"
+
+#: 배정 방식은 원천 데이터에 **없다**. 없는 것을 없다고 적기 위한 문자열이다.
+#: 이 자리에 '추첨'·'평준화'를 적으면 그건 데이터가 아니라 통념이다.
+ASSIGNMENT_UNKNOWN = "배정 방식 미확인(원천 데이터에 배정 방식 정보 없음)"
 
 #: 종합 점수 가중치 (있는 항목끼리 정규화).
 COMPONENT_WEIGHTS: dict[str, float] = {"transit": 0.40, "school": 0.35, "infra": 0.25}
@@ -141,8 +171,24 @@ def _canonical_avoids(avoid: Iterable[str] | None) -> set[str]:
 # A. 학군 — 학구도 포함 여부 (거리 아님)
 # ---------------------------------------------------------------------------
 
+def _zone_display(fact: SchoolFact) -> str | None:
+    """구역 표시 이름. 고등학교는 '1학교군'처럼 이름만으로는 구분이 안 된다.
+
+    교육지원청을 앞에 붙여야 전국의 '1학교군'이 서로 다른 곳임이 드러난다.
+    """
+    if not fact.zone_name:
+        return None
+    if fact.education_office and fact.zone_name not in fact.education_office:
+        return f"{fact.education_office} {fact.zone_name}"
+    return fact.zone_name
+
+
 def assess_school(fact: SchoolFact | None) -> tuple[dict | None, list[str]]:
-    """학군 판정. 학구도 포함일 때만 배정을 인정한다.
+    """초등 **통학구역** 판정. 학구도 포함일 때만 배정을 인정한다.
+
+    ⚠️ 포함이라고 무조건 '배정'이라 말하지 않는다. 통학구역에 초등학교가 2곳 이상
+       연계된 **공동학구**가 수도권의 21%다(실측). 그 경우 어느 학교로 가는지는
+       이 데이터로 알 수 없으므로 후보 수를 함께 낸다.
 
     반환: (학군 dict | None, missing 사유들)
     """
@@ -153,14 +199,27 @@ def assess_school(fact: SchoolFact | None) -> tuple[dict | None, list[str]]:
         # 최근접 학교 거리로 대체하는 것은 금지(배정과 거리는 다르다).
         return None, ["배정 초등학교 확인 불가(학구도 미포함) — 최근접 학교 거리로 대체하지 않음"]
 
+    # 후보가 여럿이면 '배정'이 아니라 '후보 중 최근접'이다. 수를 모르는 옛 적재분
+    # (candidate_count=None)은 예전처럼 단일 배정으로 본다 — 없는 사실을 만들지 않는다.
+    shared = bool(fact.candidate_count and fact.candidate_count > 1)
+
     result: dict = {
         "assigned_elementary": fact.name,
         "in_district": True,
         "distance_m": fact.distance_m,
         "crosses_main_road": fact.crosses_main_road,
         "as_of": fact.district_as_of,
-        "source": "학교알리미 학구도",
+        "source": SCHOOL_SOURCE,
     }
+    if fact.zone_name:
+        result["zone_name"] = fact.zone_name
+    if shared:
+        # 공동학구 — "이 학교에 간다"가 아니라 "이 학교들 중 하나"다.
+        result["co_district"] = True
+        result["candidate_count"] = fact.candidate_count
+        result["assignment"] = (
+            f"공동학구 — 연계 초등학교 {fact.candidate_count}곳 중 최근접 학교이며 "
+            f"배정 학교를 단정할 수 없음")
     missing: list[str] = []
     if (fact.achievement_pct is not None
             and fact.achievement_source and fact.achievement_as_of):
@@ -170,6 +229,45 @@ def assess_school(fact: SchoolFact | None) -> tuple[dict | None, list[str]]:
     elif fact.achievement_pct is not None:
         # 숫자는 있으나 출처·기준연도가 없다 → 쓰지 않는다(원칙 2).
         missing.append("학업성취도 출처·기준연도 없음 — 수치 미사용")
+    return result, missing
+
+
+def assess_school_group(fact: SchoolFact | None) -> tuple[dict | None, list[str]]:
+    """중·고 **학교군** 판정. 배정이 아니라 **후보 범위**로만 말한다.
+
+    초등의 `assess_school` 과 반환 키가 다른 것은 의도된 것이다. `assigned_*` 키를
+    쓰지 않음으로써 "배정 중학교" 같은 문장이 아래쪽 어디에서도 만들어질 수 없게 한다.
+
+    ⚠️ 배정 방식(단일/추첨/평준화)은 **원천에 없다**(ASSIGNMENT_UNKNOWN).
+       "중학교는 대체로 추첨" 은 데이터가 아니므로 여기에 적지 않는다.
+    """
+    if fact is None:
+        # 사실이 아예 없다 = **그 급을 묻지 않았다**(리포지토리는 항상 넘긴다).
+        # 여기서 '미확보'를 적으면 급을 모르는 채로 "중·고 미확보"라는 모호한
+        # 문장이 리포트에 붙는다. 묻지 않은 것에 대해서는 아무 말도 하지 않는다.
+        return None, []
+    if not fact.district_data_available:
+        return None, [f"{fact.level} 학교군 데이터 미확보 — 학교 거리로 대체하지 않음"]
+    if not fact.in_district or not fact.name:
+        return None, [f"{fact.level} 학교군 미포함 — 최근접 학교 거리로 대체하지 않음"]
+
+    result: dict = {
+        "level": fact.level,
+        # 원천이 붙인 낱말을 그대로 쓴다. 013 이전 적재분은 비어 있을 수 있다.
+        "zone_kind": fact.zone_kind,
+        "zone_name": _zone_display(fact),
+        "candidate_count": fact.candidate_count,
+        # **배정 학교가 아니다.** 이름을 이렇게 길게 쓰는 이유가 그것이다.
+        "nearest_school": fact.name,
+        "nearest_distance_m": fact.distance_m,
+        "assignment": ASSIGNMENT_UNKNOWN,
+        "as_of": fact.district_as_of,
+        "source": SCHOOL_SOURCE,
+    }
+    missing: list[str] = []
+    if not fact.candidate_count:
+        # 후보 수를 모르면 "후보 N곳"이라고 쓸 수 없다. 그 사실을 남긴다.
+        missing.append(f"{fact.level} 학교군 후보 학교 수 미상")
     return result, missing
 
 
@@ -185,6 +283,47 @@ def _school_score(school: dict | None) -> float | None:
     if ach is not None:                   # 출처 검증을 통과한 값만 여기 온다
         base = round(base * 0.5 + float(ach) * 0.5, 1)
     return base
+
+
+def _school_group_score(group: dict | None) -> float | None:
+    """학교군 점수 = **학교군 안** 최근접 학교까지의 근접 점수.
+
+    왜 이게 '거리로 배정을 대체하는 것'이 아닌가 — 후보를 학교군 **안**의 학교로
+    한정하기 때문이다. 주변 아무 학교나 재는 게 아니라 "실제로 배정될 수 있는
+    학교들 중 가장 가까운 곳"이고, 이건 배정 주장이 아니라 접근성 사실이다.
+    배정 학교를 지목하지 않으므로 규칙 1(거리로 배정 대체 금지)을 어기지 않는다.
+
+    ⚠️ 후보가 14곳인 고등학교 학교군에서 최근접 거리는 통학 거리의 **하한**일 뿐이다.
+       그래서 고등학교 가중치가 가장 낮다(SCHOOL_LEVEL_WEIGHTS).
+    """
+    if not group:
+        return None
+    band = _LEVEL_BAND.get(group.get("level", ""))
+    if band is None:
+        return None
+    return _proximity_score(group.get("nearest_distance_m"), *PROXIMITY_BANDS[band])
+
+
+def _school_axis_score(school: dict | None, middle: dict | None,
+                       high: dict | None) -> float | None:
+    """학군 축(0.35) 종합. **있는 급끼리만** 가중 평균한다.
+
+    초등만 있으면 결과가 초등 점수 그대로다 — 중·고를 들이기 전과 **같은 값**이
+    나온다는 뜻이고, 그게 회귀가 없다는 근거다.
+    """
+    parts: list[tuple[float, float]] = []
+    for level, block, score in (
+        ("초등학교", school, _school_score(school)),
+        ("중학교", middle, _school_group_score(middle)),
+        ("고등학교", high, _school_group_score(high)),
+    ):
+        if block is None or score is None:
+            continue
+        parts.append((SCHOOL_LEVEL_WEIGHTS[level], score))
+    if not parts:
+        return None
+    den = sum(w for w, _ in parts)
+    return round(sum(w * s for w, s in parts) / den, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -336,6 +475,37 @@ def _penalty_deduction(penalties: Sequence[dict]) -> float:
 # 종합
 # ---------------------------------------------------------------------------
 
+def _group_claim(group: dict) -> str:
+    """학교군 근거 문자열. **'배정'이라는 낱말을 쓰지 않는다.**
+
+    "○○중학교 학구도 내부"처럼 쓰면 그 중학교에 간다는 뜻이 되는데, 그건 이 데이터가
+    말하지 않는 것이다. 그래서 구역 이름 + 후보 수 + 배정 방식 미확인 + (참고용)
+    최근접 학교 순서로 쓴다. 최근접 학교는 **거리 사실**로만 등장한다.
+    """
+    kind = group.get("zone_kind") or "학교군"
+    zone = group.get("zone_name") or f"{group['level']} {kind}"
+    count = group.get("candidate_count")
+    head = f"{zone} 포함 — {group['level']} {kind}"
+    head += f"(배정 후보 {count}곳, {group['assignment']})" if count \
+        else f"({group['assignment']}, 후보 학교 수 미상)"
+    nearest, dist = group.get("nearest_school"), group.get("nearest_distance_m")
+    if nearest and dist is not None:
+        head += f". 후보 중 최근접은 {nearest} {dist:.0f}m(배정 학교 아님)"
+    return head
+
+
+def _group_summary(group: dict) -> str:
+    """rationale 한 줄용 축약. 여기서도 '배정'은 쓰지 않는다."""
+    kind = group.get("zone_kind") or "학교군"
+    zone = group.get("zone_name") or f"{group['level']} {kind}"
+    count = group.get("candidate_count")
+    dist = group.get("nearest_distance_m")
+    tail = f"후보 {count}곳" if count else "후보 수 미상"
+    if dist is not None:
+        tail += f", 최근접 {dist:.0f}m"
+    return f"{zone}({tail}, 배정 미확정)"
+
+
 def _weighted_score(components: dict[str, float | None]) -> float | None:
     """있는 항목끼리만 가중 평균."""
     num = 0.0
@@ -358,13 +528,15 @@ def evaluate_location(
     as_of = as_of or dt.date.today()
 
     school, school_missing = assess_school(facts.school)
+    middle, middle_missing = assess_school_group(facts.middle_school)
+    high, high_missing = assess_school_group(facts.high_school)
     transit, hopes, transit_ev = assess_transit(facts.stations, facts.plans, as_of=as_of)
     amenities, infra_ev = assess_infra(facts.pois, as_of=as_of)
     screen = screen_hazards(facts.hazards, avoid)
 
     components = {
         "transit": _transit_score(transit),
-        "school": _school_score(school),
+        "school": _school_axis_score(school, middle, high),
         "infra": _infra_score(amenities),
     }
     base = _weighted_score(components)
@@ -374,16 +546,39 @@ def evaluate_location(
 
     evidence: list[dict] = []
     if school:
-        ev = {"claim": f"{school['assigned_elementary']} 학구도 내부",
-              "source": "학교알리미 학구도",
-              "as_of": school.get("as_of") or as_of.isoformat()}
-        evidence.append(ev)
+        # 공동학구면 "배정"이라고 쓰지 않는다 — 후보 수를 함께 낸다.
+        claim = f"{school['assigned_elementary']} 학구도 내부"
+        if school.get("co_district"):
+            claim += (f"(공동학구 — 연계 초등학교 {school['candidate_count']}곳 중 "
+                      f"최근접, 배정 학교 단정 불가)")
+        evidence.append({"claim": claim, "source": school["source"],
+                         "as_of": school.get("as_of") or as_of.isoformat()})
+    for group in (middle, high):
+        if not group:
+            continue
+        evidence.append({"claim": _group_claim(group), "source": group["source"],
+                         "as_of": group.get("as_of") or as_of.isoformat()})
     evidence += transit_ev + infra_ev
 
     # 리스크 — 반대 근거를 반드시 함께 낸다.
     risks: list[dict] = []
     if school:
         risks.append({"severity": "low", "detail": "학군 배정은 변경될 수 있습니다(현재 기준)."})
+    if school and school.get("co_district"):
+        risks.append({
+            "severity": "medium",
+            "detail": f"공동학구입니다 — 연계 초등학교 {school['candidate_count']}곳 중 "
+                      f"어디로 배정되는지는 이 데이터로 알 수 없습니다(교육지원청 확인 필요).",
+        })
+    for group in (middle, high):
+        if not group:
+            continue
+        # 학교군을 '배정'으로 읽지 않도록 **매번** 반대 근거를 붙인다.
+        count = group.get("candidate_count")
+        detail = (f"{group['level']} 학교군은 배정 학교를 확정하지 않습니다"
+                  f"{f' (후보 {count}곳)' if count else ''} — "
+                  f"{ASSIGNMENT_UNKNOWN}. 실제 배정은 교육지원청 공고를 확인하세요.")
+        risks.append({"severity": "medium", "detail": detail})
     for h in hopes:
         # 착공 전 호재는 지연 가능성을 명시. 확정처럼 쓰지 않는다.
         if h.confidence <= 0.4:
@@ -398,7 +593,7 @@ def evaluate_location(
             "detail": f"{p['label']} {p['distance_m']:.0f}m — 현장 확인 필요.",
         })
 
-    missing = tuple(school_missing)
+    missing = tuple(school_missing) + tuple(middle_missing) + tuple(high_missing)
 
     # 판정 문구
     if screen.excluded:
@@ -421,7 +616,12 @@ def evaluate_location(
             cross = "대로 횡단 있음" if school.get("crosses_main_road") else "대로 횡단 없이"
             dist = school.get("distance_m")
             dtxt = f" {dist:.0f}m" if dist is not None else ""
-            bits.append(f"{school['assigned_elementary']} 학구도 내부({cross}{dtxt})")
+            co = (f", 공동학구 {school['candidate_count']}곳"
+                  if school.get("co_district") else "")
+            bits.append(f"{school['assigned_elementary']} 학구도 내부({cross}{dtxt}{co})")
+        for group in (middle, high):
+            if group:
+                bits.append(_group_summary(group))
         if amenities:
             bits.append("생활 인프라 " + ", ".join(
                 f"{k.replace('_m','')} {v:.0f}m" for k, v in amenities.items()))
@@ -434,7 +634,8 @@ def evaluate_location(
 
     return LocationAssessment(
         score=score, confidence=confidence, verdict=verdict, rationale=rationale,
-        school=school, transit=transit, amenities=amenities,
+        school=school, middle_school=middle, high_school=high,
+        transit=transit, amenities=amenities,
         penalties=screen.penalties, hopes=hopes,
         evidence=tuple(evidence), risks=tuple(risks),
         excluded=screen.excluded, exclusion_reasons=screen.exclusion_reasons,

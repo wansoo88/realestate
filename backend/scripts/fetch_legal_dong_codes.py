@@ -32,7 +32,7 @@ import zipfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _common import REPO_ROOT  # noqa: E402
+from _common import REPO_ROOT, capped_get  # noqa: E402
 
 LIST_URL = "https://www.code.go.kr/stdcode/regCodeL.do"
 DOWNLOAD_URL = "https://www.code.go.kr/etc/codeFullDown.do"
@@ -47,10 +47,13 @@ def download(timeout: float = 180.0) -> bytes:
 
     with httpx.Client(timeout=timeout, follow_redirects=True,
                       headers={"User-Agent": "Mozilla/5.0 (compatible; realestate-ingest/1.0)"}) as c:
-        c.get(LIST_URL)                                  # 세션 쿠키 확보
-        resp = c.post(DOWNLOAD_URL, data=FORM, headers={"Referer": LIST_URL})
-        resp.raise_for_status()
-        return resp.content
+        # 세션 쿠키 확보. 본문은 쓰지 않지만 `c.get()` 은 그래도 전량 버퍼링하므로
+        # 여기도 상한을 통과시킨다(SR25-1) — '안 쓰는 응답'이 예외가 되지 않게.
+        capped_get(c, LIST_URL, what="법정동코드 목록 페이지")
+        # 상한이 걸린 읽기(SR17-5→SR24-2). `resp.content` 는 상한 검사 전에 이미
+        # 본문 전체를 메모리에 올리므로 쓰지 않는다.
+        return capped_get(c, DOWNLOAD_URL, method="POST", data=FORM,
+                          headers={"Referer": LIST_URL}, what="법정동코드 전체자료")
 
 
 def extract(payload: bytes) -> tuple[str, bytes]:

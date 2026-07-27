@@ -1,4 +1,4 @@
-"""초등학교 **통학구역(학구도)** 파싱 — SHP · 연계정보 · 학교위치 (순수 함수).
+"""학구도 파싱 — 초등 **통학구역** · 중·고 **학교군** (SHP · 연계정보 · 학교위치, 순수 함수).
 
 왜 필요한가 — school 축(0.35)이 통째로 죽어 있었다
 --------------------------------------------------
@@ -11,7 +11,7 @@
 표준데이터 페이지(15021149/standard.do)에는 파일이 안 붙어 있을 뿐, 파일데이터
 페이지에는 붙어 있고 인증키도 로그인도 필요 없다.
 
-데이터 3종 (전부 공공데이터포털 파일데이터 · 무키)
+데이터 5종 (전부 공공데이터포털 파일데이터 · 무키)
 --------------------------------------------------
 운영주체가 한국지방교육행정연구재단 → **한국교육시설안전원**으로 이관됐다.
 같은 데이터의 구판(2025-09-22)과 신판(2026-03-20)이 동시에 올라와 있으므로
@@ -19,10 +19,14 @@
 
   ① 초등학교통학구역 SHP  https://www.data.go.kr/data/15159265/fileData.do
        7,140개 폴리곤 · EPSG:5186 · HAKGUDO_ID(학구ID) 보유
-  ② 학교학구도연계정보 CSV https://www.data.go.kr/data/15159266/fileData.do
-       17,985행 · 학구ID ↔ 학교ID
-  ③ 초중등학교위치 CSV     https://www.data.go.kr/data/15159184/fileData.do
-       12,011교 · 학교ID ↔ 위도·경도
+  ② 중학교학교군 SHP      https://www.data.go.kr/data/15159264/fileData.do
+       1,684개 폴리곤 · 같은 속성 구조
+  ③ 고등학교학교군 SHP    https://www.data.go.kr/data/15159263/fileData.do
+       73개 폴리곤 (SGG_CD 가 없다 — 시군구를 넘는 광역 구역이라서)
+  ④ 학교학구도연계정보 CSV https://www.data.go.kr/data/15159266/fileData.do
+       17,985행 · 학구ID ↔ 학교ID (초 11,667 · 중 5,281 · 고 1,037)
+  ⑤ 초중등학교위치 CSV     https://www.data.go.kr/data/15159184/fileData.do
+       12,011교 · 학교ID ↔ 위도·경도 (초 6,303 · 중 3,312 · 고 2,396)
 
 목표 체인 (전부 **문자열 정확일치**로 닫힌다 — 퍼지매칭 없음)
     SHP.HAKGUDO_ID → 연계.학구ID → 연계.학교ID → 위치.학교ID → 좌표
@@ -33,12 +37,33 @@
    무키 다운로드로 끝나는 반면 API 는 numOfRows 상한이 1,000 이라 18회를 써야 한다.
    API 는 `config/sources.yaml` 에 **갱신 감지용 저비용 크로스체크**로만 등록돼 있다.
 
-⚠️ **초등학교 전용이다.** 중학교·고등학교 학교군 SHP 도 같은 형식으로 배포되지만
-   여기서 파싱하지 않는다. `repositories/postgis.py` 의 `_SCHOOL_SQL` 은
-   school_district 를 학교급 구분 없이 조회해 최근접 1건을 고르고, 도메인이 그것을
-   `assigned_elementary` 로 단정한다(analysis.py). 중·고를 같은 표에 넣는 순간
-   **가장 가까운 중학교가 '배정 초등학교'로 보고된다.** 학교급 컬럼과 조회 필터가
-   생기기 전에는 섞지 않는다 — `ELEMENTARY` 필터가 그 방어선이고 테스트로 고정돼 있다.
+⚠️⚠️ **학교급마다 자료의 의미가 다르다. 뭉뚱그리면 거짓말이 된다.**
+   원천 데이터셋의 제목부터 다르다 — 초등은 「통학구역」, 중·고는 「학교군」이다.
+   같은 표에 담되 `school_level` 로 갈라 조회하고, 문구도 급별로 다르게 쓴다.
+
+     초등 통학구역 : 구역 하나에 학교 1곳이 원칙(수도권 실측 79%). 이때는 배정이라
+                     말할 수 있다. 나머지 21%는 **공동학구**로 학교가 2곳 이상 걸린다 —
+                     이 경우 "배정 학교"라고 단정할 수 없어 후보 수를 함께 낸다.
+     중 학교군     : 수도권 학구당 학교 **4.46곳**(실측). '이 구역이면 이 중학교'가 아니다.
+     고 학교군     : 수도권 학구당 학교 **14.39곳**(실측). 사실상 광역 단위다
+                     (예: '강남서초학교군' 하나가 강남구+서초구 전체).
+
+   ⚠️ **배정 방식(단일배정/추첨/평준화)은 원천 어디에도 없다.** SHP 속성 14개
+      (HAKGUDO_ID·HAKGUDO_NM·HAKGUDO_GB·SD_CD·SGG_CD·EDU_*·BASE_DT·…), 연계정보 CSV
+      9개 컬럼, 학교위치 CSV 18개 컬럼을 전부 확인했고 배정 방식 필드가 없다.
+      데이터셋 설명문에도 없다. 그러므로 이 모듈은 배정 방식을 **만들어내지 않는다.**
+      "중학교는 대체로 추첨" 같은 통념을 데이터인 척 적는 것도 지어내기다.
+      우리가 적을 수 있는 건 셀 수 있는 것뿐이다 — **구역에 연계된 학교가 몇 곳인가.**
+
+   ⚠️ HAKGUDO_GB(0/1)는 뜻이 문서화돼 있지 않다. 실측상 '1'이 연계 학교 2곳 이상과
+      거의 정확히 겹치지만(초등 7,139개 중 어긋남 11개), **확인된 정의가 없으므로**
+      해석하지 않는다. 파싱만 해서 `ZonePolygon.zone_gb` 에 원값으로 들고 있고,
+      **DB 에는 넣지 않는다** — 뜻을 모르는 값에 컬럼을 주면 언젠가 누군가 그걸
+      '공동학구 플래그'로 읽는다. 후보가 여럿인지는 연계정보로 세면 되고, 그건 확실하다.
+
+   구조: 초등은 1행=1(구역,학교) 그대로 두고(회귀 없음), 중·고는 1행=1구역 +
+   `school_district_member` 로 후보 학교를 단다(migration 013). 지오메트리를 4~14벌
+   복제하지 않기 위해서이기도 하고, 학교군에는 애초에 '그 구역의 학교'가 하나가 아니라서다.
 """
 from __future__ import annotations
 
@@ -50,11 +75,12 @@ from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 
 __all__ = [
-    "CAPITAL_AREA_SD", "ELEMENTARY", "SOURCE_KESI", "SchoolDistrictRecord",
-    "SchoolLink", "SchoolLocation", "ZonePolygon", "build_records",
+    "CAPITAL_AREA_SD", "ELEMENTARY", "HIGH", "LEVELS", "MIDDLE", "SOURCE_KESI",
+    "SchoolDistrictRecord", "SchoolLink", "SchoolLocation", "SchoolZoneRecord",
+    "ZONE_KIND", "ZoneMember", "ZonePolygon", "build_records", "build_zone_records",
     "district_source_ref", "merge_wkb_multipolygons", "merge_zone_parts",
     "parse_link_csv", "parse_school_location_csv", "parse_zone_shapefile",
-    "school_source_ref", "shp_polygon_to_wkb",
+    "school_source_ref", "shp_polygon_to_wkb", "zone_source_ref",
 ]
 
 #: 수도권 시도코드. 서비스 범위가 수도권이라 여기서 자른다(CLAUDE.md).
@@ -63,8 +89,21 @@ __all__ = [
 #: 폴리곤 유무로 '미확보'와 '미포함'을 가르므로, 수도권만 넣으면 그 구분이 자동으로 산다.
 CAPITAL_AREA_SD = frozenset({"11", "41", "28"})     # 서울 · 경기 · 인천
 
-#: 이 모듈이 다루는 유일한 학교급. 위 ⚠️ 참조.
+#: 학교급. 값은 연계정보 CSV 의 `학교급구분` 문자열 **그대로**다(번역·축약 금지 —
+#: 필터가 문자열 정확일치라 한 글자만 달라도 조용히 0건이 된다).
 ELEMENTARY = "초등학교"
+MIDDLE = "중학교"
+HIGH = "고등학교"
+LEVELS = (ELEMENTARY, MIDDLE, HIGH)
+
+#: 급 → 구역 종류. **원천 데이터셋의 제목에서 온 낱말**이지 우리 해석이 아니다.
+#:   15159265 「초등학교통학구역」 / 15159264 「중학교학교군」 / 15159263 「고등학교학교군」
+#: 배정 방식이 아니다 — 배정 방식은 원천에 없다(모듈 docstring ⚠️).
+ZONE_KIND: dict[str, str] = {
+    ELEMENTARY: "통학구역",
+    MIDDLE: "학교군",
+    HIGH: "학교군",
+}
 
 SOURCE_KESI = "kesi_school_zone"
 
@@ -78,7 +117,11 @@ _SHP_POLYGON = 5
 
 #: DBF 에서 반드시 있어야 하는 컬럼. 하나라도 없으면 배포 형식이 바뀐 것이므로
 #: **추측하지 않고 멈춘다** (틀린 학구 배정은 틀린 추천으로 바로 이어진다).
-_ZONE_COLUMNS = ("HAKGUDO_ID", "HAKGUDO_NM", "SD_CD", "BASE_DT")
+#: EDU_NM(교육지원청)이 필수인 이유: 고등학교 학교군 이름은 '1학교군'·'2학교군' 처럼
+#: 교육지원청 안에서만 유일하다. 교육지원청 없이 표시하면 전국의 '1학교군'이 같은
+#: 이름으로 보인다. 초·중·고 SHP 세 벌에 모두 들어 있다(실측).
+#: ⚠️ SGG_CD 는 넣지 않는다 — **고등학교 SHP 에는 없다**(시군구를 넘는 광역 구역이라서).
+_ZONE_COLUMNS = ("HAKGUDO_ID", "HAKGUDO_NM", "SD_CD", "BASE_DT", "EDU_NM")
 
 _LINK_COLUMNS = ("학구ID", "학교ID", "학교명", "학교급구분")
 _LOCATION_COLUMNS = ("학교ID", "학교명", "학교급구분", "위도", "경도")
@@ -100,6 +143,10 @@ class ZonePolygon:
     sd_cd: str                   # 시도코드
     base_dt: str                 # BASE_DT — '2026-03-20' → school_district.as_of
     wkb: bytes
+    edu_office: str | None = None    # EDU_NM — '서울특별시강남서초교육지원청'
+    #: HAKGUDO_GB 원값('0'/'1'). **뜻이 문서화돼 있지 않아 해석하지도, 적재하지도 않는다.**
+    #: 파싱 결과를 확인·검증할 때(원천 대조) 쓰려고 들고만 있는다.
+    zone_gb: str | None = None
 
 
 @dataclass(frozen=True)
@@ -152,6 +199,44 @@ class SchoolDistrictRecord:
         return self.wkb.hex()
 
 
+@dataclass(frozen=True)
+class ZoneMember:
+    """학교군에 속한 학교 1곳. `school_district_member` 한 행 + 그 학교의 `poi` 한 건."""
+
+    school_source_ref: str       # 'kesi:{학교ID}' — poi 자연키
+    school_id: str
+    school_name: str
+    lat: float
+    lon: float
+    attrs: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class SchoolZoneRecord:
+    """`school_district` 한 행 = **구역 하나**. 후보 학교는 `members` 로 딸린다.
+
+    초등(`SchoolDistrictRecord`)과 형태가 다른 이유는 편의가 아니라 **의미**다.
+    학교군은 '학교마다 구역 하나'가 아니라 '구역 하나에 학교 여럿'이고,
+    school_poi_id(단수)에는 그 사실을 적을 자리가 없다(migration 013).
+    """
+
+    source_ref: str              # 'kesi:{학구ID}' — 학구ID 단독이 키다(구역이 1행이므로)
+    zone_id: str
+    zone_name: str
+    level: str                   # 중학교 | 고등학교
+    zone_kind: str               # 학교군
+    as_of: str                   # BASE_DT
+    wkb: bytes
+    members: tuple[ZoneMember, ...] = ()
+    #: 표시용 교육지원청(EDU_NM). school_district 에 컬럼이 없어 **적재하지 않는다** —
+    #: 같은 값이 각 학교 poi.attrs['office'] 로 들어간다(연계정보 CSV 교육지원청명).
+    edu_office: str | None = None
+
+    @property
+    def wkb_hex(self) -> str:
+        return self.wkb.hex()
+
+
 def district_source_ref(zone_id: str, school_id: str) -> str:
     """school_district 자연키.
 
@@ -164,6 +249,17 @@ def district_source_ref(zone_id: str, school_id: str) -> str:
 def school_source_ref(school_id: str) -> str:
     """poi(category=school) 자연키. NEIS 경로('neis:...')와 접두사로 구분된다."""
     return f"kesi:{school_id}"
+
+
+def zone_source_ref(zone_id: str) -> str:
+    """학교군(구역 1행) 자연키.
+
+    초등의 `district_source_ref` 와 **모양이 다르다**('kesi:Z…' vs 'kesi:Z…/B…').
+    섞일 수 없는 이유가 둘 있다: ① 학구ID 번호대가 급별로 다르고(초 Z0001…,
+    중 Z0002…, 고 Z0003…) ② 초등은 슬래시 뒤에 학교ID 가 붙는다.
+    그래도 (source, source_ref) 유니크(012)가 최종 방어선이다.
+    """
+    return f"kesi:{zone_id}"
 
 
 # ---------------------------------------------------------------------------
@@ -340,6 +436,8 @@ def parse_zone_shapefile(
             sd_cd=row["SD_CD"].strip(),
             base_dt=row["BASE_DT"].strip(),
             wkb=wkb,
+            edu_office=row["EDU_NM"].strip() or None,
+            zone_gb=(row.get("HAKGUDO_GB") or "").strip() or None,
         ))
     return zones
 
@@ -396,6 +494,7 @@ def merge_zone_parts(
             zone_id=zone_id, zone_name=first.zone_name, sd_cd=first.sd_cd,
             base_dt=first.base_dt,
             wkb=merge_wkb_multipolygons([p.wkb for p in parts]),
+            edu_office=first.edu_office, zone_gb=first.zone_gb,
         ))
     return merged, ambiguous
 
@@ -490,6 +589,10 @@ class BuildReport:
     wrong_level: int = 0
     #: 학구ID 하나가 서로 다른 구역 둘에 쓰인 경우(원천 결함). 버린 학구ID들.
     ambiguous_zones: list[str] = field(default_factory=list)
+    #: 연계는 있는데 **후보 학교의 좌표가 하나도 없어** 버린 구역(학교군 경로).
+    zones_without_member: list[str] = field(default_factory=list)
+    #: 적재될 (구역,학교) 연결 수 = school_district_member 행 수(학교군 경로).
+    members: int = 0
 
 
 def build_records(
@@ -553,10 +656,104 @@ def build_records(
                     # 학구도 기준연도. `school_district.as_of` 가 정본이지만 003 이전
                     # 적재분 호환을 위해 리포지토리가 attrs 도 본다(_fetch_school).
                     "district_as_of": zone.base_dt,
+                    # 원천 데이터셋 제목에서 온 구역 종류. 초등은 '통학구역'.
+                    "zone_kind": ZONE_KIND[level],
                     # ⚠️ achievement_pct 는 **넣지 않는다.** 초등학교는 국가수준
                     #    학업성취도 평가 대상이 아니라 출처 있는 수치가 존재하지 않는다.
                     #    출처·기준연도 없는 수치는 쓰지 않는다(analysis.py 원칙 5).
                 },
             ))
     report.records = len(records)
+    return records, report
+
+
+def build_zone_records(
+    zones: Sequence[ZonePolygon],
+    links: Sequence[SchoolLink],
+    locations: dict[str, SchoolLocation],
+    *,
+    level: str,
+) -> tuple[list[SchoolZoneRecord], BuildReport]:
+    """학교군 폴리곤 × 연계 × 좌표 → **구역 1행 + 후보 학교 N** 레코드 (중·고 전용).
+
+    `build_records`(초등)와 갈라진 지점은 딱 하나다: 초등은 학교마다 행을 만들고
+    여기서는 **구역마다** 행을 만든다. 그 차이가 곧 두 자료의 의미 차이다.
+
+    좌표 없는 학교는 후보에서 뺀다(거리 계산이 NULL 이 되면 '거리 미상' 중립점이
+    붙어 없는 근거로 점수가 만들어진다 — build_records 와 같은 이유).
+    후보가 하나도 안 남은 구역은 **구역째 버린다**: 지오메트리만 남으면
+    "학교군 안에 있는데 학교는 하나도 없다"는 판정이 나가게 된다.
+    """
+    if level == ELEMENTARY:
+        # 초등을 이 경로로 넣으면 3,246행짜리 통학구역이 2,656개 '학교군'으로 바뀐다.
+        # 조용히 통과시키지 않는다.
+        raise ValueError("초등학교는 build_records() 로 적재한다 "
+                         "(통학구역은 1행=1(구역,학교) 모델이다)")
+
+    zones, ambiguous = merge_zone_parts(zones)
+
+    by_zone: dict[str, list[SchoolLink]] = {}
+    report = BuildReport(zones=len(zones), ambiguous_zones=ambiguous)
+    for link in links:
+        if link.level != level:
+            report.wrong_level += 1
+            continue
+        by_zone.setdefault(link.zone_id, []).append(link)
+
+    records: list[SchoolZoneRecord] = []
+    emitted: set[str] = set()
+    for zone in zones:
+        matched = by_zone.get(zone.zone_id)
+        if not matched:
+            report.zones_without_link.append(zone.zone_id)
+            continue
+
+        members: list[ZoneMember] = []
+        seen: set[str] = set()
+        for link in matched:
+            if link.school_id in seen:
+                continue
+            location = locations.get(link.school_id)
+            if location is None:
+                report.schools_without_location.append(link.school_id)
+                continue
+            seen.add(link.school_id)
+            members.append(ZoneMember(
+                school_source_ref=school_source_ref(link.school_id),
+                school_id=link.school_id,
+                school_name=link.school_name or location.name,
+                lat=location.lat, lon=location.lon,
+                attrs={
+                    "school_id": link.school_id,
+                    "level": link.level,
+                    "office": link.office,
+                    "district_as_of": zone.base_dt,
+                    # ⚠️ zone_id·zone_name 은 **학교 attrs 에 넣지 않는다.** 학교 하나가
+                    #    여러 학교군에 속할 수 있어(중·고에서 흔하다) 그중 하나만 적으면
+                    #    나머지가 조용히 틀린다. 구역 정보는 school_district 행에 있다.
+                },
+            ))
+
+        if not members:
+            report.zones_without_member.append(zone.zone_id)
+            continue
+
+        source_ref = zone_source_ref(zone.zone_id)
+        if source_ref in emitted:
+            continue
+        emitted.add(source_ref)
+        records.append(SchoolZoneRecord(
+            source_ref=source_ref,
+            zone_id=zone.zone_id,
+            zone_name=zone.zone_name,
+            level=level,
+            zone_kind=ZONE_KIND[level],
+            as_of=zone.base_dt,
+            wkb=zone.wkb,
+            members=tuple(members),
+            edu_office=zone.edu_office,
+        ))
+
+    report.records = len(records)
+    report.members = sum(len(r.members) for r in records)
     return records, report

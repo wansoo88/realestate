@@ -67,6 +67,14 @@
   font-size: var(--fs-footnote);
 }
 
+/* 필터로 전부 가려졌을 때 — "추천이 없다"와 구분되어야 한다 */
+.rec__filtered {
+  margin: var(--sp-3) 0;
+  font-size: var(--fs-footnote);
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
 .rec__empty {
   padding: var(--sp-4) 0;
 }
@@ -93,7 +101,7 @@
   padding: 0 var(--sp-3);
   border-radius: var(--r-btn);
   background: var(--accent-weak);
-  color: var(--accent);
+  color: var(--accent-text);
   font-size: var(--fs-footnote);
   font-weight: 600;
 }

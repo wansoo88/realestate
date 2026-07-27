@@ -115,7 +115,7 @@
 }
 /* 포커스는 필드가 아니라 행 전체에 은은하게(그룹 안에서 위치를 알려준다) */
 .auth__row:focus-within .auth__label {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .auth__pw {
@@ -134,7 +134,7 @@
   min-width: 44px;
   height: 44px;
   padding: 0 var(--sp-2);
-  color: var(--accent);
+  color: var(--accent-text);
   font-size: var(--fs-footnote);
   border-radius: var(--r-btn);
 }
@@ -168,7 +168,7 @@
 }
 
 .auth__rule--ok .auth__rule-mark {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 /* 에러 — 필드 아래 작은 빨강 텍스트 */
@@ -208,7 +208,7 @@
 /* 보조 동작 — 텍스트 버튼 */
 .auth__switch {
   min-height: 44px;
-  color: var(--accent);
+  color: var(--accent-text);
   font-size: var(--fs-footnote);
 }
 

@@ -51,7 +51,7 @@
   padding: 0 var(--sp-3);
   border-radius: var(--r-pill);
   background: var(--accent-weak);
-  color: var(--accent);
+  color: var(--accent-text);
   font-size: var(--fs-caption);
   font-weight: 600;
 }

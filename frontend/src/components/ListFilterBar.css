@@ -1,0 +1,192 @@
+/* 목록 필터 줄 — 목록 바로 위. 조작은 크게, 안내는 조용하게. */
+
+.lfb {
+  margin: 0 0 var(--sp-3);
+  padding-bottom: var(--sp-2);
+  border-bottom: 0.5px solid var(--hairline);
+}
+
+.lfb__top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+
+/* 예산 내 토글 — 지금 켜졌는지가 한눈에 보여야 한다(트랙+손잡이 + 글자 굵기) */
+.lfb__switch {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: var(--touch-min);
+  padding: 0 var(--sp-2) 0 0;
+  font-size: var(--fs-footnote);
+  color: var(--text-secondary);
+}
+
+.lfb__switch--on {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.lfb__switch:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.lfb__track {
+  display: inline-block;
+  position: relative;
+  width: 42px;
+  height: 25px;
+  border-radius: var(--r-pill);
+  background: var(--badge-bg);
+  border: 0.5px solid var(--hairline-strong);
+  transition: background 0.2s var(--ease-spring);
+}
+
+/* OFF 상태 손잡이는 **흰 알약이 흰 트랙 위에** 놓인다(채움끼리 1.15:1).
+   그림자 한 겹(0.14 알파)만으로는 WCAG 1.4.11(비텍스트 3:1)을 못 넘어서,
+   경계선을 실제로 그린다 — 링 vs 트랙 채움 4.60:1(라이트) / 3.91:1(다크).
+   색은 --text-estimated 를 쓴다: "아직 적용 안 된 조건"이라는 뜻이 색에도 남는다.
+   box-sizing: border-box 라 링을 넣어도 19px 크기와 위치는 그대로다(레이아웃 흔들림 없음). */
+.lfb__thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 19px;
+  height: 19px;
+  border-radius: 50%;
+  background: var(--bg-elev);
+  border: 1px solid var(--text-estimated);
+  box-shadow: var(--shadow-pill);
+  transition: transform 0.2s var(--ease-spring);
+}
+
+.lfb__switch--on .lfb__track {
+  background: var(--accent);
+  border-color: transparent;
+}
+
+/* ON 이면 파란 트랙과 흰 손잡이가 이미 4.70:1 이라 링이 필요 없다(오히려 탁해진다). */
+.lfb__switch--on .lfb__thumb {
+  border-color: transparent;
+}
+
+/* 색만으로 구분되지 않게 손잡이 위치(형태)가 함께 바뀐다 */
+.lfb__switch--on .lfb__thumb {
+  transform: translateX(17px);
+}
+
+.lfb__shown {
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.lfb__shown-unit {
+  margin-left: 1px;
+}
+
+.lfb__shown-total {
+  color: var(--text-estimated);
+}
+
+.lfb__note {
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+/* 모름에 대한 안내는 더 조용하게(모르는 것을 강조하면 아는 것처럼 보인다) */
+.lfb__note--unknown {
+  color: var(--text-estimated);
+}
+
+.lfb__mode {
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+}
+
+.lfb__mode strong {
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* ── 칩 줄 ────────────────────────────────────────────────────────────────
+   모바일에서 칩이 늘어나면 줄바꿈 대신 가로 스크롤 — 한 손 도달 범위 안에서
+   한 줄로 훑을 수 있게 한다(줄이 늘어나면 목록이 아래로 밀려 지도가 좁아진다). */
+.lfb__chips {
+  display: flex;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+  padding: 2px 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.lfb__chips::-webkit-scrollbar {
+  display: none;
+}
+
+.lfb__chip {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 34px;
+  padding: 0 var(--sp-3);
+  border-radius: var(--r-pill);
+  border: 0.5px solid var(--hairline);
+  background: var(--bg-elev);
+  color: var(--text-secondary);
+  font-size: var(--fs-caption);
+  white-space: nowrap;
+}
+
+.lfb__chip-icon {
+  font-size: 12px;
+  line-height: 1;
+}
+
+.lfb__chip-count {
+  color: var(--text-estimated);
+  font-size: 12px;
+}
+
+/* 선택 — 채움 + 굵기. 색만으로 구분되지 않도록 테두리와 굵기도 함께 바뀐다(A3). */
+.lfb__chip--on {
+  background: var(--accent-weak);
+  border-color: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+.lfb__chip--on .lfb__chip-count {
+  color: inherit;
+}
+
+/* ⚠️ 삭제됨: `.lfb__chip--*  .lfb__chip-icon { color: var(--tag-*-fg) }` 3줄.
+   .lfb__chip-icon 의 내용은 이모지(🏢🚇🔨)이고 **이모지는 컬러 폰트라 color 를 받지 않는다** —
+   아무 효과도 없는 규칙이었다. 오히려 먹혔다면 파란 채움(.lfb__chip--on) 안에
+   보라·청록 글자가 들어가 선택 상태가 흐려졌을 것이다. 태그 색은 배지(TagBadges)에서만 쓴다. */
+
+/* 0건 — 숨기지 않는다. 눌러도 소용없다는 걸 형태로 말한다(점선 + 흐림). */
+.lfb__chip:disabled {
+  border-style: dashed;
+  color: var(--text-estimated);
+  background: transparent;
+  cursor: default;
+}
+
+.lfb__reveal {
+  min-height: 34px;
+  margin-top: var(--sp-1);
+  padding: 0 var(--sp-2);
+  border-radius: var(--r-btn);
+  color: var(--accent-text);
+  font-size: var(--fs-caption);
+  text-align: left;
+}

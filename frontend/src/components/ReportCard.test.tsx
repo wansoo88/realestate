@@ -7,6 +7,7 @@
  * DOM 을 봐야 안다.
  */
 import { cleanup, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it } from "vitest";
 import type { RecommendationItem } from "../api/client";
 import { ReportCard } from "./ReportCard";
@@ -188,22 +189,37 @@ const WEIGHTED: RecommendationItem = {
   ...TRADE,
   total_score: 62.8,
   score_basis: "user_weighted",
-  score_coverage_pct: 25,
+  score_coverage_pct: 52,
   score_notes: [
     "입지 가중치 30%가 반영되지 않았습니다 — 학구도 데이터 미확보",
-    "리스크 축은 매물 신뢰도까지만 봅니다 — 권리관계·근저당 분석은 2차 기능입니다.",
+    "리스크 축은 매물 신뢰도까지만 봅니다 — 권리관계·근저당 분석(risk-auditor)은 2차 기능입니다.",
   ],
   score_axes: [
     {
       axis: "value",
       label: "가치(시세)",
       agent_ids: ["valuation-trader"],
-      signal: "12개월 거래회전율(환금성)",
+      // ⚠️ 서버 원문에는 내부 식별자가 섞여 있다 — 화면에 그대로 나가면 안 된다
+      signal: "12개월 거래회전율 기반 환금성(liquidity.turnover_12m_pct)",
       coverage: "partial",
-      coverage_gap: "동별 가격 편차는 후보 점수로 환산하지 않습니다.",
-      weight: 0.25,
-      applied_weight: 1,
+      coverage_gap:
+        "동별 가격 편차(dong_valuation)는 후보 점수로 환산하지 않고 참고 정보로만 제공합니다.",
+      weight: 0.35,
+      applied_weight: 0.67,
       score: 62.8,
+      status: "applied",
+      missing: [],
+    },
+    {
+      axis: "price",
+      label: "가격",
+      agent_ids: ["valuation-trader"],
+      signal: "호가 − 적정가 밴드 중위 갭(ask_gap_pct)",
+      coverage: "full",
+      coverage_gap: null,
+      weight: 0.17,
+      applied_weight: 0.33,
+      score: 40,
       status: "applied",
       missing: [],
     },
@@ -214,7 +230,7 @@ const WEIGHTED: RecommendationItem = {
       signal: "학군·역세권·생활 인프라",
       coverage: "full",
       coverage_gap: null,
-      weight: 0.3,
+      weight: 0.31,
       applied_weight: null,
       score: null,
       status: "no_signal",
@@ -226,7 +242,8 @@ const WEIGHTED: RecommendationItem = {
       agent_ids: ["listing-researcher"],
       signal: "매물 신뢰도",
       coverage: "partial",
-      coverage_gap: "권리관계·근저당·재건축 추가분담금 분석은 들어가지 않습니다.",
+      coverage_gap:
+        "권리관계·근저당·재건축 추가분담금·깡통전세 분석(risk-auditor)은 2차 기능이라 들어가지 않습니다.",
       weight: 0,
       applied_weight: null,
       score: null,
@@ -236,48 +253,109 @@ const WEIGHTED: RecommendationItem = {
   ],
 };
 
-describe("내 조건 반영 (가중치)", () => {
+/**
+ * 평가 반영률 — 사용자가 준 가중치가 실제로 얼마나 쓰였는가.
+ *
+ * ⛔ 이 한 줄만은 **절대 접지 않는다.** 가격 가중치를 31% 로 준 사람이 그게 반영되지
+ *    않았다는 걸 모르면, 지금 순위를 "내가 설정한 대로 나온 순위"로 읽는다.
+ */
+describe("평가 반영률 — 접히지 않는 헤드라인", () => {
   it("부분 반영이면 점수 옆에 그 사실을 붙인다(계약: 100% 미만 표기 필수)", () => {
     render(<ReportCard item={WEIGHTED} />);
 
-    expect(screen.getByText("62.8")).toBeTruthy();
-    expect(screen.getByText("내 조건 25%만 반영")).toBeTruthy();
+    expect(screen.getByText("62.8점")).toBeTruthy();
+    expect(screen.getByText("내 조건 52%만 반영")).toBeTruthy();
   });
 
-  it("100% 반영이면 군더더기를 붙이지 않는다", () => {
+  it("반영률 문장은 details 안에 들어가지 않는다(접으면 오해가 된다)", () => {
+    render(<ReportCard item={WEIGHTED} />);
+
+    const head = screen.getByText(/설정하신 가중치의 52%만 반영됐습니다/);
+    // 이 문장이 접기 안으로 들어가는 순간 계약이 깨진다 — 조상에 details 가 있으면 실패
+    expect(head.closest("details")).toBeNull();
+  });
+
+  it("왜 그런지 한 줄로 함께 말한다 — 축 이름 기반(서버 문장을 잘라 붙이지 않는다)", () => {
+    render(<ReportCard item={WEIGHTED} />);
+    const why = screen.getByText(/입지 항목을 판단할 근거가 없어서입니다/);
+    expect(why.closest("details")).toBeNull();
+  });
+
+  it("100% 반영이면 경고를 띄우지 않는다(항상 뜨는 경고는 아무도 안 읽는다)", () => {
     render(<ReportCard item={{ ...WEIGHTED, score_coverage_pct: 100 }} />);
+    expect(screen.queryByText(/만 반영됐습니다/)).toBeNull();
     expect(screen.queryByText(/만 반영/)).toBeNull();
+    // 그래도 상세는 남는다 — 궁금하면 열어 볼 수 있어야 한다
+    expect(screen.getByText("평가 상세")).toBeTruthy();
   });
 
-  it("후보별 고지(score_notes)를 결과 전체 notes 와 **양쪽 다** 보여준다", () => {
-    render(<ReportCard item={WEIGHTED} />);
-
-    const notes = screen.getByRole("list", { name: "점수에 반영되지 않은 항목" });
-    expect(within(notes).getByText(/입지 가중치 30%가 반영되지 않았습니다/)).toBeTruthy();
+  it("절반도 못 미치면 톤이 한 단계 올라간다(문장도 함께 바뀐다 — 색만으로 구분 금지)", () => {
+    const { container } = render(<ReportCard item={{ ...WEIGHTED, score_coverage_pct: 25 }} />);
+    expect(screen.getByText(/25%만 반영됐습니다 — 절반도 반영되지 않았습니다/)).toBeTruthy();
+    expect(container.querySelector(".cov--low")).toBeTruthy();
   });
 
-  it("반영된 축 · 빠진 축 · 내가 0 준 축을 **전부** 보여준다", () => {
-    render(<ReportCard item={WEIGHTED} />);
-    const section = screen.getByText("내 조건 반영").closest("details");
+  it("반영률을 서버가 안 주면 단정하지 않는다(경고도 없다)", () => {
+    render(<ReportCard item={{ ...WEIGHTED, score_coverage_pct: undefined }} />);
+    expect(screen.queryByText(/만 반영됐습니다/)).toBeNull();
+    expect(screen.getByText("평가 상세")).toBeTruthy();
+  });
+});
 
-    expect(section?.textContent).toContain("가치(시세)");
-    expect(section?.textContent).toContain("입지");
-    expect(section?.textContent).toContain("리스크");
-    // 빠진 축은 사유와 함께
-    expect(section?.textContent).toContain("학구도 데이터 미확보");
-    // 사용자가 0 을 준 축은 "빠졌다"가 아니라 "안 봤다"로 말한다
-    expect(section?.textContent).toContain("0% 로 둔 항목");
+describe("평가 상세 — 접기/펼치기", () => {
+  it("기본은 접혀 있고, 눌러서 펼칠 수 있다", async () => {
+    const user = userEvent.setup();
+    render(<ReportCard item={WEIGHTED} />);
+
+    const summary = screen.getByText("평가 상세");
+    const details = summary.closest("details") as HTMLDetailsElement;
+    expect(details.open).toBe(false);
+
+    await user.click(summary);
+    expect(details.open).toBe(true);
   });
 
-  it("재정규화로 실효 비중이 달라지면 그 값을 함께 적는다", () => {
+  it("반영됨 · 미반영을 비중과 함께 나눠 보여준다", () => {
     render(<ReportCard item={WEIGHTED} />);
-    expect(screen.getByText(/실제 100%/)).toBeTruthy();
+    const details = screen.getByText("평가 상세").closest("details");
+
+    expect(details?.textContent).toContain("반영됨");
+    expect(details?.textContent).toContain("미반영");
+    expect(details?.textContent).toContain("가치(시세)");
+    expect(details?.textContent).toContain("35%");
+    expect(details?.textContent).toContain("입지");
+    expect(details?.textContent).toContain("31%");
+    // 합계까지 적어야 "52%"가 어디서 나온 숫자인지 검증할 수 있다
+    expect(details?.textContent).toContain("합계");
   });
 
-  it("partial 축의 한계는 **반영됐어도** 적는다", () => {
+  it("왜 못 봤는지 사유를 축별로 적는다", () => {
     render(<ReportCard item={WEIGHTED} />);
-    // 가치 축은 반영됐지만 동별 편차는 안 본다 — 그 경계를 말해야 한다
-    expect(screen.getByText(/동별 가격 편차는 후보 점수로 환산하지 않습니다/)).toBeTruthy();
+    const details = screen.getByText("평가 상세").closest("details");
+    expect(details?.textContent).toContain("왜 못 봤나요");
+    expect(details?.textContent).toContain("학구도 데이터 미확보");
+  });
+
+  it("점수를 어떻게 냈는지(재정규화) 평이한 말로 적는다", () => {
+    render(<ReportCard item={WEIGHTED} />);
+    expect(screen.getByText(/다시 100% 기준을 잡아 계산했습니다/)).toBeTruthy();
+  });
+
+  it("반영됐어도 남는 한계는 '아직 못 보는 것'으로 적는다", () => {
+    render(<ReportCard item={WEIGHTED} />);
+    const details = screen.getByText("평가 상세").closest("details");
+    expect(details?.textContent).toContain("아직 못 보는 것");
+    expect(details?.textContent).toContain("동별 가격 편차는 후보 점수로 환산하지 않고");
+  });
+
+  it("내가 0% 로 둔 축은 '빠졌다'가 아니라 '안 봤다'로 말한다", () => {
+    render(<ReportCard item={WEIGHTED} />);
+    expect(screen.getByText(/내가 0% 로 둔 항목/)).toBeTruthy();
+    expect(screen.getByText(/리스크 — 처음부터 점수에 넣지 않았습니다/)).toBeTruthy();
+    // 미반영(근거 없음)과 섞이면 안 된다
+    const details = screen.getByText("평가 상세").closest("details");
+    const missing = within(details as HTMLElement).getByText("왜 못 봤나요").parentElement;
+    expect(missing?.textContent).not.toContain("리스크");
   });
 
   it("agent_scores 폴백은 '내 가중치 점수'라고 말하지 않는다", () => {
@@ -285,8 +363,35 @@ describe("내 조건 반영 (가중치)", () => {
     expect(screen.getByText(/전문가 신뢰도 평균으로 매겨졌습니다/)).toBeTruthy();
   });
 
-  it("서버가 축 정보를 안 주면 섹션을 만들지 않는다(없는 걸 지어내지 않는다)", () => {
+  it("서버가 축 정보를 안 주면 블록 자체를 만들지 않는다(없는 걸 지어내지 않는다)", () => {
     render(<ReportCard item={TRADE} />);
-    expect(screen.queryByText("내 조건 반영")).toBeNull();
+    expect(screen.queryByText("평가 상세")).toBeNull();
+  });
+
+  it("축 정보가 없고 고지 문구만 오면 그 문구를 그대로 남긴다(구버전 폴백)", () => {
+    render(
+      <ReportCard
+        item={{ ...TRADE, score_axes: null, score_notes: ["입지 가중치 30%가 반영되지 않았습니다"] }}
+      />,
+    );
+    const notes = screen.getByRole("list", { name: "점수에 반영되지 않은 항목" });
+    expect(within(notes).getByText(/입지 가중치 30%가 반영되지 않았습니다/)).toBeTruthy();
+  });
+});
+
+describe("내부 식별자는 화면에 나가지 않는다", () => {
+  it("liquidity.turnover_12m_pct · dong_valuation · risk-auditor 가 보이지 않는다", () => {
+    const { container } = render(<ReportCard item={WEIGHTED} />);
+    const text = container.textContent ?? "";
+    expect(text).not.toContain("liquidity.turnover_12m_pct");
+    expect(text).not.toContain("dong_valuation");
+    expect(text).not.toContain("risk-auditor");
+    expect(text).not.toContain("ask_gap_pct");
+  });
+
+  it("식별자를 지워도 문장의 뜻은 남는다", () => {
+    render(<ReportCard item={WEIGHTED} />);
+    expect(screen.getByText(/권리관계·근저당·재건축 추가분담금·깡통전세 분석은 2차 기능이라/))
+      .toBeTruthy();
   });
 });

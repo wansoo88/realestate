@@ -228,6 +228,13 @@ docker exec realestate-db psql -U realestate -d realestate -c "
 docker exec realestate-db psql -U realestate -d realestate -c "
   SELECT indexname FROM pg_indexes
    WHERE indexname='uq_school_district_source_ref';"                       # 있으면 012 적용됨
+docker exec realestate-db psql -U realestate -d realestate -c "
+  SELECT column_name FROM information_schema.columns
+   WHERE table_name='school_district' AND column_name='school_level';"     # 있으면 013 적용됨
+docker exec realestate-db psql -U realestate -d realestate -c "
+  SELECT to_regclass('public.school_district_member');"                    # 있으면 013 적용됨
+docker exec realestate-db psql -U realestate -d realestate -c "
+  SELECT to_regclass('public.redev_project');"                             # 있으면 014 적용됨
 
 # (2) 백업 먼저 (파괴적이지 않아도 습관으로)
 mkdir -p /root/realestate-backup
@@ -238,9 +245,16 @@ docker exec realestate-db pg_dump -U realestate -d realestate --schema-only \
 #     011 은 입지(F3) 수집의 멱등성(자연키)을 만든다 — 없으면 poi 재수집이 행을 쌓는다.
 #     012 는 학구도(school_district)에 같은 자연키를 준다 — 학구도는 매년 3·9월
 #     재배포되므로 없으면 재적재가 행을 쌓고 '배정 초등학교'가 어느 판인지 알 수 없어진다.
+#     013 은 school_district.school_level 컬럼과 school_district_member 테이블을 만든다.
+#     ⚠️ 코드(`postgis.py` `_SCHOOL_SQL`)가 이 둘을 **하드 참조**한다 — 빠뜨리면
+#        UndefinedColumn 으로 **모든 입지 조회가 죽는다**(중·고 학구도 포함).
+#     014 는 정비사업(재건축) 구역·매칭 테이블을 만든다. 없으면 추천의 '재건축' 축이
+#     전 후보에서 '미확보'로 나가고, 001 의 추가분담금 칸(사용 금지)도 잠기지 않는다.
 for f in backend/migrations/009_user_approval.sql backend/migrations/010_job_result_meta.sql \
          backend/migrations/011_poi_natural_key.sql \
-         backend/migrations/012_school_district_natural_key.sql; do
+         backend/migrations/012_school_district_natural_key.sql \
+         backend/migrations/013_school_level_and_zone_member.sql \
+         backend/migrations/014_redevelopment_project.sql; do
   echo "--- $f ---"
   docker exec -i realestate-db psql -U realestate -d realestate -v ON_ERROR_STOP=1 < "$f"
 done
@@ -262,6 +276,29 @@ curl -fsS http://127.0.0.1:8013/api/v1/health            # {"status":"ok","role"
 ```bash
 docker compose -f docker-compose.deploy.yml logs api | tail -50
 ```
+
+**(확인) 서버측 쿼리 상한이 실제로 붙었는가 — SR24-4**
+
+`statement_timeout` 은 코드(`app/repositories/postgis.py:create_db_engine`)가 커넥션마다
+세션 설정으로 붙인다(기본 10초, `DB_STATEMENT_TIMEOUT_MS` 로 조정). **DB 서버 전역 설정이
+아니므로 `SHOW`를 psql 로 찍으면 0 이 나온다** — 반드시 API 컨테이너의 커넥션에서 확인한다.
+
+```bash
+docker exec realestate-api python -c "
+from sqlalchemy import text
+from app.core.config import get_settings
+from app.repositories.postgis import create_db_engine
+with create_db_engine(get_settings()).connect() as c:
+    print('statement_timeout =', c.execute(text('SHOW statement_timeout')).scalar())"
+# 기대: statement_timeout = 10s      (0 이면 상한이 없는 것이다 — 배포를 멈추고 원인을 찾는다)
+```
+
+> 왜 필요한가: 추천의 범위 통계 쿼리(`candidate_scope_stats`)가 `complex` 전역을 훑고,
+> 방아쇠는 공격이 아니라 평범한 사용이다(평수 하한 1㎡ + 지역 '11' = 서울 전역).
+> db 컨테이너는 `mem_limit`/`memswap_limit` 이 192m 라 스왑이 없다.
+> **클라이언트 타임아웃은 서버 쿼리를 멈추지 못한다** — 연결이 끊겨도 쿼리는 계속 돈다.
+> 상한에 걸리면 추천은 죽지 않고, 범위 통계 고지만 "시간 내에 끝나지 않아 숫자를
+> 생략했습니다"로 바뀐다(조용히 사라지지 않는다).
 
 ### 5-5. 호스트 nginx + TLS — **반드시 이 순서로**
 

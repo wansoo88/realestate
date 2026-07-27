@@ -642,6 +642,136 @@ def test_후보조회는_호가있는_단지를_최우선으로_준다(repo, eng
     assert [c.id for c in got] == [listed, traded]
 
 
+# --- 내 조건(평수·연식·세대수) — 조회 단계에서 실제로 좁히는가 (2026-07-27) ------
+#
+# ⚠️ 인메모리 리포지토리로는 **이 SQL 이 옳은지 알 수 없다.** 조건 절을 통째로 지워도
+#    인메모리 테스트는 전부 초록불이다(러너가 후보 단위로 한 번 더 거르기 때문).
+#    그래서 여기 실DB 테스트가 있어야 "쿼리가 조건을 무시하는" 회귀를 잡는다.
+
+def _seed_trade_area(engine, complex_id: int, *, area: float, n: int = 6,
+                     price_krw: int = 800_000_000, days_ago: int = 15) -> None:
+    with engine.begin() as conn:
+        for i in range(n):
+            conn.execute(text("""
+                INSERT INTO trade (complex_id, contract_date, price_krw, area_m2, source)
+                VALUES (:cid, current_date - CAST(:days AS int), :price,
+                        CAST(:area AS numeric), 'molit')
+            """), {"cid": complex_id, "days": days_ago * i + 1,
+                   "price": price_krw + i, "area": area})
+
+
+def test_후보조회가_평수_조건으로_단지를_좁힌다(repo, engine):
+    """★ 사용자 제보 회귀: 지도는 평수를 거르는데 추천은 안 걸렀다."""
+    small = _seed_complex(engine, name="소형단지", lon=127.05, lat=37.50)
+    big = _seed_complex(engine, name="대형단지", lon=127.06, lat=37.51)
+    _seed_trade_area(engine, small, area=59.9)
+    _seed_trade_area(engine, big, area=84.97)
+
+    wide = repo.recommendation_candidates(region_codes=["11680"])
+    assert {c.id for c in wide} == {small, big}, "기준선이 성립해야 대조가 된다"
+
+    narrow = repo.recommendation_candidates(region_codes=["11680"],
+                                            area_min_m2=55, area_max_m2=62)
+    assert [c.id for c in narrow] == [small], "평수 조건이 쿼리에 반영되지 않았다"
+
+    # 반대 방향도 본다(그냥 적게 나오는 게 아니라 **맞는 것만** 남아야 한다).
+    other = repo.recommendation_candidates(region_codes=["11680"],
+                                           area_min_m2=80, area_max_m2=90)
+    assert [c.id for c in other] == [big]
+
+
+def test_평수_조건은_실거래_말고_타입_호가로도_판정한다(repo, engine):
+    """후보는 `unit_type` 만으로 서지 않는다 — 근거 셋 중 하나라도 맞으면 통과다.
+
+    `unit_type` 만 보면 타입 정보가 아직 없는 단지가 통째로 사라진다(유실).
+    """
+    by_unit = _seed_complex(engine, name="타입만있는단지", lon=127.05, lat=37.50)
+    by_listing = _seed_complex(engine, name="호가만맞는단지", lon=127.06, lat=37.51)
+    # 두 단지 모두 실거래는 84㎡ 뿐이다(가격 근거를 위해 필요).
+    _seed_trade_area(engine, by_unit, area=84.97)
+    _seed_trade_area(engine, by_listing, area=84.97)
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO unit_type (complex_id, area_m2, type_name)
+            VALUES (:cid, 59.9, '59A')
+        """), {"cid": by_unit})
+        conn.execute(text("""
+            INSERT INTO listing (complex_id, ask_price_krw, area_m2, status, source)
+            VALUES (:cid, 900000000, 59.5, 'active', 'portal')
+        """), {"cid": by_listing})
+
+    got = repo.recommendation_candidates(region_codes=["11680"],
+                                         area_min_m2=55, area_max_m2=62)
+    assert {c.id for c in got} == {by_unit, by_listing}
+
+
+def test_평수_판정은_36개월_창_안의_실거래만_본다(repo, engine):
+    """조회 창이 후보 조립 창(36개월)보다 좁으면 세울 수 있었던 후보가 조용히 사라진다."""
+    recent = _seed_complex(engine, name="최근거래단지", lon=127.05, lat=37.50)
+    ancient = _seed_complex(engine, name="아주오래된단지", lon=127.06, lat=37.51)
+    _seed_trade_area(engine, recent, area=59.9, days_ago=15)
+    # 40개월 전 — 밴드도 쓰지 않는 창이라 후보로 서지 못한다.
+    _seed_trade_area(engine, ancient, area=59.9, days_ago=5, n=6)
+    with engine.begin() as conn:
+        conn.execute(text("""
+            UPDATE trade SET contract_date = current_date - 1300
+            WHERE complex_id = :cid
+        """), {"cid": ancient})
+
+    got = repo.recommendation_candidates(region_codes=["11680"],
+                                         area_min_m2=55, area_max_m2=62)
+    assert [c.id for c in got] == [recent]
+
+
+def test_연식_세대수_조건이_쿼리에_반영되고_미상은_통과하지_않는다(repo, engine):
+    """미상(NULL)을 통과시키면 "조건에 안 맞는 게 나온다"가 그대로 재현된다."""
+    new = _seed_complex(engine, name="신축", lon=127.05, lat=37.50, built_year=2015)
+    old = _seed_complex(engine, name="구축", lon=127.06, lat=37.51, built_year=1990)
+    unknown = _seed_complex(engine, name="연식미상", lon=127.07, lat=37.52)
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE complex SET built_year = NULL WHERE id = :cid"),
+                     {"cid": unknown})
+        conn.execute(text(
+            "UPDATE complex SET total_households = NULL WHERE id = :cid"),
+            {"cid": old})
+    for cid in (new, old, unknown):
+        _seed_trade_area(engine, cid, area=84.97)
+
+    assert {c.id for c in repo.recommendation_candidates(region_codes=["11680"])} \
+        == {new, old, unknown}
+    assert [c.id for c in repo.recommendation_candidates(
+        region_codes=["11680"], built_after=2000)] == [new]
+    # 세대수 미상(old)은 통과하지 않는다. 신축·연식미상은 500세대라 통과한다.
+    assert {c.id for c in repo.recommendation_candidates(
+        region_codes=["11680"], min_households=100)} == {new, unknown}
+
+
+def test_조건별로_몇_개가_빠졌는지_센다(repo, engine):
+    """거르는 것과 말하지 않는 것은 다르다 — 숫자가 있어야 "왜 3건뿐이냐"에 답한다."""
+    small = _seed_complex(engine, name="소형단지", lon=127.05, lat=37.50,
+                          built_year=2015)
+    big = _seed_complex(engine, name="대형단지", lon=127.06, lat=37.51,
+                        built_year=1990)
+    unknown = _seed_complex(engine, name="연식미상", lon=127.07, lat=37.52)
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE complex SET built_year = NULL WHERE id = :cid"),
+                     {"cid": unknown})
+    _seed_trade_area(engine, small, area=59.9)
+    _seed_trade_area(engine, big, area=84.97)
+    _seed_trade_area(engine, unknown, area=84.97)
+
+    stats = repo.candidate_scope_stats(region_codes=["11680"],
+                                       area_min_m2=55, area_max_m2=62,
+                                       built_after=2000)
+    assert stats["scope_total"] == 3
+    assert stats["area_dropped"] == 2            # 대형단지 · 연식미상단지
+    assert stats["built_dropped"] == 2           # 구축 + 연식미상
+    assert stats["built_unknown"] == 1           # 그 중 1개는 **모름**이라 빠졌다
+    # 조건이 없으면 아무것도 빠지지 않는다(고지도 나가지 않아야 한다).
+    empty = repo.candidate_scope_stats(region_codes=["11680"])
+    assert empty["scope_total"] == 3 and empty["area_dropped"] == 0
+
+
 def test_후보조회에_시세와_매물수가_실린다(repo, engine):
     cid = _seed_complex(engine, name="후보단지", lon=127.05, lat=37.50)
     with engine.begin() as conn:
@@ -1070,9 +1200,9 @@ def test_학구도_포함이어야_배정학교로_인정한다(repo, engine):
     with engine.begin() as conn:
         # 단지를 덮는 학구도 폴리곤
         conn.execute(text("""
-            INSERT INTO school_district (school_poi_id, geom, source)
+            INSERT INTO school_district (school_poi_id, geom, source, school_level)
             VALUES (:sid, ST_SetSRID(ST_MakeEnvelope(127.04,37.49,127.06,37.51),4326),
-                    '학교알리미')
+                    '한국교육시설안전원', '초등학교')
         """), {"sid": school})
 
     facts = repo.location_facts(cid)
@@ -1092,8 +1222,9 @@ def test_학구도_미포함과_미확보를_구분한다(repo, engine):
     school = _seed_poi(engine, category="school", name="먼초교", lon=127.05, lat=37.50)
     with engine.begin() as conn:
         conn.execute(text("""
-            INSERT INTO school_district (school_poi_id, geom, source)
-            VALUES (:sid, ST_SetSRID(ST_MakeEnvelope(127.04,37.49,127.06,37.51),4326), 'x')
+            INSERT INTO school_district (school_poi_id, geom, source, school_level)
+            VALUES (:sid, ST_SetSRID(ST_MakeEnvelope(127.04,37.49,127.06,37.51),4326),
+                    'x', '초등학교')
         """), {"sid": school})
 
     # 학구도 데이터가 아예 없는 지역
@@ -1107,15 +1238,182 @@ def test_학구도_미포함과_미확보를_구분한다(repo, engine):
     assert f_none.school.district_data_available is False
 
 
+# ---------------------------------------------------------------------------
+# 013 — 학교급 분리 · 학교군(중·고)
+#
+# 여기 있는 테스트들은 전부 **급을 섞으면 조용히 틀리는 것**을 고정한다.
+# 학구도는 리포트에 단정형으로 나가는 주장이라, 어긋나도 예외가 안 나는 게 제일 위험하다.
+# ---------------------------------------------------------------------------
+
+_ENVELOPE = "ST_SetSRID(ST_MakeEnvelope(127.04,37.49,127.06,37.51),4326)"
+
+
+def _seed_district(engine, *, school_poi_id: int | None, level: str,
+                   zone_kind: str | None = None, zone_name: str | None = None,
+                   envelope: str = _ENVELOPE) -> int:
+    with engine.begin() as conn:
+        return conn.execute(text(f"""
+            INSERT INTO school_district
+                (school_poi_id, geom, source, as_of, school_level, zone_kind, zone_name)
+            VALUES (:sid, {envelope}, 'kesi_school_zone', DATE '2026-03-20',
+                    :level, :kind, :zname)
+            RETURNING id
+        """), {"sid": school_poi_id, "level": level, "kind": zone_kind,
+               "zname": zone_name}).one().id
+
+
+def _seed_member(engine, district_id: int, school_poi_id: int) -> None:
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO school_district_member (district_id, school_poi_id)
+            VALUES (:d, :s)
+        """), {"d": district_id, "s": school_poi_id})
+
+
+def test_013_중학교_학교군이_배정_초등학교로_새지_않는다(repo, engine):
+    """★ 변이 가드 — `_SCHOOL_SQL` 의 `sd.school_level = :level` 을 빼면 깨진다.
+
+    급 필터가 없으면 **더 가까운 중학교가 '배정 초등학교'로 보고된다.**
+    (그래서 013 이전에는 중·고를 아예 적재할 수 없었다.)
+    """
+    cid = _seed_complex(engine, name="급분리단지", lon=127.05, lat=37.50)
+    elem = _seed_poi(engine, category="school", name="먼초등학교",
+                     lon=127.058, lat=37.5075)      # 멀다
+    mid = _seed_poi(engine, category="school", name="가까운중학교",
+                    lon=127.0505, lat=37.5001)      # 아주 가깝다
+    _seed_district(engine, school_poi_id=elem, level="초등학교", zone_kind="통학구역",
+                   zone_name="먼초통학구역")
+    d_mid = _seed_district(engine, school_poi_id=None, level="중학교",
+                           zone_kind="학교군", zone_name="가까운중학군")
+    _seed_member(engine, d_mid, mid)
+
+    facts = repo.location_facts(cid)
+    # 초등 자리에는 **초등만** 온다. 거리가 아무리 가까워도 중학교는 안 온다.
+    assert facts.school.name == "먼초등학교"
+    assert facts.school.level == "초등학교"
+    assert facts.middle_school is not None
+    assert facts.middle_school.name == "가까운중학교"
+    assert facts.middle_school.level == "중학교"
+    assert facts.middle_school.zone_kind == "학교군"
+
+
+def test_013_학교군은_후보_전부를_세고_최근접을_고른다(repo, engine):
+    """학교군은 구역 1행 + member N — 후보 수가 곧 '배정 단정 불가'의 근거다."""
+    cid = _seed_complex(engine, name="학교군단지", lon=127.05, lat=37.50)
+    near = _seed_poi(engine, category="school", name="가까운고", lon=127.0510, lat=37.5002)
+    mid_far = _seed_poi(engine, category="school", name="중간고", lon=127.055, lat=37.505)
+    far = _seed_poi(engine, category="school", name="먼고", lon=127.059, lat=37.5095)
+    d = _seed_district(engine, school_poi_id=None, level="고등학교",
+                       zone_kind="학교군", zone_name="강남서초학교군")
+    for poi_id in (near, mid_far, far):
+        _seed_member(engine, d, poi_id)
+
+    high = repo.location_facts(cid).high_school
+    assert high.in_district is True
+    assert high.name == "가까운고"                 # 후보 중 최근접
+    assert high.candidate_count == 3               # ★ 후보 수를 세지 않으면 '배정'이 된다
+    assert high.zone_name == "강남서초학교군"
+    assert high.zone_count == 1
+
+
+def test_013_학교급_미상_행은_어떤_급에도_잡히지_않는다(repo, engine):
+    """급을 모르는 행을 초등으로 쳐 주는 관대함이 곧 조용한 오보다."""
+    cid = _seed_complex(engine, name="급미상단지", lon=127.05, lat=37.50)
+    school = _seed_poi(engine, category="school", name="정체불명학교",
+                       lon=127.052, lat=37.502)
+    _seed_district(engine, school_poi_id=school, level=None)   # school_level NULL
+
+    facts = repo.location_facts(cid)
+    assert facts.school.in_district is False
+    assert facts.school.name is None
+    assert facts.middle_school.in_district is False
+    assert facts.high_school.in_district is False
+
+
+def test_013_미확보_판정도_급별로_따로_본다(repo, engine):
+    """초등 학구도만 있는 곳에서 '중학교 학교군도 확보됨'이 되면 안 된다."""
+    cid = _seed_complex(engine, name="초등만단지", lon=127.05, lat=37.50)
+    school = _seed_poi(engine, category="school", name="초등만초", lon=127.052, lat=37.502)
+    _seed_district(engine, school_poi_id=school, level="초등학교", zone_kind="통학구역")
+
+    facts = repo.location_facts(cid)
+    assert facts.school.district_data_available is True
+    # ★ 변이 가드 — `_DISTRICT_AVAILABLE_SQL` 의 급 필터를 빼면 여기가 True 가 된다.
+    assert facts.middle_school.district_data_available is False
+    assert facts.high_school.district_data_available is False
+
+
+def test_013_공동학구는_후보_수가_2_이상으로_나온다(repo, engine):
+    """초등도 21%가 공동학구다 — 그때 '배정'이라 단정하면 안 된다(도메인이 판단)."""
+    cid = _seed_complex(engine, name="공동학구단지", lon=127.05, lat=37.50)
+    a = _seed_poi(engine, category="school", name="가초등학교", lon=127.0505, lat=37.5002)
+    b = _seed_poi(engine, category="school", name="나초등학교", lon=127.055, lat=37.505)
+    # 공동학구는 같은 구역 지오메트리를 공유하는 **두 행**으로 적재된다(초등 모델).
+    _seed_district(engine, school_poi_id=a, level="초등학교", zone_kind="통학구역",
+                   zone_name="공동통학구역")
+    _seed_district(engine, school_poi_id=b, level="초등학교", zone_kind="통학구역",
+                   zone_name="공동통학구역")
+
+    school = repo.location_facts(cid).school
+    assert school.name == "가초등학교"        # 최근접 (기존 동작 그대로)
+    assert school.candidate_count == 2        # 그러나 후보가 2곳임을 함께 낸다
+    assert school.zone_count == 2
+
+
+def test_013_학교군_행에는_단수_배정학교를_적을_수_없다(engine):
+    """CHECK 제약 — 학교군인데 배정 학교가 하나 있는 행이 생기면 조회가 그걸 배정으로 읽는다."""
+    school = _seed_poi(engine, category="school", name="어떤중", lon=127.05, lat=37.50)
+    with pytest.raises(IntegrityError):
+        _seed_district(engine, school_poi_id=school, level="중학교", zone_kind="학교군")
+
+
+def test_013_학교급_화이트리스트(engine):
+    with pytest.raises(IntegrityError):
+        _seed_district(engine, school_poi_id=None, level="유치원", zone_kind="학교군")
+
+
+def test_013_backfill_은_poi_attrs_의_학교급에서만_채운다(engine):
+    """★ 013 의 backfill 실검증 — 마이그레이션을 **다시 돌려** 결과를 본다.
+
+    실제 운영 DB 에는 012 시절 적재분(학교급 컬럼 없음)이 3,246행 있었다.
+    그 행들의 학교급을 어디서 가져오는지가 이 마이그레이션의 핵심이고,
+    답은 '추측'이 아니라 **poi.attrs->>'level'** 이다(적재기가 이미 적어 뒀다).
+    """
+    with_level = _seed_poi(engine, category="school", name="적재분초", lon=127.05, lat=37.50,
+                           attrs='{"level":"초등학교","zone_id":"Z1","zone_name":"적재분통학구역"}')
+    without = _seed_poi(engine, category="school", name="수기입력", lon=127.05, lat=37.50,
+                        attrs='{}')
+    d1 = _seed_district(engine, school_poi_id=with_level, level=None)
+    d2 = _seed_district(engine, school_poi_id=without, level=None)
+
+    migration = next(p for p in MIGRATIONS if p.name.startswith("013"))
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        raw = conn.connection.dbapi_connection
+        with raw.cursor() as cur:
+            cur.execute(migration.read_text(encoding="utf-8"))
+
+    with engine.connect() as conn:
+        rows = {r.id: r for r in conn.execute(text(
+            "SELECT id, school_level, zone_kind, zone_id, zone_name "
+            "FROM school_district WHERE id IN (:a, :b)"), {"a": d1, "b": d2}).all()}
+    assert rows[d1].school_level == "초등학교"
+    assert rows[d1].zone_kind == "통학구역"
+    assert rows[d1].zone_id == "Z1"
+    assert rows[d1].zone_name == "적재분통학구역"
+    # ★ 근거가 없는 행은 **채우지 않는다.** 초등으로 밀어 넣으면 그 순간 거짓이 된다.
+    assert rows[d2].school_level is None
+    assert rows[d2].zone_kind is None
+
+
 def test_003_학구도_기준연도가_컬럼에서_온다(repo, engine):
     """003 이전엔 기준일자를 적을 자리가 없었다(CHARTER §5)."""
     cid = _seed_complex(engine, name="기준연도단지", lon=127.05, lat=37.50)
     school = _seed_poi(engine, category="school", name="기준초", lon=127.052, lat=37.502)
     with engine.begin() as conn:
         conn.execute(text("""
-            INSERT INTO school_district (school_poi_id, geom, source, as_of)
+            INSERT INTO school_district (school_poi_id, geom, source, as_of, school_level)
             VALUES (:sid, ST_SetSRID(ST_MakeEnvelope(127.04,37.49,127.06,37.51),4326),
-                    '학교알리미', DATE '2026-03-01')
+                    '한국교육시설안전원', DATE '2026-03-01', '초등학교')
         """), {"sid": school})
 
     assert repo.location_facts(cid).school.district_as_of == "2026-03-01"
@@ -1127,8 +1425,9 @@ def test_003_통학로_대로횡단을_판정한다(repo, engine):
     school = _seed_poi(engine, category="school", name="건너초", lon=127.054, lat=37.50)
     with engine.begin() as conn:
         conn.execute(text("""
-            INSERT INTO school_district (school_poi_id, geom, source)
-            VALUES (:sid, ST_SetSRID(ST_MakeEnvelope(127.04,37.49,127.06,37.51),4326), 'x')
+            INSERT INTO school_district (school_poi_id, geom, source, school_level)
+            VALUES (:sid, ST_SetSRID(ST_MakeEnvelope(127.04,37.49,127.06,37.51),4326),
+                    'x', '초등학교')
         """), {"sid": school})
 
     # 도로 데이터가 없는 동안은 '모름'
@@ -1162,8 +1461,9 @@ def test_003_이면도로는_대로횡단으로_치지_않는다(repo, engine):
     school = _seed_poi(engine, category="school", name="이면초", lon=127.054, lat=37.50)
     with engine.begin() as conn:
         conn.execute(text("""
-            INSERT INTO school_district (school_poi_id, geom, source)
-            VALUES (:sid, ST_SetSRID(ST_MakeEnvelope(127.04,37.49,127.06,37.51),4326), 'x')
+            INSERT INTO school_district (school_poi_id, geom, source, school_level)
+            VALUES (:sid, ST_SetSRID(ST_MakeEnvelope(127.04,37.49,127.06,37.51),4326),
+                    'x', '초등학교')
         """), {"sid": school})
         conn.execute(text("""
             INSERT INTO road_segment (name, road_class, geom, source)
@@ -1342,6 +1642,11 @@ def test_API_전구간이_PostGIS_위에서_동작한다(repo, engine, monkeypat
             r = client.post("/api/v1/auth/register",
                             json={"email": "e2e@example.com", "password": password})
             assert r.status_code == 201, r.text
+            # 가입 직후 계정은 `pending` 이라 로그인이 403 이다(승인제 · migrations/009).
+            # 이 줄이 없어서 실DB 테스트가 **실행될 때마다 실패**했다 — 로컬에서는
+            # TEST_DATABASE_URL 이 없어 통째로 skip 되니 아무도 못 봤다(2026-07-27 발견).
+            repo.set_user_status(repo.get_user_by_email("e2e@example.com").id,
+                                 "approved", actor="cli")
 
             r = client.post("/api/v1/auth/login",
                             json={"email": "e2e@example.com", "password": password})
@@ -1394,6 +1699,9 @@ def test_DB에_평문_금액이_남지_않는다(repo, engine, monkeypatch):
         with TestClient(create_app(repo=repo)) as client:
             client.post("/api/v1/auth/register",
                         json={"email": "leak@example.com", "password": password})
+            # 승인제(migrations/009) — 승인 없이는 로그인 403 이라 아래가 KeyError 로 죽는다.
+            repo.set_user_status(repo.get_user_by_email("leak@example.com").id,
+                                 "approved", actor="cli")
             r = client.post("/api/v1/auth/login",
                             json={"email": "leak@example.com", "password": password})
             auth = {"Authorization": f"Bearer {r.json()['access_token']}"}

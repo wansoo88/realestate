@@ -5,6 +5,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.api.routes import router
@@ -18,6 +19,11 @@ logger = logging.getLogger("app")
 #: 요청·응답 **본문은 어떤 경로에서도 로그에 남기지 않는다** — 남길 수 있게 만들면
 #: 언젠가 누군가 디버깅하려고 켜고, 그날 자산 금액이 로그로 샌다.
 SENSITIVE_PATHS = ("/api/v1/me/profile", "/api/v1/affordability", "/api/v1/auth")
+
+#: 422 응답에 실을 검증 메시지 1건의 길이 상한(문자). **되비침의 총량을 묶는다**(SR25-2).
+#: 정상 메시지는 실측 100자 이하다. 이 상한이 하는 일은 "누군가 검증기에 입력값을
+#: 넣었을 때 응답이 요청만큼 커지는 것"을 막는 것뿐이고, 값을 넣지 않는 것이 본 방어다.
+MAX_VALIDATION_MSG_CHARS = 200
 
 
 def create_app(*, repo=None) -> FastAPI:
@@ -90,6 +96,41 @@ def create_app(*, repo=None) -> FastAPI:
                                "message": "요청이 많아 잠시 후 다시 시도해 주세요"}},
             headers={"Retry-After": "1"},
         )
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_failed(request: Request, exc: RequestValidationError):
+        """입력 검증 실패 → 422. **사용자가 보낸 값은 되돌려 주지 않는다.**
+
+        FastAPI 기본 핸들러는 오류마다 `input`(사용자가 보낸 원본 값)을 응답에 싣는다.
+        그게 두 가지 문제를 만든다:
+
+        ① **비밀이 되돌아온다.** `POST /auth/register` 에서 비밀번호가 12자 미만이면
+           기본 핸들러는 `{"input": "hunter2s"}` 로 **평문 비밀번호를 응답 본문에**
+           담아 보낸다(실측). 보낸 사람에게 돌려주는 것이라 유출은 아니지만, 그 값은
+           브라우저 콘솔·프론트 오류 리포팅·프록시 캐시로 흘러갈 자리가 너무 많다.
+           같은 이유로 자산 금액(`/me/profile`)도 검증 실패 시 되돌아왔다.
+        ② **직렬화가 깨져 422 가 500 이 된다.** `input` 이 `Infinity`·`NaN` 이면
+           `JSONResponse` 의 `json.dumps(allow_nan=False)` 가 예외를 던지고, 그러면
+           검증 실패가 **처리되지 않은 오류(500)** 로 나간다(SR24-6 수정 중 실측).
+
+        그래서 `type`·`loc`·`msg` 만 남긴다 — 클라이언트가 "어느 필드가 왜 틀렸는지"를
+        아는 데 필요한 정보는 그대로이고, 원본 값은 이미 클라이언트가 갖고 있다.
+
+        ⚠️ **이 보증은 절대적이지 않다**(SR25-2). `msg` 는 pydantic 내장 규칙이나
+           **우리가 쓴 커스텀 검증기**가 만든 문장이다. 검증기에서 `ValueError(f"...{값}")`
+           처럼 입력값을 문장에 넣으면 그 값은 `msg` 를 타고 그대로 되돌아간다
+           (실측: `region_codes` 3,000자 → 응답 3,127바이트). 그래서 두 가지를 건다:
+             ① 검증기는 값을 문장에 넣지 않고 **`loc`·위치로 지목**한다(schemas.py 규약)
+             ② 그래도 새는 경우를 대비해 여기서 `msg` 길이를 자른다 —
+                되비치는 양을 제한하는 것은 마지막 방어선이지 첫 방어선이 아니다.
+        """
+        detail = [
+            {"type": str(err.get("type", "")),
+             "loc": [str(part) for part in err.get("loc", ())],
+             "msg": str(err.get("msg", ""))[:MAX_VALIDATION_MSG_CHARS]}
+            for err in exc.errors()
+        ]
+        return JSONResponse(status_code=422, content={"detail": detail})
 
     @app.exception_handler(Exception)
     async def unhandled(request: Request, exc: Exception):  # pragma: no cover

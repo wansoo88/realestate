@@ -170,9 +170,17 @@ class AnthropicLLM:
     def _once(self, *, system: str, user: str, max_tokens: int) -> dict[str, Any]:
         import httpx
 
+        from app.core.http import ResponseTooLarge, request_capped
+
         try:
-            resp = httpx.post(
-                self.ENDPOINT,
+            # ⚠️ SR25-1 — 예전에는 `httpx.post(...)` + `resp.json()` 이었다.
+            #    `.json()` 은 본문을 **전부 읽은 뒤** 파싱하므로 상한이 없었다.
+            #    이 호출은 worker 컨테이너(mem_limit 192m) 안에서 돈다.
+            #    `raise_for_status=False` — 4xx/5xx 를 재시도 정책으로 직접 나누고,
+            #    오류 응답 본문은 **읽지 않는다**(프롬프트가 되비쳐 나올 수 있다).
+            resp, body = request_capped(
+                httpx, "POST", self.ENDPOINT,
+                what="Claude API", raise_for_status=False,
                 headers={
                     "x-api-key": self._api_key,
                     "anthropic-version": "2023-06-01",
@@ -186,6 +194,9 @@ class AnthropicLLM:
                 },
                 timeout=self._timeout,
             )
+        except ResponseTooLarge:
+            # 상한 초과는 재시도해도 같다. 메시지에 본문·길이 외의 것을 싣지 않는다.
+            raise LLMError("Claude API 응답이 상한을 넘어 폐기했습니다") from None
         except Exception as exc:  # noqa: BLE001 - httpx 예외 계층에 의존하지 않는다
             # 네트워크 예외 문자열에는 URL 이 들어간다. 키는 헤더라 안 들어가지만,
             # 라이브러리가 바뀌어도 새지 않도록 **무조건** 마스킹을 거친다.
@@ -202,7 +213,7 @@ class AnthropicLLM:
             raise LLMError(f"Claude API 오류 status={resp.status_code}")
 
         try:
-            blocks = resp.json()["content"]
+            blocks = json.loads(body)["content"]
             text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
         except (KeyError, ValueError, TypeError) as exc:
             raise LLMError("Claude API 응답 형식을 해석할 수 없습니다") from exc

@@ -41,7 +41,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 # ⚠️ `_common` import 자체가 sys.path·로깅 억제·비밀 마스킹을 설치한다(SR17-3).
-from _common import REPO_ROOT  # noqa: E402
+from _common import REPO_ROOT, capped_get  # noqa: E402
 
 PORTAL = "https://www.data.go.kr"
 META_URL = f"{PORTAL}/tcs/dss/selectFileDataDownload.do"
@@ -97,14 +97,18 @@ def _client(timeout: float):
 
 
 def resolve_file_id(client, ds: Dataset) -> tuple[str, str]:
-    """(atchFileId, fileDetailSn). 실패하면 사람이 할 일을 알려주고 멈춘다."""
-    resp = client.get(META_URL,
+    """(atchFileId, fileDetailSn). 실패하면 사람이 할 일을 알려주고 멈춘다.
+
+    ⚠️ 메타 조회도 `capped_get` 으로 읽는다(SR25-1). 소형 JSON 이라 위험이 작다는
+       이유로 예외를 두면 **그 예외가 관행이 된다** — 다음 수집기가 그걸 보고 따라 쓴다.
+    """
+    body = capped_get(client, META_URL,
                       params={"publicDataPk": ds.public_data_pk,
                               "publicDataDetailPk": ds.detail_pk},
-                      headers={"Referer": ds.page})
-    resp.raise_for_status()
+                      headers={"Referer": ds.page},
+                      what=f"{ds.title} 파일정보")
     try:
-        meta = json.loads(resp.text)
+        meta = json.loads(body)
     except json.JSONDecodeError:
         raise SystemExit(
             f"[FAIL] {ds.title}: 파일정보 응답이 JSON 이 아닙니다 — 포털 구조가 바뀌었을 수 "
@@ -117,12 +121,11 @@ def resolve_file_id(client, ds: Dataset) -> tuple[str, str]:
 
 
 def download(client, ds: Dataset, atch_file_id: str, detail_sn: str) -> bytes:
-    resp = client.get(FILE_URL,
+    # 상한이 걸린 읽기(SR18-6→SR24-2) — `resp.content` 는 상한 검사 전에 전부 올린다.
+    return capped_get(client, FILE_URL,
                       params={"atchFileId": atch_file_id, "fileDetailSn": detail_sn,
                               "dataNm": ds.key},
-                      headers={"Referer": ds.page})
-    resp.raise_for_status()
-    return resp.content
+                      headers={"Referer": ds.page}, what=ds.title)
 
 
 def check_header(ds: Dataset, payload: bytes) -> str:
@@ -149,7 +152,8 @@ def check_header(ds: Dataset, payload: bytes) -> str:
 def fetch(ds: Dataset, out_dir: Path, *, timeout: float) -> Path:
     print(f"[INFO] {ds.title}")
     with _client(timeout) as client:
-        client.get(ds.page)                       # 세션 쿠키(있으면) 확보
+        # 세션 쿠키(있으면) 확보 — 본문을 안 써도 상한은 통과시킨다(SR25-1).
+        capped_get(client, ds.page, what=f"{ds.title} 페이지")
         atch, sn = resolve_file_id(client, ds)
         print(f"       파일 ID 확인 완료(atchFileId={atch}) — 내려받는 중…")
         payload = download(client, ds, atch, sn)

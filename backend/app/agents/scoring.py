@@ -41,6 +41,10 @@ AXIS_PRICE = "price"
 AXIS_LOCATION = "location"
 AXIS_VALUE = "value"
 AXIS_RISK = "risk"
+#: 재건축·재개발 진행 단계(2026-07-27 추가). 다른 축과 성격이 다르다 —
+#: **목적(실거주/투자)에 따라 같은 단계가 정반대 신호**가 되고, 값이 비단조다.
+#: 자세한 근거는 `app/domain/redevelopment/analysis.py::STAGE_PROFILE`.
+AXIS_REDEV = "redevelopment"
 
 #: 축의 커버리지. full = 설계한 신호를 다 본다, partial = 일부만 본다(무엇이 빠졌는지 명시).
 COVERAGE_FULL = "full"
@@ -94,13 +98,36 @@ AXIS_SPECS: dict[str, AxisSpec] = {
         agent_ids=("listing-researcher",),
         signal="매물 신뢰도(허위·미끼·중복 등록 탐지) 점수",
         coverage=COVERAGE_PARTIAL,
-        coverage_gap=("권리관계·근저당·재건축 추가분담금·깡통전세 분석(risk-auditor)은 "
-                      "2차 기능이라 이 점수에 들어가지 않습니다."),
+        coverage_gap=("권리관계·근저당·깡통전세 분석(risk-auditor)은 2차 기능이라 "
+                      "이 점수에 들어가지 않습니다. 재건축 단계 리스크는 별도 '재건축' "
+                      "축에서 봅니다."),
+    ),
+    AXIS_REDEV: AxisSpec(
+        axis=AXIS_REDEV,
+        label="재건축",
+        agent_ids=("redevelopment-analyst",),
+        signal=("정비사업 진행 단계를 목적(실거주/투자)별 리스크-수익 프로파일로 환산 "
+                "— 단계가 뒤일수록 높은 점수가 아닙니다"),
+        coverage=COVERAGE_PARTIAL,
+        coverage_gap=("추가분담금·조합 사업성 자료는 공개 데이터에 없어 반영하지 않습니다. "
+                      "수집 범위는 서울·인천이며 경기도는 미수집이라, 경기 단지의 "
+                      "'정보 없음'은 '정비사업이 없다'는 뜻이 아닙니다."),
     ),
 }
 
 #: 축 순서 고정(응답·문서·테스트가 같은 순서를 본다).
 WEIGHT_AXES: tuple[str, ...] = tuple(AXIS_SPECS)
+
+#: 사용자가 **언급조차 하지 않은** 축에 적용할 기본 비중.
+#:
+#: 왜 기본값을 두는가
+#: ------------------
+#: 프론트 슬라이더(`lib/preferences.ts`)는 가격·입지·가치·리스크 4개만 보낸다. 새 축을
+#: 그냥 추가하면 저장된 가중치에 키가 없어 **영원히 반영되지 않고**, "AI 추천에 재건축을
+#: 넣었다"는 말이 거짓이 된다. 그렇다고 사용자가 **명시적으로 0 을 준** 축까지 되살리면
+#: 그건 설정 무시다. 그래서 규칙은 하나다: **키가 아예 없을 때만** 기본값을 넣고,
+#: 그 사실을 `summary_notes` 로 말한다(조용히 넣지 않는다).
+DEFAULT_AXIS_WEIGHTS: dict[str, float] = {AXIS_REDEV: 0.15}
 
 # --- 축별 상태 --------------------------------------------------------------
 STATUS_APPLIED = "applied"          # 가중치 > 0 이고 신호도 있다 → 총점에 들어갔다
@@ -142,6 +169,9 @@ NO_BAND_REASON = "적정가 밴드를 세울 실거래 표본이 부족합니다
 NO_TURNOVER_REASON = "단지 세대수를 알 수 없어 거래회전율(환금성)을 계산할 수 없습니다"
 NO_LISTING_TRUST_REASON = "평가할 활성 호가가 없어 매물 신뢰도를 판정할 수 없습니다"
 NO_LOCATION_REASON = "입지 데이터(학군·교통·인프라) 미수집"
+#: ⚠️ "재건축 가치가 없다"가 **아니다.** 수집 범위(서울·인천) 밖이거나 매칭이 안 된 것이다.
+NO_REDEV_REASON = ("정비사업 구역 정보가 확인되지 않았습니다 — '정비사업이 없다'는 뜻이 "
+                   "아닙니다(수집 범위: 서울·인천. 경기도는 미수집).")
 
 
 @dataclass(frozen=True)
@@ -210,9 +240,29 @@ def normalize_weights(raw: Any) -> tuple[dict[str, float], list[str]]:
     total = sum(usable.values())
     if total <= 0:
         return {}, ignored
+
+    # 사용자가 **언급조차 하지 않은** 축에 기본 비중을 넣는다(DEFAULT_AXIS_WEIGHTS 주석).
+    # 기존 축들의 **상대 비율은 그대로** 두고 새 축이 정확히 share 를 갖도록 계산한다.
+    mentioned = {str(k) for k in raw}
+    for axis, share in DEFAULT_AXIS_WEIGHTS.items():
+        if axis in mentioned or not 0 < share < 1:
+            continue
+        usable[axis] = share / (1 - share) * total
+
+    total = sum(usable.values())
     # 축 순서를 고정해 돌려준다(응답·로그가 매번 같은 순서여야 비교가 쉽다).
     return ({axis: usable[axis] / total for axis in WEIGHT_AXES if axis in usable},
             ignored)
+
+
+def defaulted_axes(raw: Any) -> tuple[str, ...]:
+    """이번 요청에서 **기본값이 적용될** 축. 응답에 그 사실을 적기 위한 것이다.
+
+    사용자가 준 적 없는 비중이 순위를 바꾸는데 아무 말도 하지 않으면, 그건
+    "슬라이더가 반영되지 않던" 예전 결함의 반대 방향 버전이다.
+    """
+    mentioned = {str(k) for k in raw} if isinstance(raw, dict) else set()
+    return tuple(a for a in DEFAULT_AXIS_WEIGHTS if a not in mentioned)
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +284,8 @@ def _liquidity_detail(liq: Liquidity | None) -> str | None:
 
 
 def build_axis_signals(*, valuation: Finding, listing: Finding, location: Finding,
-                       liq: Liquidity | None, has_ask: bool) -> dict[str, AxisSignal]:
+                       liq: Liquidity | None, has_ask: bool,
+                       redevelopment: Finding | None = None) -> dict[str, AxisSignal]:
     """후보 1건의 축 신호를 만든다. **없는 신호를 지어내지 않는다.**
 
     각 축이 무엇을 보는지는 `AXIS_SPECS` 가 정본이고, 여기는 그 표대로 값을 꺼내 온다.
@@ -254,6 +305,13 @@ def build_axis_signals(*, valuation: Finding, listing: Finding, location: Findin
 
     value_score = liquidity_score(liq)
 
+    # 재건축 축: 정비사업 판정이 아예 없거나(리포지토리 미연결) 매칭된 구역이 없으면
+    # **점수를 만들지 않는다**. 0 은 "재건축 가치가 없다"로 읽히는데 사실은 '모른다'다.
+    redev_missing: tuple[str, ...] = ()
+    if redevelopment is None or redevelopment.score is None:
+        redev_missing = (tuple(redevelopment.missing) if redevelopment else ()) \
+            or (NO_REDEV_REASON,)
+
     return {
         AXIS_PRICE: AxisSignal(
             axis=AXIS_PRICE, score=valuation.score, confidence=valuation.confidence,
@@ -272,6 +330,13 @@ def build_axis_signals(*, valuation: Finding, listing: Finding, location: Findin
             axis=AXIS_RISK, score=listing.score, confidence=listing.confidence,
             detail=listing.verdict if listing.score is not None else None,
             missing=risk_missing),
+        AXIS_REDEV: AxisSignal(
+            axis=AXIS_REDEV,
+            score=redevelopment.score if redevelopment else None,
+            confidence=redevelopment.confidence if redevelopment else 0.0,
+            detail=(redevelopment.verdict
+                    if redevelopment and redevelopment.score is not None else None),
+            missing=redev_missing),
     }
 
 
@@ -405,8 +470,15 @@ def score_item(*, findings: list[Finding], signals: dict[str, AxisSignal],
 # 결과 전체에 붙는 고지 — 개별 아이템을 안 열어봐도 보이게
 # ---------------------------------------------------------------------------
 
+#: 기본값이 들어간 축을 알리는 문장. 사용자가 준 적 없는 비중이 순위를 바꾸므로 말한다.
+NOTE_DEFAULT_AXIS = (
+    "'{label}' 항목은 저장된 조건에 없어 기본 비중 {pct}를 적용했습니다 "
+    "(0 으로 두고 싶으면 조건에서 명시적으로 0 을 지정하세요).")
+
+
 def summary_notes(*, weights: dict[str, float], unknown_keys: list[str],
-                  results: list[ScoreResult], total_items: int) -> list[str]:
+                  results: list[ScoreResult], total_items: int,
+                  defaulted: tuple[str, ...] = ()) -> list[str]:
     """items 전체를 훑어 "무엇이 얼마나 반영됐는지"를 한 줄로 요약한다.
 
     개별 후보의 `score_notes` 만 남기면 사용자는 카드를 하나하나 열어야 알 수 있다.
@@ -425,6 +497,10 @@ def summary_notes(*, weights: dict[str, float], unknown_keys: list[str],
 
     used = " · ".join(f"{AXIS_SPECS[a].label} {_pct(w)}" for a, w in weights.items())
     notes.append(f"조건 가중치를 순위에 반영했습니다 ({used}).")
+    for axis in defaulted:
+        if axis in weights:
+            notes.append(NOTE_DEFAULT_AXIS.format(label=AXIS_SPECS[axis].label,
+                                                  pct=_pct(weights[axis])))
     if not results:
         return notes
 

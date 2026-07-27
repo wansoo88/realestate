@@ -23,7 +23,7 @@
 .regions__toggle {
   min-height: var(--touch-min);
   padding: 0 var(--sp-2);
-  color: var(--accent);
+  color: var(--accent-text);
   font-size: var(--fs-caption);
   font-weight: 600;
 }
@@ -66,7 +66,7 @@
 .regions__clear {
   min-height: 34px;
   padding: 0 var(--sp-2);
-  color: var(--accent);
+  color: var(--accent-text);
   font-size: var(--fs-caption);
 }
 
@@ -107,7 +107,7 @@
 .regions__sidobtn--on {
   border-color: transparent;
   background: var(--accent-weak);
-  color: var(--accent);
+  color: var(--accent-text);
   font-weight: 600;
 }
 

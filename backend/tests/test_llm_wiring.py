@@ -9,7 +9,7 @@
 이 파일이 못박는 것
 -------------------
 1. **SR4-2** — 이 배선으로 프롬프트가 처음으로 진짜 외부(api.anthropic.com)로 나간다.
-   그래서 `httpx.post` 를 가로채 **실제로 전송될 본문**을 열어 자산 원본이 없는지 본다.
+   그래서 `httpx.stream` 을 가로채 **실제로 전송될 본문**을 열어 자산 원본이 없는지 본다.
    FakeLLM 으로 파이프라인만 보는 것과 다르다 — 여기서는 라우터→build_llm→
    AnthropicLLM→HTTP 까지 전 구간이 실제 코드다.
 2. **폴백** — 타임아웃·429·5xx·스키마 위반이 추천 전체를 죽이지 않는다.
@@ -58,6 +58,12 @@ GOOD_RESPONSE = {"headline": "요약", "why": ["근거"], "why_not": ["리스크
 # ---------------------------------------------------------------------------
 
 class _Resp:
+    """`httpx.Response` 대역 — **스트리밍 모양**이다(SR25-1).
+
+    `llm.py` 가 `httpx.post(...).json()` 에서 `httpx.stream(...)` + 상한 읽기로 바뀌었다.
+    대역이 `.json()` 만 갖고 있으면 테스트는 사라진 경로를 검증하게 된다.
+    """
+
     def __init__(self, status_code=200, payload=None, headers=None):
         self.status_code = status_code
         self._payload = payload if payload is not None else {
@@ -65,26 +71,51 @@ class _Resp:
                                                             ensure_ascii=False)}]}
         self.headers = headers or {}
 
+    def raise_for_status(self):
+        return None                      # llm.py 는 상태코드를 직접 다룬다
+
+    def _body(self) -> bytes:
+        if isinstance(self._payload, (bytes, bytearray)):
+            return bytes(self._payload)
+        if isinstance(self._payload, str):
+            return self._payload.encode("utf-8")
+        return json.dumps(self._payload, ensure_ascii=False).encode("utf-8")
+
+    def iter_bytes(self, chunk_size=None):
+        yield self._body()
+
     def json(self):
         return self._payload
 
 
+class _Ctx:
+    """`with httpx.stream(...) as resp:` 를 흉내 내는 최소 컨텍스트."""
+
+    def __init__(self, resp):
+        self._resp = resp
+
+    def __enter__(self):
+        return self._resp
+
+    def __exit__(self, *exc):
+        return False
+
+
 class Wire:
-    """`httpx.post` 대역. 나간 요청을 전부 기록한다."""
+    """`httpx.stream` 대역. 나간 요청을 전부 기록한다."""
 
     def __init__(self, responses=None):
         self.requests: list[dict] = []
         self._responses = list(responses or [])
 
-    def __call__(self, url, *, headers=None, json=None, timeout=None, **kw):
+    def __call__(self, method, url, *, headers=None, json=None, timeout=None, **kw):
         self.requests.append({"url": url, "headers": headers or {},
-                              "json": json or {}, "timeout": timeout})
-        if self._responses:
-            nxt = self._responses.pop(0)
-            if isinstance(nxt, Exception):
-                raise nxt
-            return nxt
-        return _Resp()
+                              "json": json or {}, "timeout": timeout,
+                              "method": method})
+        nxt = self._responses.pop(0) if self._responses else _Resp()
+        if isinstance(nxt, Exception):
+            raise nxt
+        return _Ctx(nxt)
 
     # -- 검사 편의 --
     @property
@@ -103,7 +134,7 @@ class Wire:
 @pytest.fixture()
 def wire(monkeypatch):
     w = Wire()
-    monkeypatch.setattr("httpx.post", w)
+    monkeypatch.setattr("httpx.stream", w)
     # 재시도 백오프로 테스트가 느려지지 않게.
     monkeypatch.setattr("app.agents.llm.time.sleep", lambda *_: None)
     return w
@@ -356,7 +387,7 @@ def test_검사값이_비면_외부전송을_막는다():
 def test_일시장애면_재시도하고_결국_규칙기반으로_떨어진다(keyed_client, monkeypatch,
                                                     status_code):
     w = Wire([_Resp(status_code), _Resp(status_code), _Resp(status_code)])
-    monkeypatch.setattr("httpx.post", w)
+    monkeypatch.setattr("httpx.stream", w)
     monkeypatch.setattr("app.agents.llm.time.sleep", lambda *_: None)
 
     token = _login(keyed_client)
@@ -376,7 +407,7 @@ def test_일시장애면_재시도하고_결국_규칙기반으로_떨어진다(
 def test_인증오류는_재시도하지_않는다(keyed_client, monkeypatch):
     """키가 틀렸는데 3번 보내봐야 같은 답이다 — 사용자만 기다린다."""
     w = Wire([_Resp(401)])
-    monkeypatch.setattr("httpx.post", w)
+    monkeypatch.setattr("httpx.stream", w)
     monkeypatch.setattr("app.agents.llm.time.sleep", lambda *_: None)
 
     token = _login(keyed_client)
@@ -393,7 +424,7 @@ def test_네트워크_예외도_추천을_죽이지_않는다(keyed_client, monk
 
     w = Wire([httpx.ConnectTimeout("timed out"), httpx.ConnectTimeout("timed out"),
               httpx.ConnectTimeout("timed out")])
-    monkeypatch.setattr("httpx.post", w)
+    monkeypatch.setattr("httpx.stream", w)
     monkeypatch.setattr("app.agents.llm.time.sleep", lambda *_: None)
 
     token = _login(keyed_client)
@@ -408,7 +439,7 @@ def test_스키마를_벗어난_응답은_폐기한다(keyed_client, monkeypatch
     """`parse_json_object` 규약 유지 — 모양이 다르면 쓰지 않는다."""
     bad = _Resp(payload={"content": [{"type": "text", "text": '{"nonsense": true}'}]})
     w = Wire([bad, bad, bad])
-    monkeypatch.setattr("httpx.post", w)
+    monkeypatch.setattr("httpx.stream", w)
 
     token = _login(keyed_client)
     _set_profile(keyed_client, token)
@@ -421,7 +452,7 @@ def test_스키마를_벗어난_응답은_폐기한다(keyed_client, monkeypatch
 
 def test_JSON이_아닌_응답도_폐기한다(keyed_client, monkeypatch):
     w = Wire([_Resp(payload={"content": [{"type": "text", "text": "안녕하세요"}]})] * 3)
-    monkeypatch.setattr("httpx.post", w)
+    monkeypatch.setattr("httpx.stream", w)
 
     token = _login(keyed_client)
     _set_profile(keyed_client, token)
@@ -432,7 +463,7 @@ def test_JSON이_아닌_응답도_폐기한다(keyed_client, monkeypatch):
 def test_연속_실패하면_회로를_끊는다(keyed_client, monkeypatch):
     """장애는 보통 전면적이다 — 후보 수만큼 타임아웃을 곱하지 않는다."""
     w = Wire([_Resp(500)] * 50)
-    monkeypatch.setattr("httpx.post", w)
+    monkeypatch.setattr("httpx.stream", w)
     monkeypatch.setattr("app.agents.llm.time.sleep", lambda *_: None)
 
     token = _login(keyed_client)
@@ -577,7 +608,7 @@ def test_응답에_키가_없다(keyed_client, wire):
 def test_예외메시지에_키와_응답본문이_없다(monkeypatch):
     """4xx 본문에는 프롬프트가 되비쳐 나올 수 있다 — 상태코드만 남긴다."""
     secret_body = {"error": {"message": f"key {FAKE_KEY} rejected; prompt: 보유현금"}}
-    monkeypatch.setattr("httpx.post", Wire([_Resp(403, payload=secret_body)]))
+    monkeypatch.setattr("httpx.stream", Wire([_Resp(403, payload=secret_body)]))
 
     with pytest.raises(LLMError) as exc:
         AnthropicLLM(FAKE_KEY, "m").complete_json(system="s", user="u")

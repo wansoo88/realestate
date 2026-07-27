@@ -14,6 +14,7 @@ import logging
 from collections.abc import Iterable, Sequence
 from typing import Any
 
+from app.core.http import request_capped
 from app.core.masking import masked_error
 from app.ingest import molit
 from app.ingest.loader import PostgisTradeLoader, RegionResolver
@@ -54,12 +55,19 @@ def make_http_fetch(endpoint: str = MOLIT_ENDPOINT, *, client: Any = None,
         secrets = tuple(v for k, v in params.items()
                         if "key" in k.lower() or "token" in k.lower())
         try:
-            resp = c.get(endpoint, params=params, timeout=timeout)
-            resp.raise_for_status()
+            # ⚠️ SR25-1 — 예전에는 `c.get(...).text` 였다. `.text` 는 `.content` 와
+            #    똑같이 본문을 **전부 읽은 뒤** 문자열로 바꾼다. 이 코드는 worker
+            #    컨테이너(mem_limit 192m) 안에서 도므로 상한 없는 읽기가 곧 OOM 경로다.
+            #    `request_capped` 는 스트리밍으로 받으면서 세고, 넘으면 중단한다.
+            resp, body = request_capped(c, "GET", endpoint, params=params,
+                                        timeout=timeout, what="MOLIT 실거래")
         except Exception as exc:                 # noqa: BLE001 - 마스킹해 다시 올린다
             raise masked_error(exc, prefix="MOLIT 요청 실패: ",
                                extra_secrets=secrets) from None
-        return resp.text
+        # 원천 인코딩을 존중한다(선언이 없으면 UTF-8). 여기서 틀리면 한글 단지명이
+        # 조용히 깨져 들어간다 — 파싱은 되고 값만 이상해지는 형태다.
+        enc = getattr(resp, "charset_encoding", None) or "utf-8"
+        return body.decode(enc, errors="replace")
 
     return fetch
 

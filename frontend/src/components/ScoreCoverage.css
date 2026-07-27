@@ -1,0 +1,160 @@
+/* 평가 반영률 — 카드 끝. 경고는 눈에 띄되 금액보다 크지 않다(농도 규칙). */
+
+.cov {
+  margin-top: var(--sp-4);
+  padding-top: var(--sp-3);
+  border-top: 0.5px solid var(--hairline);
+}
+
+.cov__head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  margin: 0;
+  font-size: var(--fs-footnote);
+  font-weight: 600;
+  line-height: 1.5;
+  color: var(--warn-text);
+}
+
+/* 절반도 못 미치면 톤을 한 단계 올린다 — 이 구간의 순위는 의심해야 한다.
+   색만으로 구분되지 않게 ⚠ 아이콘과 문장("절반도 반영되지 않았습니다")이 함께 바뀐다. */
+.cov--low .cov__head {
+  color: var(--danger-text);
+}
+
+.cov__icon {
+  flex: 0 0 auto;
+  line-height: 1.4;
+}
+
+.cov__why {
+  margin: var(--sp-1) 0 0;
+  padding-left: calc(var(--sp-4) + 2px);
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+/* 접기 — 버튼처럼 보이게(있다는 걸 알아볼 수 있어야 한다) */
+.cov__details {
+  margin-top: var(--sp-2);
+}
+
+.cov__summary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  min-height: 36px;
+  padding: 0 var(--sp-3);
+  border: 0.5px solid var(--hairline);
+  border-radius: var(--r-pill);
+  color: var(--accent-text);
+  font-size: var(--fs-caption);
+  cursor: pointer;
+  list-style: none;
+}
+
+.cov__summary::-webkit-details-marker {
+  display: none;
+}
+
+/* 삼각형은 직접 그린다 — 브라우저 기본 마커는 pill 안에서 자리가 어긋난다 */
+.cov__summary::after {
+  content: "▾";
+  font-size: 10px;
+  transition: transform 0.2s var(--ease-spring);
+}
+
+.cov__details[open] .cov__summary::after {
+  transform: rotate(180deg);
+}
+
+.cov__body {
+  margin-top: var(--sp-3);
+  font-size: var(--fs-caption);
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+/* 반영 / 미반영 — 한 눈에 대조되게 두 줄로 */
+.cov__split {
+  margin: 0 0 var(--sp-3);
+}
+
+.cov__split-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-2);
+  padding: var(--sp-2) 0;
+  border-bottom: 0.5px solid var(--hairline);
+}
+
+.cov__split-row dt {
+  flex: 0 0 52px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.cov__split-row dd {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-2);
+  margin: 0;
+  min-width: 0;
+}
+
+/* 미반영 줄은 흐리게 — 반영된 것과 같은 강도로 그리면 위계가 사라진다 */
+.cov__split-row--off dd {
+  color: var(--text-estimated);
+}
+
+.cov__sum {
+  margin-left: auto;
+  padding-left: var(--sp-2);
+  white-space: nowrap;
+}
+
+.cov__none {
+  color: var(--text-estimated);
+}
+
+.cov__block {
+  margin-bottom: var(--sp-3);
+}
+
+.cov__h {
+  margin: 0 0 var(--sp-1);
+  font-size: var(--fs-caption);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.cov__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cov__list li {
+  display: flex;
+  gap: var(--sp-2);
+  padding: 2px 0;
+}
+
+.cov__list--plain li {
+  display: list-item;
+  margin-left: var(--sp-4);
+  list-style: disc;
+}
+
+.cov__label {
+  flex: 0 0 52px;
+  color: var(--text);
+}
+
+.cov__plain {
+  margin: 0;
+}

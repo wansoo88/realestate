@@ -9,13 +9,18 @@
  * ⚠️ 재분석은 **명시적 버튼으로만** 실행한다. 조건을 만질 때마다 돌면 Claude API 비용이
  *    사고가 된다(architecture.md §6).
  */
+import { useMemo } from "react";
 import type { RecommendationJob } from "../api/client";
+import { useTagFilter } from "../hooks/useTagFilter";
 import { sameBbox } from "../lib/bbox";
 import { formatKrwShort } from "../lib/format";
+import { filterList } from "../lib/listFilter";
 import { NOTICE_NOT_ADVICE, NOTICE_TRADE_DELAY } from "../lib/notices";
 import { progressText, type JobPhase } from "../lib/recommendation";
 import { scopeText, type SearchScope } from "../lib/searchScope";
+import { recommendationTagFacts } from "../lib/tags";
 import { AreaScope } from "./AreaScope";
+import { ListFilterBar } from "./ListFilterBar";
 import { RegionPicker } from "./RegionPicker";
 import { ReportCard } from "./ReportCard";
 import { Section } from "./Section";
@@ -26,6 +31,14 @@ interface Props {
   job: RecommendationJob | null;
   error: string | null;
   budgetKrw: number | null;
+  /**
+   * 목록 필터가 쓰는 실효 예산(희망가 우선, 없으면 한도).
+   * 안 주면 `budgetKrw` 로 폴백한다 — 지도와 다른 숫자를 쓰지 않기 위한 값이다.
+   */
+  listBudgetKrw?: number | null;
+  /** 예산 내만 보기. 주변 단지 목록과 **같은 스위치**를 공유한다. */
+  budgetOnly?: boolean;
+  onBudgetOnlyChange?: (on: boolean) => void;
   /** 분석 지역(5자리 시군구). 빈 배열 = 지역 제한 없음. */
   regionCodes: string[];
   onRegionsChange: (codes: string[]) => void;
@@ -51,6 +64,9 @@ export function RecommendPanel({
   job,
   error,
   budgetKrw,
+  listBudgetKrw,
+  budgetOnly = false,
+  onBudgetOnlyChange,
   regionCodes,
   onRegionsChange,
   currentBbox,
@@ -64,8 +80,36 @@ export function RecommendPanel({
   onEditConditions,
 }: Props) {
   const running = phase === "queued" || phase === "running";
-  const items = job?.items ?? [];
+  const items = useMemo(() => job?.items ?? [], [job]);
   const excluded = job?.excluded ?? null;
+
+  const tagFilter = useTagFilter();
+
+  /**
+   * 예산·특성 필터. **순위(rank)는 건드리지 않는다** — 걸러낸 뒤에도 카드에 찍히는 번호는
+   * 서버가 준 원래 순위다. 필터 결과에 1,2,3 을 새로 붙이면 그건 새 순위처럼 읽히는
+   * 거짓 정보가 된다("3위였던 게 1위로 올랐다"고 읽힌다).
+   *
+   * 가격은 `est_price_krw` — 판단·예산 비교에 서버가 실제로 쓴 값이다(호가일 수도,
+   * 실거래 추정일 수도 있다. 어느 쪽인지는 카드가 라벨로 말한다).
+   */
+  const outcome = useMemo(
+    () =>
+      filterList(
+        items.map((item) => ({
+          item,
+          priceKrw: item.est_price_krw,
+          facts: recommendationTagFacts(item),
+        })),
+        {
+          budgetOnly,
+          budgetKrw: listBudgetKrw ?? budgetKrw,
+          tags: tagFilter.tags,
+          includeUnknownTag: tagFilter.includeUnknown,
+        },
+      ),
+    [items, budgetOnly, listBudgetKrw, budgetKrw, tagFilter.tags, tagFilter.includeUnknown],
+  );
 
   /** 결과를 낸 범위가 지금 지도와 다른가 — 다르면 "지금 화면 = 결과"로 읽히지 않게 말한다. */
   const resultAreaMoved =
@@ -151,10 +195,34 @@ export function RecommendPanel({
         </div>
       )}
 
-      {items.map((item) => (
+      {/* 결과가 있을 때만 필터 줄을 낸다 — 거를 게 없으면 조작도 없다 */}
+      {phase === "done" && items.length > 0 && (
+        <ListFilterBar
+          listLabel="AI 추천"
+          outcome={outcome}
+          budgetOnly={budgetOnly}
+          onBudgetOnlyChange={onBudgetOnlyChange ?? (() => {})}
+          onToggleTag={tagFilter.toggle}
+          onClearTags={tagFilter.clear}
+          includeUnknownTag={tagFilter.includeUnknown}
+          onIncludeUnknownChange={tagFilter.setIncludeUnknown}
+        />
+      )}
+
+      {/* 필터로 0건이 되면 "추천이 없다"가 아니라 "가려졌다"고 말한다 */}
+      {phase === "done" && items.length > 0 && outcome.entries.length === 0 && (
+        <p className="rec__filtered" role="status">
+          필터에 걸려 추천 {items.length}건이 모두 가려졌습니다. 예산 토글이나 특성 칩을
+          꺼 보세요.
+        </p>
+      )}
+
+      {outcome.entries.map((entry) => (
         <ReportCard
-          key={`${item.complex.id}-${item.unit_type?.area_m2 ?? "na"}`}
-          item={item}
+          key={`${entry.item.complex.id}-${entry.item.unit_type?.area_m2 ?? "na"}`}
+          item={entry.item}
+          tags={entry.tags}
+          unknownTags={entry.unknownTags}
           onShowOnMap={onShowOnMap}
         />
       ))}

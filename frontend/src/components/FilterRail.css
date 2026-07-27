@@ -29,6 +29,7 @@
 }
 
 .rail__edit,
+.rail__money,
 .rail__chip {
   pointer-events: auto;
   flex: 0 0 auto;
@@ -48,6 +49,23 @@
 
 .rail__edit {
   font-weight: 600;
+}
+
+/* 내 자금 — 조건 옆의 상시 진입점. 금액이 라벨보다 굵다(규칙 2: 숫자가 주인공). */
+.rail__money-amount {
+  font-weight: 600;
+  color: var(--accent-text);
+}
+
+.rail__money-amount--none {
+  font-weight: 400;
+  color: var(--text-estimated);
+}
+
+/* 열려 있는 동안 같은 버튼이 상태를 말한다(색 + 테두리 — 색만으로 구분하지 않는다) */
+.rail__money--on {
+  border-color: var(--accent);
+  background: var(--accent-weak);
 }
 
 /* 꺼진 조건 = 점선(색만으로 구분하지 않는다 · A3) */
@@ -98,11 +116,17 @@
   }
 
   .rail__edit,
+  .rail__money,
   .rail__chip {
     justify-content: flex-start;
     min-height: var(--touch-min);
     white-space: normal;
     box-shadow: none;
+  }
+
+  /* 좌측 패널에서는 금액을 오른쪽 끝으로 밀어 세로로 비교되게 한다 */
+  .rail__money-amount {
+    margin-left: auto;
   }
 
   .rail__note {

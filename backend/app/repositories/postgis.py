@@ -43,6 +43,7 @@ from app.domain.location.models import (
     StationFact,
     TransitPlan,
 )
+from app.domain.redevelopment.models import RedevProject
 from app.domain.valuation.models import ListingRow, TradeRow
 from app.repositories.base import (
     STATUS_APPROVED,
@@ -96,6 +97,13 @@ _TRADE_HISTORY_LIMIT = 2000
 #: 포함이 아닌 것과 데이터가 없는 것은 다르다 — 도메인이 이 둘을 다르게 처리한다.
 _DISTRICT_DATA_RADIUS_M = 5_000.0
 
+#: `school_district.school_level` 값(013). 원천 CSV 의 `학교급구분` 문자열 그대로다.
+#: ⚠️ `app.ingest.school_zone` 의 상수를 import 하지 않는다 — 리포지토리가 수집기에
+#:    의존하면 안 된다. 대신 값이 어긋나면 조회가 0건이 되므로 실DB 테스트가 잡는다.
+_LEVEL_ELEMENTARY = "초등학교"
+_LEVEL_MIDDLE = "중학교"
+_LEVEL_HIGH = "고등학교"
+
 # --- poi.category 규약 ----------------------------------------------------
 # erd.md 의 `poi` 주석: school/subway/mart/hospital/park/hazard/road
 # ⚠️ **re-data 와의 데이터 계약이다.** 아래 category·attrs 키를 채우지 않으면
@@ -119,17 +127,46 @@ _MAIN_ROAD_CLASSES = ["고속도로", "자동차전용", "간선"]
 _TRUTHY_SQL = "('true','t','1','y','yes')"
 
 
+#: 서버측 쿼리 상한(ms). **0 이면 끄지만, 끄지 말 것**(SR24-4).
+#:
+#: 왜 필요한가 — `candidate_scope_stats` 는 `complex` 를 LIMIT 없이 훑으면서 행마다
+#: EXISTS 서브쿼리 3개(`unit_type`·`trade` 61만행·`listing`)를 돈다. 방아쇠는 공격이
+#: 아니라 **평범한 사용**이다(`area_min_m2=1` 한 줄 + 지역 "11" 이면 서울 전역).
+#: db 컨테이너는 `mem_limit`/`memswap_limit` 이 192m 라 스왑도 없다 — 한 번의 조회가
+#: 자기 DB 를 눕힐 수 있다. 클라이언트 타임아웃은 **서버 쿼리를 멈추지 못한다**;
+#: 연결이 끊겨도 PostgreSQL 은 계속 돈다. 그래서 상한은 서버측이어야 한다.
+#:
+#: 왜 10초인가 — 추천 job 은 비동기(BackgroundTask)지만 이 조회는 고지 문구 하나를
+#: 위한 것이고, 정상 응답은 실측 수백 ms 다. 10초를 넘으면 그건 느린 게 아니라 잘못된
+#: 것이다. 배치(수집)는 이 엔진을 쓰지 않는다(`scripts/_common.make_engine`) —
+#: 대량 적재가 10초에 잘리면 그건 다른 종류의 사고다.
+DEFAULT_STATEMENT_TIMEOUT_MS = 10_000
+
+
 def create_db_engine(settings, **kwargs: Any) -> Engine:
     """설정에서 엔진을 만든다.
 
     `pool_pre_ping` 은 필수다. VPS 단일 서버라 DB 재시작·네트워크 끊김이
     그대로 죽은 커넥션으로 남고, 그러면 첫 요청이 원인 모를 500 이 된다.
+
+    `statement_timeout` 은 **서버측** 상한이다(SR24-4). libpq `options` 로 넘기므로
+    커넥션마다 세션 설정으로 들어가고, 애플리케이션이 잊어도 빠지지 않는다.
     """
     from sqlalchemy import create_engine
 
     kwargs.setdefault("pool_pre_ping", True)
     kwargs.setdefault("pool_size", 5)
     kwargs.setdefault("max_overflow", 5)
+
+    timeout_ms = int(getattr(settings, "db_statement_timeout_ms",
+                             DEFAULT_STATEMENT_TIMEOUT_MS) or 0)
+    if timeout_ms > 0:
+        connect_args = dict(kwargs.pop("connect_args", None) or {})
+        options = str(connect_args.get("options") or "")
+        if "statement_timeout" not in options:
+            connect_args["options"] = (
+                f"{options} -c statement_timeout={timeout_ms}".strip())
+        kwargs["connect_args"] = connect_args
     return create_engine(settings.database_url, **kwargs)
 
 
@@ -712,6 +749,58 @@ class PostgisRepository:
     #:    `left(region_code, length(rc)) = rc` 는 와일드카드 개념 자체가 없어 구조적으로 막힌다
     #:    (접두 매칭 의미는 동일하고, 이 조건은 원래 인덱스를 타지 않아 비용도 같다).
     #:    API 계층의 형식 검증(422)은 그 앞의 1차 방어다 — 여기가 마지막 문이다.
+    #: 면적 조건 판정 — **이 단지에 그 면적대의 근거가 있는가**.
+    #:
+    #: ⚠️ `unit_type` 만 보고 판정하지 않는다. 후보는 실제로는 **실거래 면적대**(호가가
+    #:    없을 때)와 **호가 면적**으로 세워진다(agents/recommend.py). unit_type 만 보면
+    #:    타입 정보가 아직 안 채워진 단지가 통째로 사라져(유실), "왜 우리 단지가 아예
+    #:    안 보이냐"에 답할 수 없다. 그래서 세 근거 중 **하나라도** 맞으면 통과시키고,
+    #:    개별 후보(면적대)의 최종 판정은 러너가 다시 한다(거기가 계약의 마지막 문이다).
+    #: ⚠️ 실거래 창은 후보 조립이 쓰는 창(`_CANDIDATE_TRADE_WINDOW_DAYS` = 36개월)과
+    #:    **같아야 한다.** 여기만 좁으면 2년 전 59㎡ 거래로 세울 수 있었던 후보가
+    #:    조회 단계에서 조용히 사라진다.
+    #: ⚠️ 면적이 NULL 인 행은 어느 비교에서도 참이 되지 않는다 — **미상은 통과가 아니다**
+    #:    (조건이 걸렸는데 미상을 통과시키면 "조건에 안 맞는 게 나온다"가 그대로 재현된다).
+    _AREA_MATCH_SQL = """(
+                (CAST(:area_min AS numeric) IS NULL AND CAST(:area_max AS numeric) IS NULL)
+                OR EXISTS (
+                    SELECT 1 FROM unit_type u
+                    WHERE u.complex_id = c.id
+                      AND (CAST(:area_min AS numeric) IS NULL
+                           OR u.area_m2 >= CAST(:area_min AS numeric))
+                      AND (CAST(:area_max AS numeric) IS NULL
+                           OR u.area_m2 <= CAST(:area_max AS numeric))
+                )
+                OR EXISTS (
+                    SELECT 1 FROM trade tr3
+                    WHERE tr3.complex_id = c.id
+                      AND NOT tr3.is_cancelled
+                      AND tr3.contract_date >= current_date - CAST(:trade_window_days AS int)
+                      AND (CAST(:area_min AS numeric) IS NULL
+                           OR tr3.area_m2 >= CAST(:area_min AS numeric))
+                      AND (CAST(:area_max AS numeric) IS NULL
+                           OR tr3.area_m2 <= CAST(:area_max AS numeric))
+                )
+                OR EXISTS (
+                    SELECT 1 FROM listing li2
+                    WHERE li2.complex_id = c.id
+                      AND li2.status = 'active'
+                      AND li2.duplicate_of IS NULL
+                      AND (CAST(:area_min AS numeric) IS NULL
+                           OR li2.area_m2 >= CAST(:area_min AS numeric))
+                      AND (CAST(:area_max AS numeric) IS NULL
+                           OR li2.area_m2 <= CAST(:area_max AS numeric))
+                )
+              )"""
+
+    #: 연식·세대수 조건. **NULL(미상)은 통과하지 않는다** — 모르는 것을 조건에 맞다고
+    #: 우기지 않는다. 대신 몇 개가 미상으로 빠졌는지 `candidate_scope_stats` 가 세고,
+    #: 러너가 그 숫자를 notes 로 말한다(조용히 버리지 않는다).
+    _BUILT_MATCH_SQL = """(CAST(:built_after AS int) IS NULL
+                           OR c.built_year >= CAST(:built_after AS int))"""
+    _HOUSEHOLDS_MATCH_SQL = """(CAST(:min_households AS int) IS NULL
+                                OR c.total_households >= CAST(:min_households AS int))"""
+
     _CANDIDATES_SQL_TEMPLATE = """
         SELECT c.id,
                c.name,
@@ -760,6 +849,13 @@ class PostgisRepository:
                     WHERE left(c.region_code, length(rc)) = rc
                 )
               )
+          -- 내 조건(평수·연식·세대수). **여기서 거르는 이유는 LIMIT 때문이다** —
+          -- 걸러내지 않으면 조회 상한(50개 단지)이 조건과 무관한 단지로 다 차서,
+          -- 59㎡를 찾는 사용자에게 84㎡ 대단지 50개를 분석하고 후보 0건을 돌려준다.
+          -- (최종 판정은 러너가 후보 하나하나에 다시 한다 — 여기는 조회를 좁힐 뿐이다.)
+          AND {area_clause}
+          AND {built_clause}
+          AND {households_clause}
         -- ① 활성 매물이 있는 단지를 먼저 본다(지금 살 수 있는 물건이 있는 쪽).
         -- ② **예산으로 체결된 거래가 있는 단지**를 먼저 본다.
         --    ⚠️ 거르는 게 아니라 **정렬**이다. 예산 초과 단지도 LIMIT 안에 남고
@@ -793,13 +889,18 @@ class PostgisRepository:
     # 바인딩 파라미터(:min_lon …)로 들어간다. 조건마다 문자열을 이어 붙이지 않고
     # 변형을 미리 컴파일해 두는 이유는, `(:has_bbox IS FALSE OR geom && …)` 같은
     # 형태로 쓰면 플래너가 bbox 를 상수로 못 보고 **GiST 인덱스를 포기**하기 때문이다.
-    _CANDIDATES_SQL = text(_CANDIDATES_SQL_TEMPLATE.format(bbox_clause=""))
-    _CANDIDATES_BBOX_SQL = text(
-        _CANDIDATES_SQL_TEMPLATE.format(bbox_clause=_BBOX_CLAUSE))
+    _CANDIDATES_SQL = text(_CANDIDATES_SQL_TEMPLATE.format(
+        bbox_clause="", area_clause=_AREA_MATCH_SQL,
+        built_clause=_BUILT_MATCH_SQL, households_clause=_HOUSEHOLDS_MATCH_SQL))
+    _CANDIDATES_BBOX_SQL = text(_CANDIDATES_SQL_TEMPLATE.format(
+        bbox_clause=_BBOX_CLAUSE, area_clause=_AREA_MATCH_SQL,
+        built_clause=_BUILT_MATCH_SQL, households_clause=_HOUSEHOLDS_MATCH_SQL))
 
     def recommendation_candidates(
         self, *, region_codes: list[str], max_price_krw: int | None = None,
         limit: int = 50, bbox: BBox | None = None,
+        area_min_m2: float | None = None, area_max_m2: float | None = None,
+        built_after: int | None = None, min_households: int | None = None,
     ) -> list[ComplexSummary]:
         """조건에 맞는 후보 단지.
 
@@ -814,12 +915,21 @@ class PostgisRepository:
 
         `bbox` 가 오면 그 범위로 좁힌다. `region_codes` 와 **둘 다 오면 교집합**이다 —
         지역을 고르고 "이 주변"까지 눌렀다면 둘 다 만족하는 단지를 원한 것이다.
+
+        **내 조건(평수·연식·세대수)은 여기서 거른다** (2026-07-27). 예산과 달리 이건
+        "제외 사유"가 아니라 **후보가 아님**이다 — 59㎡를 찾는 사람에게 84㎡ 단지를
+        사유와 함께 수천 건 쌓아 봐야 답이 되지 않는다. 대신 조건 때문에 몇 개가
+        빠졌는지는 `candidate_scope_stats` 로 세어 사용자에게 숫자로 말한다.
         """
         params: dict[str, Any] = {
             "region_codes": list(region_codes or []),
             "trade_window_days": _CANDIDATE_TRADE_WINDOW_DAYS,
             "max_price_krw": max_price_krw,
             "limit": limit,
+            "area_min": area_min_m2,
+            "area_max": area_max_m2,
+            "built_after": built_after,
+            "min_households": min_households,
         }
         sql = self._CANDIDATES_SQL
         if bbox is not None:
@@ -842,6 +952,76 @@ class PostgisRepository:
             )
             for row in rows
         ]
+
+    #: 내 조건 때문에 **조회 대상에서 빠진 단지 수**. 거르는 것 자체는 옳지만,
+    #: 몇 개가 빠졌는지 말하지 않으면 사용자는 "왜 3건뿐이냐"에 답을 받지 못한다.
+    #: 미상(연식·세대수 NULL)으로 빠진 몫을 따로 센다 — **"모름"과 "아님"은 다르다.**
+    _SCOPE_STATS_TEMPLATE = """
+        SELECT count(*) AS scope_total,
+               count(*) FILTER (WHERE NOT area_ok)     AS area_dropped,
+               count(*) FILTER (WHERE NOT built_ok)    AS built_dropped,
+               count(*) FILTER (WHERE CAST(:built_after AS int) IS NOT NULL
+                                  AND built_year IS NULL) AS built_unknown,
+               count(*) FILTER (WHERE NOT households_ok) AS households_dropped,
+               count(*) FILTER (WHERE CAST(:min_households AS int) IS NOT NULL
+                                  AND total_households IS NULL) AS households_unknown
+        FROM (
+            SELECT c.built_year,
+                   c.total_households,
+                   COALESCE({area_clause}, false)       AS area_ok,
+                   COALESCE({built_clause}, false)      AS built_ok,
+                   COALESCE({households_clause}, false) AS households_ok
+            FROM complex c
+            WHERE {bbox_clause}(
+                    cardinality(CAST(:region_codes AS text[])) = 0
+                    OR EXISTS (
+                        SELECT 1 FROM unnest(CAST(:region_codes AS text[])) AS rc
+                        WHERE left(c.region_code, length(rc)) = rc
+                    )
+                  )
+        ) s
+    """
+
+    _SCOPE_STATS_SQL = text(_SCOPE_STATS_TEMPLATE.format(
+        bbox_clause="", area_clause=_AREA_MATCH_SQL,
+        built_clause=_BUILT_MATCH_SQL, households_clause=_HOUSEHOLDS_MATCH_SQL))
+    _SCOPE_STATS_BBOX_SQL = text(_SCOPE_STATS_TEMPLATE.format(
+        bbox_clause=_BBOX_CLAUSE, area_clause=_AREA_MATCH_SQL,
+        built_clause=_BUILT_MATCH_SQL, households_clause=_HOUSEHOLDS_MATCH_SQL))
+
+    def candidate_scope_stats(
+        self, *, region_codes: list[str] | None = None, bbox: BBox | None = None,
+        area_min_m2: float | None = None, area_max_m2: float | None = None,
+        built_after: int | None = None, min_households: int | None = None,
+    ) -> dict[str, int]:
+        """조건별로 **몇 개 단지가 조회에서 빠졌는지**. 판정식은 후보 조회와 같은 것을 쓴다.
+
+        같은 조건을 두 번 적어 두면 언젠가 어긋나고, 그러면 "빠졌다고 말한 수"와
+        "실제로 빠진 수"가 달라진다 — 그래서 `_AREA_MATCH_SQL` 등을 공유한다.
+        """
+        params: dict[str, Any] = {
+            "region_codes": list(region_codes or []),
+            "trade_window_days": _CANDIDATE_TRADE_WINDOW_DAYS,
+            "area_min": area_min_m2,
+            "area_max": area_max_m2,
+            "built_after": built_after,
+            "min_households": min_households,
+        }
+        sql = self._SCOPE_STATS_SQL
+        if bbox is not None:
+            sql = self._SCOPE_STATS_BBOX_SQL
+            params |= {"min_lon": bbox.min_lon, "min_lat": bbox.min_lat,
+                       "max_lon": bbox.max_lon, "max_lat": bbox.max_lat}
+        with self._engine.connect() as conn:
+            row = conn.execute(sql, params).one()
+        return {
+            "scope_total": int(row.scope_total or 0),
+            "area_dropped": int(row.area_dropped or 0),
+            "built_dropped": int(row.built_dropped or 0),
+            "built_unknown": int(row.built_unknown or 0),
+            "households_dropped": int(row.households_dropped or 0),
+            "households_unknown": int(row.households_unknown or 0),
+        }
 
     #: 좌표 확보 현황. bbox 검색에서 **몇 개가 구조적으로 빠지는지**를 세는 데 쓴다.
     #: 고정 문구("약 5%")로 적으면 수집이 진행돼도 영영 낡은 값이 남는다 — 그래서 센다.
@@ -920,6 +1100,65 @@ class PostgisRepository:
             )
             for row in rows
         ]
+
+    # -- 정비사업(재건축·재개발) -------------------------------------------
+    #
+    # ⚠️ 매칭은 **적재 시점에 이미 끝나 있다**(scripts/load_redevelopment.py).
+    #    여기서는 이어진 결과만 읽는다 — 조회 시점에 이름·좌표로 다시 잇지 않는다.
+    #    그렇게 하면 "지금 화면에 보이는 매칭이 어느 규칙의 결과인지" 알 수 없어진다.
+    #
+    # ⚠️ 0행은 **"정비사업 없음"이 아니라 "확인되지 않음"**이다(수집 범위: 서울·인천).
+    #    그 구분은 도메인(app/domain/redevelopment)이 문구로 낸다.
+    _REDEV_SQL = text("""
+        SELECT p.zone_name, p.sigungu, p.raw_stage, p.stage,
+               p.raw_biz_type, p.biz_type, p.source, p.source_url, p.as_of,
+               p.zone_designated_on, p.committee_on, p.association_on,
+               p.design_review_on, p.implementation_on, p.disposition_on,
+               p.relocation_start_on, p.relocation_end_on, p.construction_start_on,
+               p.existing_households, p.planned_households,
+               pc.match_method
+          FROM redev_project_complex pc
+          JOIN redev_project p ON p.id = pc.project_id
+         WHERE pc.complex_id = :complex_id
+         -- 여러 구역이 걸리면 **진행이 가장 앞선 것**이 아니라 **가장 최근 스냅샷**을
+         -- 먼저 본다. 단계 서열로 고르면 "단계가 높을수록 좋다"는 틀린 전제가
+         -- 조회 계층에 숨어 들어간다(도메인이 목적별로 판단할 몫이다).
+         ORDER BY p.as_of DESC, p.id DESC
+    """)
+
+    def redevelopment_for_complex(self, complex_id: int) -> RedevProject | None:
+        """이 단지에 매칭된 정비사업 구역. 없으면 None(= **모른다**).
+
+        여러 건이 걸리면 가장 최근 스냅샷 1건을 쓴다. 실측상 한 단지가 두 구역에
+        동시에 매칭되는 경우는 거의 없고(대표지번 정확일치라서), 있다면 자료 쪽 중복이다.
+        """
+        with self._engine.connect() as conn:
+            row = conn.execute(self._REDEV_SQL, {"complex_id": complex_id}).first()
+        if row is None:
+            return None
+        return RedevProject(
+            zone_name=row.zone_name,
+            sigungu=row.sigungu,
+            raw_stage=row.raw_stage,
+            stage=row.stage,
+            raw_biz_type=row.raw_biz_type,
+            biz_type=row.biz_type,
+            source=row.source,
+            source_url=row.source_url,
+            as_of=row.as_of,
+            match_method=row.match_method,
+            zone_designated_on=row.zone_designated_on,
+            committee_on=row.committee_on,
+            association_on=row.association_on,
+            design_review_on=row.design_review_on,
+            implementation_on=row.implementation_on,
+            disposition_on=row.disposition_on,
+            relocation_start_on=row.relocation_start_on,
+            relocation_end_on=row.relocation_end_on,
+            construction_start_on=row.construction_start_on,
+            existing_households=row.existing_households,
+            planned_households=row.planned_households,
+        )
 
     # -- 추천 결과 저장 ----------------------------------------------------
 
@@ -1052,11 +1291,56 @@ class PostgisRepository:
 
     #: 003 이후 `sd.as_of` 가 기준연도의 정본이다. 없으면 poi.attrs 로 폴백한다
     #: (003 적용 전 적재분 호환). 둘 다 없으면 기준일자 미상 → 근거로 쓰지 않는다.
+    #:
+    #: 013 이후 **학교급별로 따로 묻는다**(`:level`). 급을 안 거르면 가장 가까운
+    #: 중학교가 '배정 초등학교'로 보고된다 — 학교급 컬럼을 만든 이유가 그것이다.
+    #: `school_level IS NULL` 인 행은 **어떤 급에도 안 걸린다**(= 로 비교하므로).
+    #: 급을 모르는 행을 초등으로 쳐 주는 관대함이 곧 조용한 오보다.
+    #:
+    #: 후보(candidate)를 UNION ALL 로 모으는 이유 — 급마다 자료 모양이 다르다:
+    #:   통학구역(초등) : 1행 = (구역, 배정 학교) → `sd.school_poi_id`
+    #:   학교군(중·고)  : 1행 = 구역, 후보 학교는 `school_district_member` 에 N행
+    #: 초등 행은 member 가 없고 중·고 행은 school_poi_id 가 NULL(013 CHECK)이라
+    #: 두 가지가 섞이지 않는다. 결과적으로 **초등 결과는 013 이전과 동일**하다.
     _SCHOOL_SQL = text("""
-        SELECT p.name,
-               ST_Distance(p.geom::geography, c.geom::geography) AS distance_m,
-               p.attrs,
-               sd.as_of AS district_as_of,
+        WITH cx AS (
+            SELECT geom FROM complex WHERE id = :complex_id
+        ), containing AS (
+            SELECT sd.id, sd.as_of, sd.school_poi_id, sd.zone_name, sd.zone_kind
+            FROM cx c
+            JOIN school_district sd
+              ON sd.geom && c.geom                 -- GiST 먼저
+             AND ST_Contains(sd.geom, c.geom)      -- 그 다음 정밀 포함 판정
+            WHERE sd.school_level = :level
+        ), candidate AS (
+            SELECT d.as_of, d.zone_name, d.zone_kind, p.id AS poi_id, p.name,
+                   p.attrs, p.geom AS school_geom,
+                   ST_Distance(p.geom::geography, c.geom::geography) AS distance_m
+            FROM containing d
+            JOIN poi p ON p.id = d.school_poi_id
+            CROSS JOIN cx c
+            UNION ALL
+            SELECT d.as_of, d.zone_name, d.zone_kind, p.id, p.name,
+                   p.attrs, p.geom,
+                   ST_Distance(p.geom::geography, c.geom::geography)
+            FROM containing d
+            JOIN school_district_member m ON m.district_id = d.id
+            JOIN poi p ON p.id = m.school_poi_id
+            CROSS JOIN cx c
+        ), nearest AS (
+            SELECT * FROM candidate ORDER BY distance_m NULLS LAST LIMIT 1
+        )
+        SELECT n.name,
+               n.distance_m,
+               n.attrs,
+               n.as_of     AS district_as_of,
+               n.zone_name,
+               n.zone_kind,
+               -- 이 단지가 배정받을 수 있는 학교가 몇 곳인가. 1이면 배정을 단정할 수
+               -- 있고, 2 이상이면 '후보'다. 학교군은 물론이고 **초등 공동학구**도
+               -- 여기서 2 이상이 된다(수도권 통학구역의 21%).
+               (SELECT count(DISTINCT poi_id) FROM candidate) AS candidate_count,
+               (SELECT count(*) FROM containing)              AS zone_count,
                -- 통학로가 간선급 도로를 건너는가. 단지→학교 직선과 도로 선형의 교차.
                -- road_segment 에 데이터가 없으면 false 가 아니라 **NULL(모름)** 이어야
                -- 하므로 EXISTS 를 쓰지 않고 데이터 유무를 따로 센다.
@@ -1066,19 +1350,15 @@ class PostgisRepository:
                ) AS road_rows_nearby,
                (SELECT count(*) FROM road_segment r
                  WHERE r.road_class = ANY(CAST(:main_road_classes AS text[]))
-                   AND r.geom && ST_MakeLine(c.geom, p.geom)
-                   AND ST_Intersects(r.geom, ST_MakeLine(c.geom, p.geom))
+                   AND r.geom && ST_MakeLine(c.geom, n.school_geom)
+                   AND ST_Intersects(r.geom, ST_MakeLine(c.geom, n.school_geom))
                ) AS road_crossings
-        FROM complex c
-        JOIN school_district sd
-          ON sd.geom && c.geom                 -- GiST 먼저
-         AND ST_Contains(sd.geom, c.geom)      -- 그 다음 정밀 포함 판정
-        JOIN poi p ON p.id = sd.school_poi_id
-        WHERE c.id = :complex_id
-        ORDER BY distance_m NULLS LAST
-        LIMIT 1
+        FROM nearest n
+        CROSS JOIN cx c
     """)
 
+    #: 주변에 **그 급의** 학구도가 있기는 한가. '미포함'과 '미확보'를 가른다.
+    #: 급을 안 거르면 초등 학구도만 있는 지역이 "중학교 학교군도 확보됨"으로 보고된다.
     _DISTRICT_AVAILABLE_SQL = text("""
         SELECT EXISTS (
             SELECT 1
@@ -1086,6 +1366,7 @@ class PostgisRepository:
             JOIN school_district sd
               ON sd.geom && ST_Expand(c.geom, CAST(:deg AS double precision))
             WHERE c.id = :complex_id
+              AND sd.school_level = :level
         ) AS available
     """)
 
@@ -1201,31 +1482,48 @@ class PostgisRepository:
                 return LocationFacts()
 
             school = self._fetch_school(conn, complex_id)
+            middle = self._fetch_school(conn, complex_id, level=_LEVEL_MIDDLE)
+            high = self._fetch_school(conn, complex_id, level=_LEVEL_HIGH)
             stations = self._fetch_stations(conn, complex_id)
             plans = self._fetch_plans(conn, complex_id)
             pois = self._fetch_pois(conn, complex_id)
             hazards = self._fetch_hazards(conn, complex_id)
 
-        return LocationFacts(school=school, stations=stations, plans=plans,
+        return LocationFacts(school=school, middle_school=middle, high_school=high,
+                             stations=stations, plans=plans,
                              pois=pois, hazards=hazards)
 
     # --- 입지 조각들 ------------------------------------------------------
 
-    def _fetch_school(self, conn, complex_id: int) -> SchoolFact | None:
+    def _fetch_school(self, conn, complex_id: int,
+                      *, level: str = _LEVEL_ELEMENTARY) -> SchoolFact | None:
+        """학교급 하나의 학구도 판정. **급마다 따로 부른다** — 뜻이 다르기 때문이다.
+
+        초등은 통학구역(후보 1곳이면 배정), 중·고는 학교군(후보 여럿, 배정 방식은
+        원천에 없음). 이 함수는 그 차이를 **사실로만** 넘기고 문구는 도메인이 만든다.
+        """
         row = conn.execute(self._SCHOOL_SQL, {
             "complex_id": complex_id,
+            "level": level,
             "main_road_classes": _MAIN_ROAD_CLASSES,
             "road_deg": _deg(_BUILDING_ROAD_RADIUS_M),
         }).one_or_none()
-        available = conn.execute(self._DISTRICT_AVAILABLE_SQL, {
-            "complex_id": complex_id, "deg": _deg(_DISTRICT_DATA_RADIUS_M),
-        }).one().available
 
         if row is None:
             # 학구도에 포함되지 않았다. **최근접 학교 거리로 대체하지 않는다** —
             # 배정과 거리는 다른 개념이다(models.py 절대 규칙 1).
             # 주변에 학구도 데이터 자체가 없으면 '미확보'로 구분해 넘긴다.
-            return SchoolFact(district_data_available=bool(available))
+            #
+            # ⚠️ 이 공간질의는 **여기서만** 돈다 (PERF-1, 2026-07-27). 예전에는 위에서
+            #    무조건 실행하고 행이 있으면 결과를 버렸다(아래 `district_data_available=True`
+            #    는 하드코딩이다) — 급 3종 × 단지당 = 불필요한 공간질의 3회.
+            #    행이 있다는 것은 곧 그 자리에 학구도 데이터가 있다는 뜻이므로,
+            #    행이 없을 때만 "주변에 데이터 자체가 없는가"를 물으면 된다.
+            available = conn.execute(self._DISTRICT_AVAILABLE_SQL, {
+                "complex_id": complex_id, "deg": _deg(_DISTRICT_DATA_RADIUS_M),
+                "level": level,
+            }).one().available
+            return SchoolFact(level=level, district_data_available=bool(available))
 
         attrs = row.attrs or {}
         # 주변에 도로 선형 데이터가 아예 없으면 "안 건넌다"가 아니라 **모른다**.
@@ -1239,6 +1537,7 @@ class PostgisRepository:
             crosses = None
         return SchoolFact(
             name=row.name,
+            level=level,
             in_district=True,
             distance_m=_as_float(row.distance_m),
             crosses_main_road=crosses,
@@ -1246,6 +1545,13 @@ class PostgisRepository:
             district_as_of=(row.district_as_of.isoformat() if row.district_as_of
                             else attrs.get("district_as_of")),
             district_data_available=True,
+            zone_name=row.zone_name,
+            zone_kind=row.zone_kind,
+            # 013 이전 적재분은 zone_kind 가 비어 있을 수 있다. 그때는 '모른다'로 둔다
+            # (없는 값을 '통학구역'으로 채우면 학교군을 통학구역이라 우기게 된다).
+            candidate_count=int(row.candidate_count or 0) or None,
+            zone_count=int(row.zone_count or 0) or None,
+            education_office=attrs.get("office"),
             achievement_pct=_opt_float(attrs.get("achievement_pct")),
             achievement_source=attrs.get("achievement_source"),
             achievement_as_of=attrs.get("achievement_as_of"),
@@ -1349,12 +1655,16 @@ class PostgisRepository:
             SELECT ST_Centroid(ST_Collect(geom)) AS geom FROM bldg WHERE geom IS NOT NULL
         ),
         -- 학구도 데이터가 이 근처에 있기는 한가 (포함 아님 ≠ 데이터 없음)
+        -- ⚠️ **초등만** 센다. 동별 통학거리는 초등 구간(PROXIMITY_BANDS['school'])으로
+        --    점수화되므로, 중·고 학교군이 근처에 있다고 해서 '초등 학구도 확보'가
+        --    되면 안 된다. 그러면 '모름(NULL)'이 '미포함(false)'으로 조용히 바뀐다.
         district AS (
             SELECT EXISTS (
                 SELECT 1 FROM complex c
                 JOIN school_district sd
                   ON sd.geom && ST_Expand(c.geom, CAST(:district_deg AS double precision))
                 WHERE c.id = :complex_id
+                  AND sd.school_level = :school_level
             ) AS available
         )
         SELECT b.id, b.name, b.direction_deg,
@@ -1381,11 +1691,14 @@ class PostgisRepository:
                              CAST(:station_radius AS double precision))
             ORDER BY distance_m LIMIT 1
         ) st ON true
+        -- 동별 통학거리는 **초등 배정 학교**까지의 거리다(중·고 학교군은 배정이
+        -- 아니라 후보 범위라 동 단위 비교의 근거가 되지 못한다).
         LEFT JOIN LATERAL (
             SELECT ST_Distance(p.geom::geography, b.geom::geography) AS distance_m
             FROM school_district sd
             JOIN poi p ON p.id = sd.school_poi_id
             WHERE sd.geom && b.geom AND ST_Contains(sd.geom, b.geom)
+              AND sd.school_level = :school_level
             ORDER BY distance_m LIMIT 1
         ) sc ON true
         LEFT JOIN LATERAL (
@@ -1435,6 +1748,7 @@ class PostgisRepository:
                 "road_deg": _deg(_BUILDING_ROAD_RADIUS_M),
                 "road_radius": _BUILDING_ROAD_RADIUS_M,
                 "district_deg": _deg(_DISTRICT_DATA_RADIUS_M),
+                "school_level": _LEVEL_ELEMENTARY,
             }).all()
 
         # 중앙/외곽은 단지 무게중심까지의 거리를 **중앙값으로 반 가른** 상대 분류다.

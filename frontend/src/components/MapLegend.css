@@ -36,7 +36,7 @@
 .legend__more {
   margin-left: auto;
   font-size: var(--fs-caption);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .legend__body {
@@ -83,7 +83,8 @@
   justify-content: center;
   height: 22px;
   border-radius: var(--r-pill);
-  font-family: var(--ff-num);
+  /* 견본 글자가 "8.4억"이라 등폭을 쓰면 숫자와 '억'의 폰트가 갈린다 — 본문 폰트 + tnum */
+  font-variant-numeric: tabular-nums;
   font-size: 11px;
   font-weight: 600;
 }
@@ -103,7 +104,7 @@
 
 .legend__swatch--rank {
   background: var(--accent-weak);
-  color: var(--accent);
+  color: var(--accent-text);
   border: 1px solid var(--accent);
 }
 

@@ -16,7 +16,7 @@
 }
 
 .tip__btn[aria-expanded="true"] {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 /* 설명 본문 — 말풍선이 아니라 **그 자리에 펼쳐지는 문단**.

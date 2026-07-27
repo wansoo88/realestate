@@ -1,38 +1,424 @@
 {
   "code_review": {
     "status": "passed",
-    "id": "CR-028",
-    "date": "2026-07-27",
-    "at": "2026-07-27T15:30:00+09:00",
+    "id": "CR-031",
+    "date": "2026-07-28",
+    "at": "2026-07-28T01:20:00+09:00",
     "deploy_ready": true,
-    "scope": "SCHOOL-1 학구도 적재 — app/ingest/school_zone.py · scripts/{fetch_school_zone,load_school_zone,verify_school_district}.py · migrations/012_school_district_natural_key.sql · tests/test_school_zone.py(28) · config/sources.yaml · deploy/DEPLOY.md(012 절차). 미커밋 9건",
+    "scope": "CR-030 차단(CR30-1) 재검증 3라운드 — 분담금 방어를 '정규식 정교화'에서 '주제 폐기'로 전환(redact_cost_topic 문장단위 재료제거 · contains_cost_topic fail-safe · assert_no_cost_topic 주제어 단독판정 · assert_no_cost_estimate 필드전체) + CR30-3 _MANUAL_FROM 상수/디렉터리 기준선 + CR30-2/SR25-1 위생검사 수신자 기반 재작성 및 app/core/http.py 신설 + SR24-4 statement_timeout + SR25-2 검증기 index 지목/msg 200자 + SR25-3 SOURCE_LABELS. 미커밋 97건",
     "reviewer": "code-reviewer (herdr re-review 대행)",
+    "tests": {
+      "backend": "1123 passed / 76 skipped / 0 failed",
+      "frontend": "656 passed / 39 files",
+      "build": "ok (vite build + tsc --noEmit 모두 exit 0)",
+      "note": "주장 숫자(1,123/76 · 656/39)와 정확히 일치. junitxml 1,199-76. 변이 14종 원복 후 재실행에서도 동일. 줄바꿈만 바뀐 파일 0건(HEAD 대비 정규화 비교) · core.autocrlf=true 이고 git ls-files --eol 이 전부 i/lf 라 커밋 블롭은 LF · git diff --stat 70파일 6,371+/575- 로 미부풀림"
+    },
+    "mutations": {
+      "total": 14,
+      "killed": 12,
+      "survived": 2,
+      "self_fulfilling_found": 0,
+      "detail": "KILLED 12: _COST_TOPIC_RE 완성형 회귀 · assert_no_cost_topic no-op · redact_cost_topic 무력화 · 프롬프트 fail-safe 제거 · 출력게이트 호출삭제 · 고지문구 '어떤 경로로도' 복귀 · statement_timeout connect_args 제거 · 통계조회 실패 조용히 삼킴 · 위생검사 범위 scripts 축소 · 위생검사 .text/.json 탐지제거 · DEPLOY.md 009·010 삭제(CR-030 에서 SURVIVED 였던 것) · DEPLOY.md 011 단독삭제. SURVIVED 2: _MANUAL_FROM=13 로 상수 자체를 올림(CR31-5) · analysis.py assert 의 *must_verify 제거(CR30-4 이월).",
+      "cost_bypass_probe": "최종 카드(run_mvp_pipeline) 실측 — 차단: CR-029 원문 · C 문장분리 · E 30자초과 · B '부담' · K '분담액' · F 필드분리 · 모범답안(의도된 폐기) 전부 basis=fallback + 폐기 고지. 채택: 대조군 정상요약 basis=llm(방어 고장 아님). 경계 3종: why 7번째는 [:6] 절단이 검사보다 먼저 돌아 카드 미도달 · next_actions 5번째는 절단 후에도 검사에 걸려 폴백 · why_not 비리스트는 우리 risks 로 대체. 유출(★G 부류, 담당자 자진보고분): 주제어 없이 금액만 쓰는 6a/6b/6c/6g/6l 과 표기변형 6d/6e/6f/6h — 구조가 다른 6번째 우회로는 찾지 못했다"
+    },
+    "resolved_from_cr030": [
+      "CR30-1",
+      "CR30-2",
+      "CR30-3"
+    ],
     "blocking": [],
-    "ambiguous_zone_verdict": "옳다 — 비대칭이 자의적이지 않고 '모호성이 데이터로 해소되는가' 하나의 기준을 따른다. 같은 학구ID·같은 학교명은 한 구역이 여러 폴리곤으로 쪼개진 것이라 MultiPolygon 병합이 원본의 뜻이고 정보 손실이 0이다. 같은 학구ID·다른 학교명(고덕함박초/현민초)은 ID 재사용이라 어느 폴리곤이 어느 학교 것인지 알 방법이 없고, 하나를 고르면 배정을 지어내는 것이므로 버리는 게 맞다(fail-closed, reb.py '애매하면 매칭하지 않는다'와 일관). 변이 '애매한 ID 를 골라 쓴다' KILLED.",
-    "stale_verdict": "옳다 — 지우는 쪽이 더 위험하다. '학구 폐지'와 '원천 부분배포'를 구분할 수 없는데 지우면 반쪽 배포된 날 배정이 광범위하게 사라진다(school 가중치 0.35의 핵심 축). 구역 재조정은 같은 자연키를 UPDATE 하므로 stale 을 만들지 않아, stale 은 ID 자체가 배포본에서 사라질 때만 생긴다. 낡은 행도 district_as_of 를 들고 있고 assess_school 이 결과에 실으므로 완전한 침묵도 아니다. 다만 stale>0 일 때 로그 한 줄로만 남으면 아무도 안 보므로 verify 스크립트가 경고로 드러낼 것(SCHOOL-2 low).",
-    "pref_debt": "later",
-    "notes": "PASS · 배포 가능 · 차단 0건. 재현: backend 918 passed/63 skipped(890→+28) · frontend 501 무변경 — 지시 수치 일치. 변이 9종 후 2개 파일 바이트 원복. 서버 조회만(운영 DB 쓰기 0회). backend/docs·frontend/docs 에 아무 파일도 만들지 않았다(커밋 훅 주의 준수). ※ 이전 라운드의 '무키 경로 없음, 확정적 미확보' 판단이 틀렸음을 PM 이 잡아 재착수시킨 건이다 — '확정적으로 없다'는 조사 범위의 한계였지 사실이 아니었고, 스스로 뒤집은 것은 옳다. [1 ★거리 대체 없음 — 실호출 재현] 문서가 아니라 운영 DB 실호출(location_facts+evaluate_location)로 확인. 미포함 단지 6건 전수에서 in_district=False·name=None 이고 missing='배정 초등학교 확인 불가(학구도 미포함) — 최근접 학교 거리로 대체하지 않음'. assert name is None 을 6건 모두 통과(담당자 보고 3건보다 넓게 봤고 동일). 비수도권도 확인 — 부산 해운대·대전 유성 반경 20km 내 학구도 0건이라 district_data_available=False 경로로 갈린다. **'미포함'과 '미확보'가 다른 문장으로 갈리는 것이 중요하다**(전자는 '우리는 아는데 여기 아니다', 후자는 '우리가 모른다'). 코드도 그 구조 — analysis.py:143-155 가 두 경우 모두 fact.distance_m 을 읽기 전에 반환한다. 변이: '미포함일 때 최근접 학교명 대체' KILLED(1) · '미확보인데 배정 단정' KILLED(2). [2 실호출 원 단위 재현] 쎄비앙102동 948.058m 서울역삼초 · 래미안블레스티지 215.334m 서울개현초 · 압구정하이츠파크 1128.574m 서울청담초 — 보고(948/215/1129)와 일치, 셋 다 in_district=True. [3 분류·산출률] complex 16,462 · 좌표없음 901 · 포함 15,548 · 미포함 13 · school_district 3,246 · poi(school) 2,209 · **94.45%**. 901+15,548+13=16,462 으로 한 행도 설명 없이 남지 않는다(예측 94.5% 일치). '전' 값 재구성 타당성 검증: district_data_available=False 만 되돌린 방법이 적재 이전과 동일하려면 그 플래그가 꺼졌을 때 school 축이 다른 입력을 안 봐야 하는데, assess_school 이 즉시 (None,[...]) 반환해 distance_m·name 을 읽지 않고, _school_score(None)→None 이며, school.distance_m 의 유일한 다른 소비처(analysis.py:458)는 b.school_in_district 가 참일 때만 타는 **건물 단위** 경로다. 게다가 이번에 추가된 poi(school) 2,209 는 infra 축(mart·park·hospital_er)에 안 들어간다 → 델타는 school 축에만 귀속. **방법이 옳다.** 497/500(99.4%) 변동·평균 +0.48·범위 −27.6~+27.1 의 양방향 분포도 '일률 가점이 아니라 실제 변별' 주장을 뒷받침한다(일률 가점이면 분산이 0에 가까워야 한다). [4 원천 결함 2건 — 둘 다 옳다] (가)완전중복 접기: ON CONFLICT DO UPDATE 는 한 문장에서 같은 대상 행을 두 번 건드리면 문장 전체가 깨진다. 배치 내 접기가 정석이고 poi_loader 와 일관. **ON_ERROR_STOP 덕에 전부 롤백돼 가짜 성공이 없었던 것**이 중요하다 — DEPLOY-1 에서 요구했던 설정이 실제 사고에서 값을 했다. 변이 '접기 제거' KILLED(1). (나)비대칭은 위 ambiguous_zone_verdict 참조. [5 그 밖] 자연키 kesi:{학구ID}/{학교ID} 의 필요성을 실측 입증 — 3,246행 중 DISTINCT 학구ID 2,652, **공동학구 462건**이라 학구ID 단독으로는 키가 성립하지 않는다. source_ref 중복 0건. 중·고 차단은 ELEMENTARY 필터가 파싱·위치 **두 단계**에 걸려 있고 **양쪽 다 변이 KILLED** — 위험(_SCHOOL_SQL 이 학교급 구분 없이 최근접 1건을 골라 가장 가까운 중학교가 '배정 초등학교'로 보고됨)이 docstring 에 정확히 기재. M1 shx 워드→바이트 ×2 누락 **KILLED(2)** — '레코드 2개를 둬야 잡힌다'는 설명대로 실제로 잡힌다. shp/shx/dbf 누락검사 제거 KILLED(1). achievement_pct NULL 유지 옳다(초등은 국가수준 평가 대상 아님, 출처·기준연도 없는 수치 미사용 규칙과 일관). **멱등 3회는 내가 재현하지 못했다** — 로더 실행이 운영 DB 쓰기라 지시(조회만)에 따라 돌리지 않았다. 자연키 UNIQUE(012)+ON CONFLICT DO UPDATE+배치 내 접기라는 기전만 정적 확인했고 '2·3차 신규 0/갱신 3,246' 은 이 구조와 정합적이다. **실행 재현이 아님을 명시한다.** [PREF-1 = later, 경고를 집행하지 않는 이유를 밝힌다] 실측상 아무것도 안 바뀌었다(buildMapQuery 는 area_min/max·built_after 만, 백엔드 prefer 참조 0건, 고지는 가중치 절 하나뿐). CR-027 에서 '다음에도 안 하면 판정을 달리하겠다'고 썼으나 **집행하지 않는다** — 차단은 결과로 정당화되어야지 내가 앞서 한 경고로 정당화되어선 안 되고, 피해는 3회 내내 같으며(설정화면 3개 입력의 오해, 추천 결과 자체는 정확하고 score_axes 로 정직히 표기), 여기서 막으면 사용자가 API 승인까지 받아온 학구도 기능이 라벨 한 줄 때문에 미뤄져 그 거래가 사용자에게 손해다. 경고를 반복하는 것이 조건을 값싸게 만든다는 지적은 옳으므로 **'다음엔 진짜'라는 말을 더 하지 않는다.** 다만 이번 라운드로 성격이 나빠진 건 사실이다 — school 축이 0%→94.45% 로 살아나면서 weights.location(학군 포함, 동작함)과 prefer.school_district(학군 중요도 0~5, 미동작·무고지)가 같은 화면에서 둘 다 '학군 중요도'로 읽히는데 하나만 동작한다. 셋 중 이게 가장 오도적이라 **요구를 한 줄로 좁힌다**: 그 슬라이더 옆에 '아직 순위에 반영되지 않습니다 — 학군 비중은 위 가중치에서 조절됩니다'. 프론트를 다음에 건드릴 때 같이 넣으면 된다. [road_segment] crosses_main_road 를 NULL 로 두는 현재 동작이 옳다(모르는 것을 False 로 쓰면 '대로를 안 건넌다'는 없는 판정). '이제서야 의미가 생겼다'는 말도 맞다 — _school_score 의 −15 감점은 배정이 확인된 뒤에만 타는데 그 전제가 94.45% 로 채워졌다. **다음 라운드 필수는 아니다**(결함이 아니라 미구현이고 NULL 처리가 정직하다). 우선순위 높은 다음 후보로 SCHOOL-3(low) 등재. [배포 주의] DEPLOY-2 가 **네 라운드째** 열려 있다 — 서버 소스 갱신 절 · 가입 열기 전 승인제 생존 확인. 이번엔 마이그레이션 012 도 손수 적용 대상이며, 절차서에 012 절이 추가돼 테스트를 통과한 것은 확인했다.",
-    "tests": "backend 918 passed / 63 skipped (890→+28, failures=0 errors=0) · frontend 501 무변경 — 지시 수치 재현, 감사 후 재실행 동일. 내 변이 9종 전부 유효분 KILLED: S1 미포함→최근접 대체(1) · S2 미확보인데 배정 단정(2) · S3 중·고 차단해제 파싱단계(1) · S4 위치단계(1) · S5 애매 학구ID 채택(1) · S7 중복행 접기 제거(1) · M1 shx 워드→바이트 ×2 누락(2) · S8 shp/shx/dbf 누락검사 제거(1). S6 는 no-op 앵커(무효 변이). 변이 후 school_zone.py·analysis.py 바이트 원복 확인. 운영 DB 읽기전용 실호출: 미포함 6건 전수 name=None + assert 통과 · 쎄비앙102동 948.058m/래미안블레스티지 215.334m/압구정하이츠파크 1128.574m · 부산·대전 반경 20km 학구도 0건 · complex 16,462/좌표없음 901/포함 15,548/미포함 13 = 94.45% · school_district 3,246 · poi(school) 2,209 · DISTINCT 학구ID 2,652 · 공동학구 462 · source_ref 중복 0 · road_segment 0. 멱등 3회는 미재현(운영 DB 쓰기 금지). needs_db 63 미실행."
+    "new_findings": [
+      {
+        "id": "CR31-1",
+        "severity": "medium",
+        "blocks": "없음 - 다만 배포 전 SQL 1회 확인은 필수",
+        "title": "도메인 tripwire(assert_no_cost_estimate)가 이제 외부 수집 문자열로 발화하고, 발화하면 추천 job 전체가 죽는다",
+        "evidence": "CR-030 통과조건 ①(근접 30자 창 폐기 -> 필드 전체)으로 검사가 넓어졌는데 rationale 은 COST_DISCLOSURE 를 항상 포함하므로 주제어 조건이 언제나 참이다 — 사실상 'rationale 에 금액 토큰이 하나라도 있으면 예외'가 됐다. 그 rationale 에는 수집 데이터(zone_name·raw_stage)가 그대로 보간된다(analysis.py:465-466). 실측: zone_name='1억원지구' / raw_stage='조합설립(추정 5000만원)' / zone_name='제3원구역'(_MONEY_RE 맨 뒤 단독 '원' 이 '3원' 을 잡는다) 전부 CostEstimateError. 예외를 아무도 잡지 않아 run_mvp_pipeline -> run_recommendation_job 포괄 except -> job failed + 빈 결과. 후보 한 건의 구역명 때문에 추천 전체가 사라진다. 서울·인천 616행이 이미 적재돼 있고 실제 표기(장위4구역 · ○○동 10번지 일원)로는 성립하지 않아 확률은 낮으나, 확인 없이 배포하면 첫 추천에서 알게 된다. 개발자 문장에 대한 lint 로서는 옳고 문제는 같은 함수가 요청 경로에서 런타임 외부 문자열을 보게 된 것이다(넓힌 것은 이번 라운드이고 그 조건을 요구한 것은 나다).",
+        "pass_conditions": [
+          "배포 전 1회: SELECT source, zone_name, raw_stage FROM redev_project WHERE zone_name ~ '\\d[\\d,.]*\\s*(억|천만|백만|만\\s*원|원)' OR raw_stage ~ 같은패턴 -> 0행이어야 한다",
+          "외부 문자열은 적재 시점에 검사하고, 요청 경로에서는 redevelopment_assessment 가 CostGuardError 를 잡아 그 후보의 재건축 블록만 '미확보'로 강등 + notes 고지(요약 한 줄 때문에 추천을 안 죽인 것과 같은 원칙)",
+          "_MONEY_RE 의 맨 뒤 단독 '원' 에 최소 자릿수 또는 만/억/천만 동반을 요구할 것"
+        ]
+      },
+      {
+        "id": "CR31-2",
+        "severity": "medium",
+        "blocks": "없음 - LLM 키 투입 전 처리",
+        "title": "summary_basis 가 화면에 없다 - ★G 를 받아들인 논증이 이 고지에 기댄다",
+        "evidence": "orchestrator.py:1205 는 '이 카드의 문장이 AI 가 쓴 것인지 규칙이 쓴 것인지 카드 단위로 밝힌다. notes 만으로는 어느 카드가 규칙 기반인지 사용자가 알 수 없다'고 적고 api-spec.md 5.4 가 계약으로 못박았다. 그런데 프론트에 summary_basis 참조 0건(client.ts 타입에도 없음)이고 ReportCard.tsx:149 는 headline 을 그냥 찍는다. 이번 라운드에서 성격이 바뀌었다 — ★G 수용 근거가 '완전성을 주장하지 않고 한계를 고지한다'인데 고지 체계의 한 축이 사용자에게 닿지 않는다. 추천 10건 중 3건 폐기 시 notes 는 '3건'이라고만 말한다.",
+        "pass_conditions": [
+          "카드에 한 줄: summary_basis==='llm' 이면 '이 요약 문장은 AI 가 썼습니다(순위·가격·제외 사유는 규칙 계산)', 'fallback' 이면 '규칙 기반 요약'",
+          "PREF-1 처럼 프론트를 다음에 건드릴 때 함께 넣으면 된다 - 독립 라운드 불필요"
+        ]
+      },
+      {
+        "id": "CR31-3",
+        "severity": "low",
+        "blocks": "없음",
+        "title": "시스템 프롬프트가 탐지 낱말 4개를 모델에게 그대로 알려 준다 + 기각한 대안의 사유가 코드에 없다",
+        "evidence": "PORTFOLIO_SYSTEM 규칙 7 이 '분담·부담·환급·추가 비용 을 아예 쓰지 마세요' 로 금지어 목록 = 탐지어 목록을 공개한다. ① assert_no_cost_topic 독스트링의 '모델은 이 주제를 말할 근거를 받지 못한다'가 user 블록에 한해서만 참이 된다 ② 금지어를 알려 주면 모델은 그 낱말을 피해 같은 말을 하는 쪽으로 유도된다 — 그게 정확히 ★G(6a·6b '추납금'·6g)라 방어 문장이 잔여 위험을 키우는 방향이다. 또 기각한 대안(금액 출처 대조)의 사유가 코드에 없어 '원리적으로 불가능'으로 읽힌다 — 실제로는 가능하고(모범답안의 7억 원은 프롬프트의 700,000,000원 유래, 우회 E 의 1억 2천만 원은 프롬프트에 없다) 보류 사유는 한글 수사 정규화와 반올림 허용 오차다.",
+        "pass_conditions": [
+          "규칙 7 을 낱말 열거 대신 결과 서술로: '분석 결과에 없는 비용·금액을 추정하지 마세요. 금액은 분석 결과에 있는 값만 인용하세요'(탐지어는 코드에만)",
+          "analysis.py 주석에 '출처 대조는 가능하나 정규화·허용오차 때문에 보류' 한 줄"
+        ]
+      },
+      {
+        "id": "CR31-4",
+        "severity": "info",
+        "blocks": "없음",
+        "title": "위생 검사기의 남은 우회 형태 · portfolio_summary 의 budget=None 조용한 분기",
+        "evidence": "_uncapped_reads 는 별칭 재대입(x = resp; x.content)·함수 인자 전달·리스트/딕셔너리 경유·walrus·join(iter_bytes()) 를 놓친다(직접 프로브). 다만 저장소 실사용 0건이고 iter_bytes 는 헬퍼 자신이 쓰는 형태라 일괄 금지하면 헬퍼가 자기 검사에 걸린다. 별도로 portfolio_summary(findings, llm, forbidden) 를 budget 없이 부르면 폐기해도 cost_blocked 가 안 세지고 고지가 나가지 않는다 — run_mvp_pipeline 은 항상 넘기므로 현재 경로는 안전하나 공개 함수의 조용한 분기다.",
+        "pass_conditions": [
+          "여유가 되면 별칭 1단 추적 추가",
+          "budget=None 이면 폐기 시 최소한 logger.error 로 남기거나 인자를 필수화"
+        ]
+      },
+      {
+        "id": "CR31-5",
+        "severity": "low",
+        "blocks": "없음",
+        "title": "_MANUAL_FROM 상수 자체를 올리는 변이는 잡히지 않는다",
+        "evidence": "변이 실측: _MANUAL_FROM = 13 -> SURVIVED(exit=0). 거기에 009·010 참조를 지운 조합(정확히 DEPLOY-1 재현)도 SURVIVED. 다만 성격이 다르다 — 예전에는 문서 한 곳(런북)만 정리하면 가드가 사라졌고 지금은 테스트 상수를 의도적으로 고쳐야 한다. 명세를 스스로 낮추는 것은 어떤 상수 기반 검사도 못 막는다. 현실적 경로(009·010 / 011 / 013 / 014 어느 위치의 참조 삭제)는 전부 KILLED.",
+        "pass_conditions": [
+          "DEPLOY.md 본문에 '손수 적용은 009부터'를 한 줄 명시하고, 테스트가 _MANUAL_FROM 과 그 선언 번호의 일치를 단언할 것 -> 상수만 올리는 변이가 문서와 어긋나 죽는다"
+        ]
+      }
+    ],
+    "verified_ok": "CR30-1: 최종 카드 프로브로 5종 우회 전부 차단 + 대조군 채택 확인. 프롬프트 실물(3,218자)에 분담/부담/환급/추가 비용 0건이고 동시에 사용자 카드에는 next_actions[0]·findings.rationale·notes 로 고지가 남는다(재료 차단과 고지 분리). '잃는 정보가 0' 실물 대조: 실거래 근거는 폴백 why[1] 에 더 자세히(적정가 밴드 700,000,000원) · 분담금 안내 잔존 · 폐기 고지 잔존 — 잃는 것은 headline 문장 품질뿐이고 같은 내용이 redevelopment.verdict 와 why[2] 에 남는다. 고지 문구가 사실이 됐고 '어떤 경로로도' 는 그렇게 쓰지 않는다는 설명 3곳과 이를 고정하는 단언 1곳(test_redevelopment.py:992)에만 남는다. / CR30-3: 009·010 / 011 / 013 / 014 어느 위치의 참조 삭제도 KILLED. / CR30-2·SR25-1: 범위 39파일(scripts + app/ingest + llm.py + core/http.py) 직접 훑어 위반 0건 재확인, 오탐 4종(zf.read(name)·el.text·open().read()·read_text) 통과, _LOCAL_READ_OK 죽은 코드 삭제, 실위반 5곳은 app/core/http.py request_capped(16MB 스트리밍)로 전환. read_error_body=False 기본값(오류 본문 미독)이 좋다. / SR24-4: 조용히 빈 결과가 되는 경로 없음 — scope stats 는 전용 note, geocode_coverage 는 숫자 없는 note 로 강등, 메인 조회 타임아웃은 job failed -> 프론트 '분석에 실패했습니다'. conditions.active 거짓이면 전역 스캔 자체를 안 돈다. / SR25-2: region_codes·bbox 5종 직접 검증 — 반사 0건(msg 27~82자), 200자 상한 존재. / SR25-3: source 는 redev_project 자연키라 변경 시 616행 고아 + mig 015 필요한데 사용자 이득 0 — 표시명만 SOURCE_LABELS 로 분리한 최소 변경이 옳고, 모르는 키를 fallback 으로 뭉개지 않는 source_label 도 옳다.",
+    "carryover": [
+      "CR30-4",
+      "SCHOOL-2",
+      "SCHOOL-3",
+      "SCHOOL-4",
+      "SCHOOL-5",
+      "COND-1",
+      "FE-PLAIN-1",
+      "REDEV-W1",
+      "PREF-1",
+      "POI-2",
+      "SCORE-1",
+      "DEPLOY-2",
+      "DEPLOY-3",
+      "REC-2",
+      "REC-4",
+      "OPS-1",
+      "SEC-4",
+      "ADM-3",
+      "JOB-2"
+    ],
+    "pre_deploy_required": [
+      "CR31-1: redev_project.zone_name / raw_stage 에 금액 토큰이 있는 행이 0행인지 SQL 1회 확인 — 있으면 첫 추천에서 job 전체가 실패한다. SELECT source, zone_name, raw_stage FROM redev_project WHERE zone_name ~ '\\d[\\d,.]*\\s*(억|천만|백만|만\\s*원|원)' OR raw_stage ~ 같은패턴 -> 0행이어야 한다",
+      "SR-025 9절의 배포 전 필수 7건(커밋·푸시 먼저 / 이미지 재빌드 + docker diff / statement_timeout 반영 확인 / 013·014 적용 + 확인쿼리 / 승인제 생존 / /tmp 덤프 정리 / DB 무손상)은 그대로 유효"
+    ],
+    "llm_key_precondition_status": "SR-025 가 건 조건(ANTHROPIC_API_KEY 투입 전 CR30-1 해소)은 충족됐다. 다만 키 투입 시 CR31-2(카드 단위 AI 표기)와 SR22-5(누적 소비 상한·콘솔 한도)를 함께 처리할 것 — ★G 수용 논거가 카드 단위 고지에 기대고 있다.",
+    "notes": "PASS · 차단 0건. CR-030 의 유일한 차단 CR30-1 해소 확인. 담당자는 통과조건 ①②(정규식 정교화)를 버리고 더 강한 방향(모델에게서 주제를 빼앗기)으로 갔고, 그 판단이 옳다는 것을 결과로 확인했다 — 내가 뚫었던 C·E·B·K 와 담당자가 찾은 F 가 최종 카드에서 전부 폴백되고, 대조군은 살아 있으며, 프롬프트에서 재료가 실제로 사라졌고(실물 확인), 관련 변이 10종이 전부 KILLED 다. ③④(고지를 사실로 · 최종 카드 단언)는 요구한 그대로 됐다. [담당자 논증 판정] '모범답안 오탐 0 과 4종 차단은 동시에 만족될 수 없다'는 어휘 공기 규칙에 한해 참이다(어순 규칙도 부정어 근접 규칙도 양방향으로 깨지는 것을 직접 확인). 그러나 '정규식은 못 한다 -> 불가능하다'는 비약이다 — 금액 출처 대조(프롬프트에 없는 금액 토큰이면 폐기)는 두 문장을 정확히 가르고 ★G 까지 죽인다. 다만 한글 수사 정규화와 반올림 허용 오차 때문에 '700,000,000원->7억 원'이라는 바람직한 요약을 차단할 위험이 있어 기각 자체는 합리적이다. 기각 사유의 서술만 과하므로 CR31-3 으로 남긴다. [★G 처리 판정] 받아들인다. CR-030 이 차단한 것은 '완전하지 않다'가 아니라 '막지 못하는데 막는다고 사용자 화면에 적은 것'이었고, 그 문장은 삭제됐으며 되돌아오면 테스트가 죽는다(변이 KILLED). ★G 를 이유로 다시 막으면 그것은 CR30-1 이 제기한 결함이 아니라 '언어모델이 숫자를 지어낼 수 있다'는 별개의(이 가드 범위였던 적 없는) 문제를 3라운드째에 끼워 넣는 것이 된다. 3라운드라는 사실이 통과 근거가 아니듯 앞 라운드의 경고도 차단 근거가 아니다. [6번째 우회로] 찾지 못했다 — 시도한 12종(주제어 회피 5 · 표기변형 4 · 필드 절단 2 · 비리스트 1)과 인젝션된 zone_name 경유는 모두 막히거나 ★G 로 수렴했다. [신규] CR31-1(medium)이 이번 라운드에서 새로 생긴 것이다 — CR-030 이 요구한 '필드 전체' 확대가 도메인 lint 를 요청 경로의 외부 데이터에 노출시켜, 특정 형태의 zone_name/raw_stage 한 건이 추천 job 전체를 죽인다. 조용한 실패가 아니고(job failed -> '분석에 실패했습니다') 배포 전 SQL 한 줄로 확인 가능해 차단하지 않으나, 616행이 이미 적재돼 있으므로 그 한 줄은 반드시 돌릴 것. [줄바꿈] 내용이 같고 줄바꿈만 다른 파일 0건. core.autocrlf=true + git ls-files --eol 전부 i/lf 라 커밋 블롭은 LF, diff 미부풀림. 지적할 것 없음."
   },
   "security_review": {
     "status": "passed",
-    "id": "SR-023",
-    "at": "2026-07-27T00:40:00+09:00",
-    "date": "2026-07-27",
-    "scope": "SCHOOL-1 학구도 - 손으로 짠 SHP/DBF 바이너리 파서(app/ingest/school_zone.py) · 외부 파일 다운로드(scripts/fetch_school_zone.py) · gzip SQL 스트리밍 적재(scripts/load_school_zone.py) · migrations/012 · config/sources.yaml",
+    "id": "SR-026",
+    "at": "2026-07-28T01:20:00+09:00",
+    "date": "2026-07-28",
+    "scope": "SR-025 이후 델타 — app/core/http.py 신설(run_molit·geocode·llm.py 스트리밍 전환 + 스크립트 메타조회 2곳·세션쿠키 3곳 capped_get 통일) · create_db_engine statement_timeout (DB_STATEMENT_TIMEOUT_MS) · _check_region_codes 값→index + msg 200자 상한 · SOURCE_LABELS 표시명 분리 · security.md 3.3 '검증 실패 응답도 노출 경로' 절 · 분담금 방어 재설계(redact_cost_topic / contains_cost_topic fail-safe / assert_no_cost_topic) · api-spec 422 계약. 미커밋 96파일",
     "reviewer": "security-reviewer (herdr re-review 대행)",
     "blocking": [],
     "deploy_approved": true,
-    "parser_verdict": "memory-safe",
-    "g5_blockers": [],
+    "deploy_approved_conditional_on": [
+      "1. 커밋·푸시 먼저 — DEPLOY.md 5-1b 가 git reset --hard origin/main 이다. 미커밋 96건 중 app/core/http.py 는 신규 파일이라 안 올라가면 run_molit·geocode·llm 이 ImportError 로 전면 실패한다",
+      "2. 이미지 재빌드 후 docker diff realestate-api 로 컨테이너 레이어 수정 0 확인",
+      "3. (성격 변경: 구현→확인) statement_timeout 이 실제로 붙었는지 DEPLOY.md 5-2 의 컨테이너 내 명령으로 확인(기대 10s). .env 의 DB_STATEMENT_TIMEOUT_MS 를 0·음수로 두지 말 것 — 음수는 조용히 off (SR26-1)",
+      "4. 마이그레이션 013·014 적용 + 5-3b(4) 확인 쿼리 실행",
+      "5. 승인제 생존 확인 — POST /auth/register 가 201 + status pending",
+      "6. /tmp/re013a~c 삭제 · /tmp/backup_sd_poi 덤프는 /root/realestate-backup 이동 후 chmod 600",
+      "7. DB 무손상 확인 — trade 611,518 / complex 16,462 / users / user_profile 카운트와 db 로그의 corrupt 여부",
+      "8. (신규) 수집 스모크 1회 — MOLIT 1개 시군구·1개월 + 카카오 지오코딩 1건. 세 경로가 전부 request_capped 로 바뀌었는데 검증이 전부 목업이라 실제 원천에 처음 닿는 것이 배포다"
+    ],
+    "key_insertion_approved": true,
+    "key_insertion_conditional_on": [
+      "① SR22-5 — Anthropic 콘솔에서 사용량 한도·알림 설정(우리 코드 상한은 job 1건 내부까지다)",
+      "② 키 투입 후 첫 추천 3~5건의 카드 문장을 사람이 육안 확인 — AnthropicLLM 은 실호출 검증이 아직 없다(코드 주석도 그렇게 적는다)",
+      "③ SR26-5(★G) 를 알고 넣을 것 — 주제어 없이 금액만 쓰는 문장은 여전히 통과한다. 요약에 금액이 보이면 근거 없는 숫자이며 즉시 보고"
+    ],
+    "tests": {
+      "backend": "1123 passed / 76 skipped / 0 failed (junitxml tests=1199 - skipped=76)",
+      "frontend": "656 passed / 39 files",
+      "note": "주장 숫자(1,123/76 · 656/39)와 정확히 일치. 리뷰 중 소스 변경 없음(SR25-5 재발 없음). 커밋 후 클린 체크아웃 재확인은 여전히 권고"
+    },
+    "probes_run": {
+      "http_layer": "실물 httpx + MockTransport 6종 — 6.4GB 스트림에서 청크 20개(1.28MB)만 생산하고 중단 / Content-Length 500MB 선언 시 소비 0청크 / 3,143바이트를 7바이트씩 쪼개 보내도 완전 일치(잘리지 않음) / 429 오류 응답은 body=b'' 스트림 소비 0회이면서 retry-after 는 읽힘 / verify 기본값 True, 저장소 verify=False 0건 / 기본 상한 16MB",
+      "llm_failure_paths": "AnthropicLLM._once 를 6종 실패에 태움(키를 URL·응답본문에 심음) — 연결실패·401·429·500·상한초과·깨진JSON 전부 메시지에 상태코드/예외타입만. DEBUG 로그 10줄 전수에 키 0건",
+      "session_cookies": "capped_get 스트리밍 경로에서 Set-Cookie 추출·재전송 확인(2차 요청에 Cookie 헤더 실림). DEBUG 로그에 쿠키값 0건(httpx 는 헤더를 로그하지 않고 _common 이 httpx/httpcore 를 WARNING 으로 내린다)",
+      "statement_timeout": "값 7종 실측 — 미설정/10000 → options='-c statement_timeout=10000', 0/-1/-5000 → options 없음(음수가 조용히 off: SR26-1), 99999999 → 그대로 통과. factory.py:28 이 API 실경로",
+      "validation_422": "라이브 10건 — register(짧은비번·이메일오류+평문비번)·login(배열)·profile(음수·문자열 자산)·region_codes(비밀문자열·3000자)·area 뒤집힘·bbox 500자·Infinity(raw). 값 반사 0건, region_codes 3000자 응답이 3,127→156바이트, 로그 36줄에 민감값 0줄",
+      "cost_topic": "run_mvp_pipeline 최종 카드에서 10종 — 원문/문장분리/30자초과/'부담'/'분담액'/필드분리 6종 전부 fallback+고지, 대조군은 llm 채택. ★G 3종(주제어 없이 금액만)은 통과(SR26-5). 프롬프트 3,218자에 분담/부담/환급 0건·자산 원본 0건. _cost_free_finding 무력화 시 LLM 호출 0회(fail-safe 동작)",
+      "detector_bypass": "_uncapped_reads 에 9종 투입 — .text/.json()/getattr/urlopen().read()/requests.get().content 적발, iter_bytes join·iter_text·aread·별칭재대입 통과(SR26-3)"
+    },
+    "closed": [
+      "SR24-3",
+      "SR24-4",
+      "SR25-1",
+      "SR25-2",
+      "SR25-3",
+      "SR25-4",
+      "SR25-5"
+    ],
+    "carryover": [
+      "SR25-6",
+      "SR24-7",
+      "SR23-2",
+      "SR23-3(school_zone 부분)",
+      "SR22-1",
+      "SR22-2",
+      "SR22-3",
+      "SR22-4",
+      "SR22-5",
+      "SR21-1",
+      "SR21-2",
+      "SR21-3"
+    ],
+    "new_findings": [
+      "SR26-1",
+      "SR26-2",
+      "SR26-3",
+      "SR26-4",
+      "SR26-5",
+      "SR26-6"
+    ],
     "key_reissue_required": false,
-    "key_reissue_target": "DEC-001 유지. ANTHROPIC_API_KEY 는 여전히 서버에 없음 - 투입 전 콘솔 사용량 한도 설정 권고(SR22-5, 유효).",
-    "notes": "PASS - 배포를 막을 보안 사유 없음. 파서 판정: memory-safe(적대적 입력 11종 실측). 재현: backend 981 tests / 0 failures / 63 skipped = 918 passed · frontend 501(이번 라운드 변경 0건) - 지시 수치 일치. [1순위 손으로 짠 SHP 파서 - 추론이 아니라 직접 먹였다] shp_polygon_to_wkb 는 외부 파일의 부호 있는 32비트 정수(part_count·point_count·part_index)를 그대로 언팩·인덱싱한다. 적대적 입력 11종 실측 결과: part_count/point_count = 2^31-1(과대 할당 유도) -> struct.error 즉시, 음수 -> struct.error, part_index 음수/과대 -> IndexError, 본문 절단/빈 바이트 -> struct.error, point_count > 실제 좌표 -> struct.error. **전 케이스 피크 메모리 0.00MB · 0.1ms 미만 · 과대 할당 0 · 무한 루프 0.** 왜 안전한가(중요): ①struct.unpack(f'<{N}i', buf) 는 버퍼가 정확히 N×4 바이트일 것을 요구하므로 N 이 21억이면 **할당 전에** 예외가 난다 - 즉 과대 할당을 막는 것은 우리 코드가 아니라 struct 모듈의 크기 검사다 ②N 이 음수면 포맷이 '<-5i' 가 되어 bad char in struct format 으로 거절 ③모든 반복이 range() 이고 while 이 없어 무한 루프가 성립 불가 ④_shx_offsets 의 오프셋이 음수·과대여도 파이썬 슬라이스가 범위 안전(실측: offset=-2000/length=-100 -> 길이 0, offset=2^31 -> 길이 0, 예외도 OOB 읽기도 없음). ×2 워드 변환은 이 안전성에 영향을 주지 않는다. 실패 방향도 옳다 - 예외가 밖으로 전파돼 스크립트가 죽으므로 fail-closed 이고 깨진 데이터가 조용히 적재되지 않는다. zip slip 불성립(zf.read 로 이름 읽기만 하고 extract* 미사용, 아카이브 파일명이 경로로 쓰이는 지점 0건). [SQL 인젝션 - 8종 시도 전부 차단] 로컬에서 SQL 텍스트를 만들어 gzip 업로드 후 psql 스트리밍 적재하는 구조라 '학교명에 따옴표가 오면?' 이 핵심인데 _literal() 의 달러인용이 답이다. 실측: 고전 인젝션 '; DROP TABLE ... -> 리터럴 유지 · abc$sz$; DROP -> ValueError(fail-closed, 유일한 탈출구를 명시 차단) · 대문자 $SZ$ -> 차단(PG 달러태그는 대소문자 구분이라 종료 안 됨) · 기본 달러인용 $$ -> 차단 · 역슬래시 -> 차단(달러인용은 백슬래시 이스케이프 미해석) · 개행+세미콜론 -> 차단 · 따옴표 섞인 학교명 -> 차단 · NUL 바이트 -> 리터럴 유지(PG 가 거부해 ON_ERROR_STOP 으로 멈춤 = fail-closed 데이터 품질 문제이지 인젝션 아님). _stage_values 는 10개 필드 전부 _literal 경유하고 attrs 는 json.dumps 후 다시 _literal 을 탄다. f-string SQL 상수 4개의 치환 대상은 SOURCE_KESI 모듈 상수 하나뿐 - 외부값 0건. [다운로드] SSRF 불성립 - PORTAL·META_URL·FILE_URL 하드코딩 상수이고 메타 응답의 atchFileId·fileDetailSn·dataNm(신규)은 전부 httpx params= 의 쿼리 값으로만 쓴다(응답이 URL 을 줘도 요청 대상 불변). check_payload 가 zip 매직바이트·CSV 헤더를 확인해 아니면 저장하지 않는다. 무키 다운로드라 키 유출 표면 자체가 없다. [★SR23-1 medium - SR22-2 격상] 응답 크기 상한 부재가 **네 번째** 반복이다(SR17-5 fetch_legal_dong_codes -> SR18-6 fetch_reb_complex_master -> SR22-2 fetch_poi -> 이번 fetch_school_zone). 개별 위험은 여전히 낮다(URL 하드코딩·수동 실행·컨테이너 밖 호스트 실행). 격상 이유는 개별 위험이 아니라 **패턴**이다 - 새 다운로더가 생길 때마다 같은 구멍이 재생산되고, 이번은 지금까지 중 가장 큰 페이로드(35MB SHP)이며 Overpass 는 더 커질 수 있다. 이 프로젝트는 반복 결함을 구조로 옮겨 해결한 전례가 있다(SR17-3 -> _common import 부작용). 통과조건: 공통 read_capped(resp, max_bytes) 헬퍼 1개로 네 곳을 함께 닫고 초과 시 조용히 자르지 말고 실패시킬 것. [SR23-2 low] 파서의 메모리 안전성이 **암묵적**이다 - 우리가 part_count·point_count 를 검증해서가 아니라 struct 의 크기 요구와 슬라이스 범위 안전성이 막아 주는 것이고, 그 사실이 코드에 적혀 있지 않다. memoryview 로 바꾸거나 리스트를 미리 잡는 최적화가 들어오면 안전성이 사라진다 -> 명시적 상한 + 퍼즈 회귀 테스트 1건 권고. [외부 문자열 -> 프롬프트: SR22-1 과 같은 구조지만 위험도는 낮다] 학교명·학구명이 school_district/poi(school) -> SchoolFact.name -> analysis.py:157 assigned_elementary -> :377 evidence claim -> LLM 프롬프트+화면 으로 흐른다. 그러나 OSM 은 누구나·익명·즉시 편집 가능하고 다음 수집에 바로 반영되는 반면, 학구도는 교육행정 시스템 공식 명칭이라 외부인이 바꿀 경로가 없고 반기 1회(3월·9월) 배포이며 변경에 행정 절차가 든다. SR22-1 의 핵심 우려('제3자가 우리 프롬프트에 문자열을 주입할 수 있다')가 이 출처에는 성립하지 않는다 -> 독립 신규 발견으로 올리지 않고 SR22-1 의 권고 적용으로 함께 덮는다. XSS: 프론트 이번 라운드 변경 0건, innerHTML/dangerouslySetInnerHTML 실사용 0건(유일 grep 히트는 금지 주석), React 자동 이스케이프. [적재 안전성] 파괴적 SQL 없음 - INSERT/UPSERT 뿐이고 _STALE_COUNT 는 옛 행을 세기만 하고 지우지 않는다(DELETE 0건). 1차 실패 롤백 확인 - 서버 ingest_log 에 kesi_school_zone:elementary|ok|3246|0 한 행뿐이고 실패한 1차 시도의 로그 행이 없다 = ingest_log INSERT 도 같은 트랜잭션에서 함께 롤백됐다는 뜻 = **가짜 성공이 남지 않았다**. 0건 방어 있음(load_school_zone.py:104 if not records: raise SystemExit). 마이그레이션 012 는 정적 DDL(ADD COLUMN IF NOT EXISTS·COMMENT·부분 유니크 인덱스), 사용자 입력 0, 자연키를 kesi:{학구ID}/{학교ID} 로 잡아 공동학구까지 고려했고 연 2회 재배포를 멱등하게 만든다. [개인정보·G2] 서버 실측 - school_district 컬럼은 id·school_poi_id·geom·source·as_of·source_ref, poi(school) attrs 키는 district_as_of·level·office·school_id·zone_id·zone_name 뿐으로 교사·학생·연락처 등 개인 관련 필드 **0건**. 전부 학교 단위 공개 행정정보이고 이 데이터로 개인 식별 불가. achievement_pct NULL 판단은 G2 에 맞다 - sources.yaml 에 '초등은 국가수준 평가 대상도 아니다' 사유가 적혀 있고 도메인도 is not None 일 때만 쓴다(출처·기준연도 없는 수치를 지어내지 않는다). [SR23-3 info] sources.yaml 의 school_zone 에 license 블록이 없다(같은 파일 OSM 항목엔 ODbL 1.0 + share_alike_review_required 가 있음). 공공데이터포털 파일데이터는 통상 공공누리 제1유형(출처표시)이라 위험은 낮으나 유형을 확인해 기록해 두면 다음 사람이 다시 조사하지 않는다 - SR-022 의 ODbL 출처표시 권고와 함께 처리 권고. [이전 지적] SR22-5(LLM 반복 제출 누적 상한 없음)는 여전히 유효 - 서버 .env 에 ANTHROPIC_API_KEY 가 아직 없지만 권고 성격이 '키를 넣기 전에 콘솔 한도를 걸어라'이므로 지금이 조치 적기다. SR22-2 는 해소가 아니라 SR23-1 로 격상 이관. [서버 실측 - 조회 전용] school_district 3,246 · poi(school) 2,209(보고 일치) · trade 611,518 · complex 16,462 · 사용자 id=11 approved/is_admin=t **전부 미변경**. 동거 서비스 조회만, 변경 0회. backend/docs·frontend/docs 에 상태 파일 생성 안 함(커밋 훅 차단 회피). [측정 중 관찰] 전체 실행 1·2회차에서 test_school_zone 의 **서로 다른** 테스트가 각각 1건씩 실패했다가 3회차에 0 fail(918 passed) 로 복귀했다. 단독 실행은 통과하며 매번 다른 테스트가 걸리는 것은 SR-019~022 에서 반복 관찰된 동시 편집 중 일시 현상이다. 배포 직전 트리 동결 후 최종 그린 1회 확인 권고.",
     "log": "docs/03-build/security-review-log.md",
-    "tests": "backend 981 tests / 0 failures / 0 errors / 63 skipped = 918 passed(3회차 기준) · frontend 501(변경 0건) - 지시 수치 일치. SHP 파서 적대적 입력 11종 실측(과대할당·무한루프·OOB 0건, 피크 0.00MB). SQL 인젝션 8종 실측 전부 차단. 서버 조회 전용으로 적재량·컬럼·attrs 키·ingest_log 확인.",
-    "verified_resolved": []
+    "notes": "PASS · 차단 0건 · 배포 승인 유지(8건 조건부) · ANTHROPIC_API_KEY 투입 허용(3건 조건부). [신규 HTTP 계층] app/core/http.py 는 비밀·URL 리터럴 0건이고 client 를 주입받는 순수 함수라 SSRF 표면이 없다. 실물 httpx 로 6종을 때려 상한 조기중단·Content-Length 사전차단·정상응답 무손상·오류본문 미소비·TLS 검증·16MB 기본상한을 확인했다. LLM 경로는 오히려 방어가 한 걸음 앞으로 갔다 — 예전 '오류 본문을 예외에 싣지 않는다'가 지금은 raise_for_status=False + read_error_body=False 로 '읽지도 않는다'가 됐다. MOLIT serviceKey 는 raise_for_status 예외 문자열에 URL 로 실리지만 masked_error(extra_secrets) + from None 으로 차단되고, 회귀 테스트가 '마스킹이 없으면 진짜로 샌다'는 전제까지 단언한다. [세션쿠키 3곳] fetch_legal_dong_codes:50 · fetch_reb_complex_master:155 · fetch_school_zone:213. 스트리밍 전환 후에도 쿠키 왕복이 유지되고(실측) 로그 노출 0건. 다만 capped_get 은 raise_for_status 를 하므로 목록 페이지가 비2xx 면 더 일찍 멈춘다(비보안 행동변화). [테스트 대역] _StubHttp 는 stream() 을 구현하고 진짜 httpx.Response 를 쓰며, Wire 는 httpx.stream 자체를 monkeypatch 해 서명이 request_capped 호출과 일치, test_script_hygiene 은 MockTransport 로 실물 httpx 를 태운다 — 검증이 헛돌지 않는다. [SR24-4 CLOSE] statement_timeout 이 libpq options 로 커넥션마다 붙는다(factory.py:28 이 API 실경로). 수집 배치는 별도 엔진이라 무관하고, 인증 경로는 Argon2id 가 비용의 대부분이라 10초에 안 걸린다 — 오히려 이 상한이 인증을 지킨다. 실패 시 결과를 죽이지 않고 _SCOPE_STATS_FAILED_NOTE 로 고지한다. [SR25-2 CLOSE] region_codes 3,000자 반사가 3,127→156바이트. msg 200자 상한은 앞부분을 남기는 형태가 맞지만 그것이 방어가 아니다 — 1차 방어는 '검증기가 값을 문장에 넣지 않는다'이고 저장소의 커스텀 검증기 2개(_check_region_codes·_check_bbox) 전부 값이 없음을 직접 확인했다. 회귀 3건 존재. [★ CR30-1/SR24-3 CLOSE] 정규식을 정교하게 만드는 대신 재료를 빼앗은 것이 옳았다. 프롬프트에서 분담금 문장을 통째로 제거하고(redact_cost_topic), 남으면 호출 자체를 건너뛰며(fail-safe 실측: 호출 0회), 출력은 주제어만 본다. run_mvp_pipeline 최종 카드에서 CR-030 의 4종 + 필드분리 + 원문 6종이 전부 fallback+고지로 막히고 대조군은 llm 으로 채택된다. 프롬프트에 분담/부담/환급 0건·자산 원본 0건. 통과 조건 4개(필드단위·어간확대·고지 사실화·최종카드 회귀) 전부 충족. 고지에서 '어떤 경로로도'가 삭제됐고 test_redevelopment 절대규칙 ① 문구도 정정됐다. [SR26-5 ★G] 주제어 없이 금액만 쓰는 문장 3종은 여전히 카드까지 도달한다. 그럼에도 키 투입을 허용하는 근거: ① 거짓 고지가 사라졌다(CR30-1 이 차단이었던 진짜 이유는 미해결이 아니라 '닫혔다고 화면에 적혀 있음'이었다) ② 재료가 0건이라 발화 확률이 구조적으로 낮다 ③ 이 게이트의 fail 조건(인증/인가·인젝션·비밀 하드코딩·민감정보 로그노출·미암호화 전송) 어디에도 없다 ④ 같은 카드에 '조합 사무실에서 직접 확인' 고정 문구가 항상 함께 나간다. [나머지 축] 신규 엔드포인트·Depends 0건 · SQL 전량 바인딩 · 프론트 신규 7파일에 XSS 싱크 0건 · 추적되는 위험파일 0건 · 델타 비밀 리터럴 히트는 테스트 픽스처 'short-pw-12' 1건. [신규] SR26-1(음수 타임아웃 조용한 off, low) · SR26-2(fail-safe 경로만 사용자 고지 없음, low) · SR26-3(검사기 잔여 우회 4종, info) · SR26-4(__context__ 에 원본 예외 잔존 — 표준 traceback 은 억제 확인, info) · SR26-5(★G, medium) · SR26-6(read_error_body 미사용 스위치, info)."
   },
   "open_findings": [
+    {
+      "id": "CR31-1",
+      "verdict": "OPEN",
+      "severity": "medium",
+      "blocks": "없음 - 다만 배포 전 SQL 1회 확인은 필수",
+      "found_by": "CR-031 (code-reviewer, herdr re-review 대행)",
+      "date_found": "2026-07-28",
+      "owner": "re-domain",
+      "title": "도메인 tripwire(assert_no_cost_estimate)가 이제 외부 수집 문자열로 발화하고, 발화하면 추천 job 전체가 죽는다",
+      "evidence": [
+        "CR-030 통과조건 ①(근접 30자 창 폐기 -> 필드 전체)으로 검사가 넓어졌는데 rationale 은 COST_DISCLOSURE 를 항상 포함하므로 주제어 조건이 언제나 참이다 — 사실상 'rationale 에 금액 토큰이 하나라도 있으면 예외'가 됐다. 그 rationale 에는 수집 데이터(zone_name·raw_stage)가 그대로 보간된다(analysis.py:465-466). 실측: zone_name='1억원지구' / raw_stage='조합설립(추정 5000만원)' / zone_name='제3원구역'(_MONEY_RE 맨 뒤 단독 '원' 이 '3원' 을 잡는다) 전부 CostEstimateError. 예외를 아무도 잡지 않아 run_mvp_pipeline -> run_recommendation_job 포괄 except -> job failed + 빈 결과. 후보 한 건의 구역명 때문에 추천 전체가 사라진다. 서울·인천 616행이 이미 적재돼 있고 실제 표기(장위4구역 · ○○동 10번지 일원)로는 성립하지 않아 확률은 낮으나, 확인 없이 배포하면 첫 추천에서 알게 된다. 개발자 문장에 대한 lint 로서는 옳고 문제는 같은 함수가 요청 경로에서 런타임 외부 문자열을 보게 된 것이다(넓힌 것은 이번 라운드이고 그 조건을 요구한 것은 나다)."
+      ],
+      "pass_conditions": [
+        "배포 전 1회: SELECT source, zone_name, raw_stage FROM redev_project WHERE zone_name ~ '\\d[\\d,.]*\\s*(억|천만|백만|만\\s*원|원)' OR raw_stage ~ 같은패턴 -> 0행이어야 한다",
+        "외부 문자열은 적재 시점에 검사하고, 요청 경로에서는 redevelopment_assessment 가 CostGuardError 를 잡아 그 후보의 재건축 블록만 '미확보'로 강등 + notes 고지(요약 한 줄 때문에 추천을 안 죽인 것과 같은 원칙)",
+        "_MONEY_RE 의 맨 뒤 단독 '원' 에 최소 자릿수 또는 만/억/천만 동반을 요구할 것"
+      ],
+      "note": "CR-031 참조. 차단 아님."
+    },
+    {
+      "id": "CR31-2",
+      "verdict": "OPEN",
+      "severity": "medium",
+      "blocks": "없음 - LLM 키 투입 전 처리",
+      "found_by": "CR-031 (code-reviewer, herdr re-review 대행)",
+      "date_found": "2026-07-28",
+      "owner": "frontend-react",
+      "title": "summary_basis 가 화면에 없다 - ★G 를 받아들인 논증이 이 고지에 기댄다",
+      "evidence": [
+        "orchestrator.py:1205 는 '이 카드의 문장이 AI 가 쓴 것인지 규칙이 쓴 것인지 카드 단위로 밝힌다. notes 만으로는 어느 카드가 규칙 기반인지 사용자가 알 수 없다'고 적고 api-spec.md 5.4 가 계약으로 못박았다. 그런데 프론트에 summary_basis 참조 0건(client.ts 타입에도 없음)이고 ReportCard.tsx:149 는 headline 을 그냥 찍는다. 이번 라운드에서 성격이 바뀌었다 — ★G 수용 근거가 '완전성을 주장하지 않고 한계를 고지한다'인데 고지 체계의 한 축이 사용자에게 닿지 않는다. 추천 10건 중 3건 폐기 시 notes 는 '3건'이라고만 말한다."
+      ],
+      "pass_conditions": [
+        "카드에 한 줄: summary_basis==='llm' 이면 '이 요약 문장은 AI 가 썼습니다(순위·가격·제외 사유는 규칙 계산)', 'fallback' 이면 '규칙 기반 요약'",
+        "PREF-1 처럼 프론트를 다음에 건드릴 때 함께 넣으면 된다 - 독립 라운드 불필요"
+      ],
+      "note": "CR-031 참조. 차단 아님."
+    },
+    {
+      "id": "CR31-3",
+      "verdict": "OPEN",
+      "severity": "low",
+      "blocks": "없음",
+      "found_by": "CR-031 (code-reviewer, herdr re-review 대행)",
+      "date_found": "2026-07-28",
+      "owner": "re-arch",
+      "title": "시스템 프롬프트가 탐지 낱말 4개를 모델에게 그대로 알려 준다 + 기각한 대안의 사유가 코드에 없다",
+      "evidence": [
+        "PORTFOLIO_SYSTEM 규칙 7 이 '분담·부담·환급·추가 비용 을 아예 쓰지 마세요' 로 금지어 목록 = 탐지어 목록을 공개한다. ① assert_no_cost_topic 독스트링의 '모델은 이 주제를 말할 근거를 받지 못한다'가 user 블록에 한해서만 참이 된다 ② 금지어를 알려 주면 모델은 그 낱말을 피해 같은 말을 하는 쪽으로 유도된다 — 그게 정확히 ★G(6a·6b '추납금'·6g)라 방어 문장이 잔여 위험을 키우는 방향이다. 또 기각한 대안(금액 출처 대조)의 사유가 코드에 없어 '원리적으로 불가능'으로 읽힌다 — 실제로는 가능하고(모범답안의 7억 원은 프롬프트의 700,000,000원 유래, 우회 E 의 1억 2천만 원은 프롬프트에 없다) 보류 사유는 한글 수사 정규화와 반올림 허용 오차다."
+      ],
+      "pass_conditions": [
+        "규칙 7 을 낱말 열거 대신 결과 서술로: '분석 결과에 없는 비용·금액을 추정하지 마세요. 금액은 분석 결과에 있는 값만 인용하세요'(탐지어는 코드에만)",
+        "analysis.py 주석에 '출처 대조는 가능하나 정규화·허용오차 때문에 보류' 한 줄"
+      ],
+      "note": "CR-031 참조. 차단 아님."
+    },
+    {
+      "id": "CR31-4",
+      "verdict": "OPEN",
+      "severity": "info",
+      "blocks": "없음",
+      "found_by": "CR-031 (code-reviewer, herdr re-review 대행)",
+      "date_found": "2026-07-28",
+      "owner": "re-data",
+      "title": "위생 검사기의 남은 우회 형태 · portfolio_summary 의 budget=None 조용한 분기",
+      "evidence": [
+        "_uncapped_reads 는 별칭 재대입(x = resp; x.content)·함수 인자 전달·리스트/딕셔너리 경유·walrus·join(iter_bytes()) 를 놓친다(직접 프로브). 다만 저장소 실사용 0건이고 iter_bytes 는 헬퍼 자신이 쓰는 형태라 일괄 금지하면 헬퍼가 자기 검사에 걸린다. 별도로 portfolio_summary(findings, llm, forbidden) 를 budget 없이 부르면 폐기해도 cost_blocked 가 안 세지고 고지가 나가지 않는다 — run_mvp_pipeline 은 항상 넘기므로 현재 경로는 안전하나 공개 함수의 조용한 분기다."
+      ],
+      "pass_conditions": [
+        "여유가 되면 별칭 1단 추적 추가",
+        "budget=None 이면 폐기 시 최소한 logger.error 로 남기거나 인자를 필수화"
+      ],
+      "note": "CR-031 참조. 차단 아님."
+    },
+    {
+      "id": "CR31-5",
+      "verdict": "OPEN",
+      "severity": "low",
+      "blocks": "없음",
+      "found_by": "CR-031 (code-reviewer, herdr re-review 대행)",
+      "date_found": "2026-07-28",
+      "owner": "re-arch",
+      "title": "_MANUAL_FROM 상수 자체를 올리는 변이는 잡히지 않는다",
+      "evidence": [
+        "변이 실측: _MANUAL_FROM = 13 -> SURVIVED(exit=0). 거기에 009·010 참조를 지운 조합(정확히 DEPLOY-1 재현)도 SURVIVED. 다만 성격이 다르다 — 예전에는 문서 한 곳(런북)만 정리하면 가드가 사라졌고 지금은 테스트 상수를 의도적으로 고쳐야 한다. 명세를 스스로 낮추는 것은 어떤 상수 기반 검사도 못 막는다. 현실적 경로(009·010 / 011 / 013 / 014 어느 위치의 참조 삭제)는 전부 KILLED."
+      ],
+      "pass_conditions": [
+        "DEPLOY.md 본문에 '손수 적용은 009부터'를 한 줄 명시하고, 테스트가 _MANUAL_FROM 과 그 선언 번호의 일치를 단언할 것 -> 상수만 올리는 변이가 문서와 어긋나 죽는다"
+      ],
+      "note": "CR-031 참조. 차단 아님."
+    },
+    {
+      "id": "SR26-1",
+      "verdict": "OPEN",
+      "severity": "low",
+      "blocks": "없음 - 비차단",
+      "found_by": "SR-026 (security-reviewer, herdr re-review 대행)",
+      "date_found": "2026-07-28",
+      "owner": "re-arch",
+      "title": "DB_STATEMENT_TIMEOUT_MS 가 음수면 서버측 쿼리 상한이 조용히 꺼진다 (0 만 off 로 안내됨)",
+      "evidence": [
+        "create_db_engine 값 실측 — 미설정/10000: options='-c statement_timeout=10000' / 0·-1·-5000: connect_args 자체가 없음 / 99999999: 그대로 통과(사실상 off)",
+        "Settings(db_statement_timeout_ms: int) 가 음수를 거절하지 않는다 — 환경변수 -1 주입이 그대로 통과함을 확인",
+        ".env.example:44-47 과 config.py:59-62 주석은 '0 으로 끌 수 있게 두지만 끄지 말 것' 만 말한다. 음수는 언급이 없다",
+        "off 로 갈 때 로그가 하나도 남지 않는다 — SR24-4 방어가 오타 하나로 사라지고 아무도 모른다"
+      ],
+      "pass_conditions": [
+        "음수를 거절(Field(ge=0))하거나 max(0, …) 로 접을 것",
+        "상한이 off 로 갈 때 logger.warning 한 줄 — '서버측 쿼리 상한 없음' 은 사람이 알아야 한다"
+      ],
+      "mitigation": "DEPLOY.md 5-2 의 컨테이너 내 SHOW statement_timeout 확인 절차가 배포 시점에 잡는다(기대 10s, 0 이면 배포 중단)"
+    },
+    {
+      "id": "SR26-2",
+      "verdict": "OPEN",
+      "severity": "low",
+      "blocks": "없음 - 비차단",
+      "found_by": "SR-026 (security-reviewer, herdr re-review 대행)",
+      "date_found": "2026-07-28",
+      "owner": "re-domain",
+      "title": "분담금 fail-safe(프롬프트에 주제어 잔존 → LLM 호출 건너뜀) 경로만 사용자 고지가 없다",
+      "evidence": [
+        "orchestrator.py:821-824 는 logger.error 후 _fallback_summary 를 돌려주는데 budget 카운터를 하나도 올리지 않는다",
+        "실측 — _cost_free_finding 을 무력화하니 LLM 호출 0회·summary_basis=fallback 이지만 notes 에 LLM 관련 문장이 하나도 없다",
+        "다른 폴백 경로는 전부 고지한다: failures→NOTE_LLM_FAILED · over_budget→NOTE_LLM_BUDGET · oversized→NOTE_LLM_OVERSIZED · cost_blocked→NOTE_LLM_COST_BLOCKED",
+        "'조용히 바꾸지 않는다'는 이 프로젝트의 원칙과 이 한 경로만 어긋난다(남는 신호는 카드의 summary_basis 뿐)"
+      ],
+      "pass_conditions": [
+        "전용 카운터(또는 budget.failures) 증가 + notes 문구 — '요약 재료 정리에 실패해 규칙 기반으로 대체했습니다' 수준으로 충분",
+        "회귀 테스트에 notes 단언 추가(현재 test 는 호출 0회와 summary_basis 만 본다)"
+      ]
+    },
+    {
+      "id": "SR26-3",
+      "verdict": "OPEN",
+      "severity": "info",
+      "blocks": "없음 - 비차단",
+      "found_by": "SR-026 (security-reviewer, herdr re-review 대행)",
+      "date_found": "2026-07-28",
+      "owner": "re-data",
+      "title": "다운로드 상한 검사기(_uncapped_reads)에 잔여 우회 4종 — iter_bytes join · iter_text · aread(async) · 별칭 재대입",
+      "evidence": [
+        "직접 투입 실측 — 적발: resp.text · resp.json() · getattr(resp,'text') · urlopen().read() · requests.get().content",
+        "통과(우회): b''.join(resp.iter_bytes()) · ''.join(resp.iter_text()) · await resp.aread() · a=c.get(u); b=a; b.text",
+        "저장소에 해당 형태는 현재 0건이고 async httpx 사용처도 없다",
+        "SR25-1 이 건 통과 조건(.text · .json() · read(n) · getattr · 범위 확대)은 전부 충족됐다 — 이건 그 다음 여백이다"
+      ],
+      "pass_conditions": [
+        "필요해지면 iter_* 결과를 소비하는 join/list 패턴 추가 · 별칭 추적 1단계 확장"
+      ]
+    },
+    {
+      "id": "SR26-4",
+      "verdict": "OPEN",
+      "severity": "info",
+      "blocks": "없음 - 비차단",
+      "found_by": "SR-026 (security-reviewer, herdr re-review 대행)",
+      "date_found": "2026-07-28",
+      "owner": "re-arch",
+      "title": "마스킹 예외의 __context__ 에 원본 예외(키 포함 가능)가 남는다 — 표준 traceback 은 억제되지만 에러 리포터는 순회할 수 있다",
+      "evidence": [
+        "raise ... from None 은 __cause__ 만 끊고 __context__ 는 남긴다(파이썬 사양)",
+        "실측 — str(e) 에 키 없음 / e.__context__ 에는 키 있음 / traceback.format_exception 출력에는 키 없음(__suppress_context__=True)",
+        "logging 의 exc_info 경로도 format_exception 을 쓰므로 현재는 새지 않는다. SecretMaskingFilter 가 한 번 더 덮는다",
+        "Sentry 등 __context__ 를 직접 순회하는 도구를 붙이는 날 다시 열린다 — 지금 그런 도구는 없다"
+      ],
+      "pass_conditions": [
+        "에러 리포팅 도구 도입 시 __context__ 정책을 먼저 정할 것(또는 masked_error 에서 __context__ 를 명시적으로 끊을 것)"
+      ]
+    },
+    {
+      "id": "SR26-5",
+      "verdict": "OPEN",
+      "severity": "medium",
+      "blocks": "없음 - 비차단(키 투입 시 인지 조건)",
+      "found_by": "SR-026 (security-reviewer, herdr re-review 대행) · 담당자 자진 보고",
+      "date_found": "2026-07-28",
+      "owner": "re-domain",
+      "title": "★G — 분담금 주제어 없이 금액만 쓰는 LLM 문장은 여전히 최종 카드까지 도달한다",
+      "evidence": [
+        "run_mvp_pipeline 최종 카드 실측 3종 유출 — '조합원은 세대당 1억 2천만 원을 더 내야 합니다' / '세대당 1.2억 원의 추가 납입이 예상됩니다' / 같은 문장을 headline 에",
+        "세 경우 모두 summary_basis=llm 이고 폐기 고지가 없다",
+        "반면 CR-030 이 뚫은 4종 + 필드분리 + 원문 6종은 전부 fallback+고지로 막힌다",
+        "구현이 이 한계를 스스로 적어 두었다(assert_no_cost_topic 독스트링) 그리고 사용자 고지에서 '어떤 경로로도'가 삭제됐다 — 거짓 고지가 사라진 것이 판정을 가른 지점이다"
+      ],
+      "why_not_blocking": [
+        "이 게이트의 fail 조건(인증/인가 · 인젝션 · 비밀 하드코딩 · 민감정보 로그노출 · 미암호화 전송) 어디에도 해당하지 않는다 — 피해 축은 결과 신뢰도다",
+        "모델에 분담금 재료가 0건이라 금액을 지어내면서 동시에 네 어간을 전부 피해야 한다(시스템 규칙 1·2 가 같은 방향으로 누른다)",
+        "같은 카드의 next_actions 에 '조합 사무실·정비사업 정보몽땅에서 직접 확인' 고정 문구가 항상 함께 나간다"
+      ],
+      "pass_conditions": [
+        "재료 차단(redact_cost_topic + fail-safe)을 유지할 것 — 이 방어의 본체는 검사가 아니라 재료다",
+        "키 투입 후 첫 추천 3~5건 카드 육안 확인. 금액이 보이면 근거 없는 숫자이므로 즉시 보고"
+      ]
+    },
+    {
+      "id": "SR26-6",
+      "verdict": "OPEN",
+      "severity": "info",
+      "blocks": "없음 - 비차단",
+      "found_by": "SR-026 (security-reviewer, herdr re-review 대행)",
+      "date_found": "2026-07-28",
+      "owner": "re-arch",
+      "title": "request_capped(read_error_body=…) 스위치가 어디서도 켜지지 않는다 — 쓰이지 않는 분기는 언젠가 잘못 켜진다",
+      "evidence": [
+        "저장소 전체에서 read_error_body 를 True 로 넘기는 호출 0건(정의와 독스트링에만 존재)"
+      ],
+      "pass_conditions": [
+        "필요해질 때까지 삭제하거나, 켜려면 '오류 본문을 로그·예외에 싣지 않는다'는 증명을 먼저 하라는 조건을 주석에 못박을 것"
+      ]
+    },
+    {
+      "id": "SR25-6",
+      "verdict": "OPEN",
+      "severity": "info",
+      "blocks": "없음 - 비차단",
+      "found_by": "SR-025 (security-reviewer, herdr re-review 대행)",
+      "date_found": "2026-07-27",
+      "owner": "re-data",
+      "title": "SR24-1 회귀 테스트가 한 파일 문자열 검사다 - 다른 새 스크립트나 문자열 분할은 우회한다",
+      "evidence": [
+        "test_redevelopment_loader_has_no_api_key_path 는 scripts/load_redevelopment.py 한 파일만 읽는다 - 새 스크립트가 같은 URL 을 들여오면 안 잡힌다",
+        "문자열 검사라 'htt' + 'p://...' 같은 분할 표기는 통과한다",
+        "다만 주석 제거 후 검사 · https 강제 · .env.example 동시 확인은 옳게 되어 있어 회귀 가드로는 실효한다",
+        "masking.py 의 SECRET_ENV_VARS 에는 여전히 URL 경로 세그먼트 마스킹이 없다(현재는 키 경로 자체가 없어 문제가 아니다)"
+      ],
+      "pass_conditions": [
+        "검사 대상을 _script_files() 전체로 확대",
+        "여유가 되면 mask_secrets 에 URL 경로 세그먼트 마스킹을 넣어 '등록을 잊어도 되는' 형태로"
+      ],
+      "note": "구조적 차단이 아니라 회귀 가드다. 그 사실만 기록해 둔다."
+    },
     {
       "id": "SCHOOL-2",
       "verdict": "OPEN",
@@ -2007,6 +2393,123 @@
       ],
       "residual_nonblocking": "tripwire(보조 그물)가 '십억'·공백자릿수·'3.0억' 같은 exotic 표기는 못 잡음(구조가 실제 방어라 CLOSE 불가 사유 아님). '3.0억' 1건은 doc 한계목록 미기재 → 추가 권고.",
       "note": "SR4-2 CLOSE 는 tripwire 완전성이 아니라 '구조(원본을 finding에 미포함)+파이프라인 테스트+fail-loud+정직한 문서'에 근거. 실제 파이프라인 프롬프트에 원본자산 0 확인."
+    },
+    {
+      "id": "SR25-1",
+      "verdict": "CLOSE (PASS)",
+      "severity": "medium",
+      "blocks": "없음 - 비차단(다음 라운드 필수)",
+      "found_by": "SR-025 (security-reviewer, herdr re-review 대행)",
+      "date_found": "2026-07-27",
+      "owner": "re-data",
+      "title": "다운로드 상한 강제 검사(AST)가 .text/.json()/getattr/read(n)/무속성 client.get() 을 못 본다 - 대상도 scripts/*.py 뿐이라 운영 컨테이너 안 3곳이 아예 미검사",
+      "evidence": [
+        "검사기에 직접 투입한 결과: resp.content / httpx.get(u).content / resp.read() 는 적발, resp.text · resp.json() · getattr(resp,'content') · resp.read(-1) · b''.join(iter_bytes) · client.get(u) 는 통과",
+        "가정이 아니다 - 통과 목록 중 셋이 현재 사용 중: scripts/fetch_reb_complex_master.py:101,107 와 scripts/fetch_school_zone.py:136,142 의 resp.text(메타 JSON), fetch_legal_dong_codes.py:49 · fetch_reb_complex_master.py:151 · fetch_school_zone.py:210 의 client.get(세션 쿠키용, httpx 가 본문을 전량 버퍼링)",
+        "더 중요한 것은 대상 범위다 - test_downloaders_read_through_capped_helper 는 scripts/*.py 만 본다. app/ingest/run_molit.py:60(resp.text) · app/ingest/geocode.py:497(resp.json) · app/agents/llm.py:174 는 운영 컨테이너(mem_limit 192m) 안에서 도는데 검사 대상이 아니다",
+        "구조적 처방 자체는 착지했다 - 대용량 5곳은 스트리밍 조기중단·Content-Length 사전차단까지 실측 확인"
+      ],
+      "pass_conditions": [
+        "_uncapped_reads 에 .text · .json() · 인자 있는 .read(n) · getattr(resp,'content') 추가",
+        "검사 대상을 app/ingest/** · app/agents/llm.py 까지 확대(운영 컨테이너 안이 오히려 더 중요하다)",
+        "메타 조회 2곳(resolve_file_id)도 capped_get 으로 통일 - 예외를 만들면 그 예외가 관행이 된다"
+      ],
+      "note": "차단하지 않은 근거: 남은 것은 고정 엔드포인트의 소형 메타/JSON 이고 SSRF 불성립이며, SR-024 의 '6번째면 차단'은 같은 급(수십MB 파일 다운로드)의 재생산을 겨눈 예고였다. 그 급은 닫혔다.",
+      "verified_by": "SR-026 (security-reviewer, herdr re-review 대행)",
+      "date_closed": "2026-07-28",
+      "close_evidence": "SR-026 — 검사식에 .text/.json()/read(n)/getattr 추가 + 대상을 app/ingest/**·llm.py·http.py 로 확대 + 범위 자체를 고정하는 테스트 신설. 운영 3곳(run_molit·geocode·llm)과 메타조회 2곳·세션쿠키 3곳이 실제로 전환됐고 실물 httpx 로 6종 실측. 잔여 우회 4종은 SR26-3(info)."
+    },
+    {
+      "id": "SR25-2",
+      "verdict": "CLOSE (PASS)",
+      "severity": "low",
+      "blocks": "없음 - 비차단",
+      "found_by": "SR-025 (security-reviewer, herdr re-review 대행)",
+      "date_found": "2026-07-27",
+      "owner": "re-arch",
+      "title": "422 msg 로 사용자 입력이 원문·무제한 반사된다 - 새 핸들러의 '값은 안 돌려준다' 보증이 절대적이지 않다",
+      "evidence": [
+        "app/api/schemas.py:183 _check_region_codes 가 raise ValueError(f\"... {code!r}\") 로 입력값을 메시지에 넣고, pydantic 이 그것을 msg 로 만들며, 핸들러는 msg 를 그대로 통과시킨다",
+        "실측: region_codes=['MY-SECRET-PASSWORD-9876543210'] -> msg 에 원문 그대로. 3,000자 입력 -> 응답 3,127바이트(전량 반사)",
+        "현재 피해는 없다 - 민감 필드(비밀번호·현금·연소득·대출)에는 커스텀 검증기가 하나도 없고 전부 Field 제약이라 msg 가 값을 담지 않는다(13건 실측)",
+        "남는 위험은 기록의 부재다 - 다음에 누군가 자산 필드에 커스텀 검증기를 달면서 값을 문장에 넣으면 그날 조용히 되돌아온다"
+      ],
+      "pass_conditions": [
+        "핸들러 독스트링에 'msg 는 검증기가 만든 문장이라 값을 담을 수 있다 - 검증기에서 입력값을 문장에 넣지 말 것' 명시",
+        "msg 길이 상한(예 200자)",
+        "커스텀 검증기 메시지에서 값을 빼고 loc 로만 지목"
+      ],
+      "note": "핸들러 자체는 옳다. 보증의 경계를 코드에 적어 두자는 것이다.",
+      "verified_by": "SR-026 (security-reviewer, herdr re-review 대행)",
+      "date_closed": "2026-07-28",
+      "close_evidence": "SR-026 §4 — _check_region_codes 가 값 대신 index 로 지목 + msg 200자 상한. 라이브 10건 실측에서 값 반사 0건, 3,000자 입력 응답이 3,127→156바이트, 로그 36줄에 민감값 0줄. 저장소의 커스텀 검증기 2개 모두 값 미포함 확인. 회귀 3건."
+    },
+    {
+      "id": "SR25-3",
+      "verdict": "CLOSE (PASS)",
+      "severity": "info",
+      "blocks": "없음 - 비차단",
+      "found_by": "SR-025 (security-reviewer, herdr re-review 대행)",
+      "date_found": "2026-07-27",
+      "owner": "PM / re-domain",
+      "title": "공공누리 4유형 - 사용 방식과는 합치한다. 다만 화면 출처 표기가 기계 키라 출처표시 요건을 형식적으로 못 채운다",
+      "evidence": [
+        "4유형 = 출처표시 + 상업적 이용금지 + 변경금지. 이 제품은 개인 비상업 도구(CLAUDE.md)이고, 변경금지가 금지하는 것은 2차적 저작물의 배포지 내부 가공·분석이 아니다 - 정규화(raw_stage->stage)와 필지 매칭은 배포 없는 내부 처리라 현재 사용은 성립한다",
+        "sources.yaml 이 commercial_use_prohibited · derivative_prohibited · review_required_before_public_release: true 로 명시 기록한 것은 모범적이다",
+        "그러나 analysis.py:423 의 출처 라벨이 'seoul_opendata_TbSeoulRedevStatus' 라는 기계 키다 - 출처표시 의무를 형식적으로 못 채우고, 삭제한 OpenAPI 테이블명이 남아 실제 출처(CSV OA-22856)와도 어긋난다",
+        "CLAUDE.md 의 '추후 가족·지인 확장'이 실현되면 배포에 해당할 소지가 있어 재검토가 필요하다"
+      ],
+      "pass_conditions": [
+        "표시용 라벨을 '서울특별시 열린데이터광장(OA-22856)' / '인천광역시(공공데이터포털 15055212)' 로",
+        "확장(공개) 시점에 4유형 재검토 - sources.yaml 플래그가 이미 그 신호를 걸어 뒀다"
+      ],
+      "note": "SR23-3 의 연장선. school_zone 항목에는 여전히 license 블록이 없다.",
+      "verified_by": "SR-026 (security-reviewer, herdr re-review 대행)",
+      "date_closed": "2026-07-28",
+      "close_evidence": "SR-026 §5 — SOURCE_LABELS 로 표시명 분리(OA-22856). 모르는 키는 fallback 으로 뭉개지 않고 그대로 돌려준다."
+    },
+    {
+      "id": "SR25-4",
+      "verdict": "CLOSE (PASS)",
+      "severity": "info",
+      "blocks": "없음 - 비차단",
+      "found_by": "SR-025 (security-reviewer, herdr re-review 대행)",
+      "date_found": "2026-07-27",
+      "owner": "re-arch",
+      "title": "api-spec.md 에 422 본문 형식 변경(input 제거)이 반영되지 않았다 - 클라이언트 계약 변경이다",
+      "evidence": [
+        "app/main.py 의 새 핸들러가 detail 항목을 type/loc/msg 세 키로 고정했다(기존에는 input·ctx 등이 함께 나갔다)",
+        "docs/02-design/api-spec.md 변경분에는 조건 필드 추가만 있고 오류 응답 형식 절이 없다"
+      ],
+      "pass_conditions": [
+        "api-spec 에 422 응답 예시를 추가하고 'input 은 의도적으로 싣지 않는다(민감값 반사 방지)' 를 명시"
+      ],
+      "note": "보안 결함이 아니라 계약 문서의 지연이다. 다만 이 변경의 이유가 보안이므로 문서에 남는 편이 좋다.",
+      "verified_by": "SR-026 (security-reviewer, herdr re-review 대행)",
+      "date_closed": "2026-07-28",
+      "close_evidence": "SR-026 §5 — api-spec.md §0 에 422 본문 계약 명시(detail 배열 · input 없음 · msg 200자 · 분기는 type/loc)."
+    },
+    {
+      "id": "SR25-5",
+      "verdict": "CLOSE (PASS)",
+      "severity": "info",
+      "blocks": "없음 - 커밋 전 확인 권고",
+      "found_by": "SR-025 (security-reviewer, herdr re-review 대행)",
+      "date_found": "2026-07-27",
+      "owner": "PM",
+      "title": "리뷰 도중에도 소스가 계속 변경돼 테스트 결과가 시점마다 달랐다 - '1,092 passed' 는 시점이 붙어야 한다",
+      "evidence": [
+        "app/agents/orchestrator.py · recommend.py · domain/conditions.py · domain/redevelopment/analysis.py · ingest/redevelopment.py · styles/tokens.css · deploy/DEPLOY.md 의 mtime 이 23:35~23:47 사이 갱신됐다",
+        "그 사이 전체 스위트가 한 번 5 failed(test_redevelopment 이름-순서 독립성 5종), 한 번 1 failed(test_condition_reach::test_증명[area_filters_candidates])로 넘어졌다가 최종 상태에서 1,092 passed 로 수렴",
+        "두 실패 모두 편집 중 스냅샷이 원인이다 - 현재 구현을 다시 읽으면 결정적이다(_find_dong_spans 는 위치 기준 최장일치이고 by_head 버킷을 길이 내림차순으로 고정한다)"
+      ],
+      "pass_conditions": [
+        "커밋 후 클린 체크아웃에서 백엔드 1,092 / 76 skipped · 프론트 656 / 39 files 재확인"
+      ],
+      "note": "판정은 최종 상태(2026-07-27 23:47) 기준이다.",
+      "verified_by": "SR-026 (security-reviewer, herdr re-review 대행)",
+      "date_closed": "2026-07-28",
+      "close_evidence": "SR-026 — 이번 라운드는 리뷰 중 소스 변경 없음(두 번 돌려 같은 수 1,123/76). 커밋 후 클린 체크아웃 재확인은 권고로 유지."
     }
   ],
   "deployment_readiness": {

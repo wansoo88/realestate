@@ -439,7 +439,9 @@ def test_가중치가_반영되지_않은_축은_결과에_고지된다(client):
     token = _login(client)
     _set_profile(client, token, cash=1_000_000_000, income=300_000_000)
     _seed_weighted_pair(client.repo)
-    _set_weights(client, token, {"location": 1.0})
+    # 재건축 축은 명시적으로 0 — 이 테스트는 '입지 100%'가 어떻게 고지되는지만 본다.
+    # (0 을 주지 않으면 서버가 기본 비중 15% 를 넣어 입지가 85% 가 된다.)
+    _set_weights(client, token, {"location": 1.0, "redevelopment": 0})
 
     body = _run(client, token, {"region_codes": [REGION]})
 

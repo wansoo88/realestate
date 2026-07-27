@@ -14,7 +14,9 @@ import datetime as dt
 
 from app.agents.base import validate_finding
 from app.domain.location.analysis import (
+    ASSIGNMENT_UNKNOWN,
     assess_school,
+    assess_school_group,
     estimate_buildings,
     evaluate_location,
     plan_confidence,
@@ -89,6 +91,136 @@ def test_학업성취도는_출처가_있으면_쓴다():
                    achievement_as_of="2025"))
     assert school["achievement_pct"] == 91.2
     assert school["achievement_source"] == "학교알리미"
+
+
+# ---------------------------------------------------------------------------
+# 1-B. 학교급 — 초등 통학구역 ≠ 중·고 학교군 (013)
+#
+# 이 절이 지키는 것은 점수가 아니라 **문장**이다. 같은 폴리곤 포함 판정이라도
+# 초등은 "배정"이라 말할 수 있고 중·고는 말할 수 없다. 원천에 배정 방식이 없기 때문이다.
+# ---------------------------------------------------------------------------
+
+def _group(level: str, **over) -> SchoolFact:
+    base = dict(name=f"○○{level[0]}", level=level, in_district=True, distance_m=800,
+                zone_kind="학교군", zone_name=f"○○{level}군", candidate_count=5,
+                district_as_of="2026-03-20")
+    base.update(over)
+    return SchoolFact(**base)
+
+
+def test_학교군은_배정이라는_말을_쓰지_않는다():
+    """★ 이 프로젝트에서 가장 지키기 어려운 규칙 — 뭉뚱그리면 거짓말이 된다."""
+    group, _ = assess_school_group(_group("중학교"))
+    assert group is not None
+    # 초등 판정에만 있는 키. 학교군에 생기는 순간 리포트가 '배정 중학교'를 말하게 된다.
+    assert "assigned_elementary" not in group
+    assert not any(k.startswith("assigned") for k in group)
+    assert group["nearest_school"] == "○○중"
+    assert group["candidate_count"] == 5
+    assert group["assignment"] == ASSIGNMENT_UNKNOWN
+
+
+def test_학교군_근거문장에_배정방식_미확인이_들어간다():
+    a = evaluate_location(_facts(middle_school=_group("중학교"),
+                                 high_school=_group("고등학교", candidate_count=22,
+                                                    distance_m=1500)),
+                          as_of=TODAY)
+    claims = [e["claim"] for e in a.evidence]
+    mid = next(c for c in claims if "중학교" in c)
+    high = next(c for c in claims if "고등학교" in c)
+    for claim in (mid, high):
+        assert "배정 방식 미확인" in claim
+        assert "후보" in claim
+        # "○○중학교 학구도 내부" 같은 초등식 문장이 나오면 안 된다.
+        assert "학구도 내부" not in claim
+    assert "22곳" in high
+    # 반대 근거(리스크)도 반드시 함께 나간다.
+    details = [r["detail"] for r in a.risks]
+    assert any("배정 학교를 확정하지 않습니다" in d and "중학교" in d for d in details)
+
+
+def test_학교군_미포함이면_거리로_대체하지_않는다():
+    group, missing = assess_school_group(
+        _group("중학교", in_district=False, distance_m=30))
+    assert group is None
+    assert any("대체하지 않" in m for m in missing)
+
+
+def test_학교군_데이터_미확보는_미포함과_구분된다():
+    group, missing = assess_school_group(
+        SchoolFact(level="고등학교", district_data_available=False))
+    assert group is None
+    assert any("미확보" in m for m in missing)
+
+
+def test_후보수를_모르면_후보N곳이라고_쓰지_않는다():
+    group, missing = assess_school_group(_group("중학교", candidate_count=None))
+    a_claim = None
+    assert any("후보 학교 수 미상" in m for m in missing)
+    a = evaluate_location(_facts(middle_school=_group("중학교", candidate_count=None)),
+                          as_of=TODAY)
+    a_claim = next(c["claim"] for c in a.evidence if "중학교" in c["claim"])
+    assert "후보 학교 수 미상" in a_claim
+    assert "배정 방식 미확인" in a_claim
+
+
+def test_초등_공동학구는_배정을_단정하지_않는다():
+    """수도권 통학구역의 21%가 공동학구다 — 후보가 2곳 이상이면 배정이 아니다."""
+    single, _ = assess_school(SchoolFact(name="○○초", in_district=True, distance_m=340,
+                                         district_as_of="2026", candidate_count=1))
+    assert "co_district" not in single
+
+    shared, _ = assess_school(SchoolFact(name="○○초", in_district=True, distance_m=340,
+                                         district_as_of="2026", candidate_count=3))
+    assert shared["co_district"] is True
+    assert shared["candidate_count"] == 3
+
+    a = evaluate_location(_facts(school=SchoolFact(
+        name="○○초", in_district=True, distance_m=340, district_as_of="2026",
+        candidate_count=3)), as_of=TODAY)
+    claim = next(c["claim"] for c in a.evidence if "○○초" in c["claim"])
+    assert "공동학구" in claim and "3곳" in claim
+    assert any("공동학구" in r["detail"] for r in a.risks)
+
+
+def test_중고를_들여도_초등만_있을_때_점수가_그대로다():
+    """★ 회귀 가드 — 학군 축에 급을 더해도 **초등만 있으면 값이 같아야** 한다.
+
+    `_school_axis_score` 가 있는 급끼리만 정규화하지 않고 없는 급을 0점으로 세면
+    여기서 점수가 내려간다(그러면 기존 단지 전부의 점수가 조용히 낮아진다).
+    """
+    only_elem = evaluate_location(_facts(), as_of=TODAY)
+    # 94.2 는 013 이전 코드(git HEAD~)에 **같은 입력을 넣어 실측한** 값이다.
+    assert only_elem.score == 94.2
+    assert only_elem.middle_school is None
+    assert only_elem.high_school is None
+    # 묻지 않은 급에 대해 '미확보'라고 떠들지 않는다.
+    assert not [m for m in only_elem.missing if "학교군" in m]
+
+
+def test_학교군이_생기면_점수가_움직인다():
+    """가까운 학교군은 올리고 먼 학교군은 내린다 — 양방향으로 움직여야 정상이다."""
+    base = evaluate_location(_facts(), as_of=TODAY).score
+    near = evaluate_location(_facts(middle_school=_group("중학교", distance_m=200)),
+                             as_of=TODAY).score
+    far = evaluate_location(_facts(middle_school=_group("중학교", distance_m=2500)),
+                            as_of=TODAY).score
+    assert near > base > far
+
+
+def test_학교급별_점수구간이_다르다():
+    """★ 변이 가드 — 중·고에 초등 구간(300~1500m)을 그대로 쓰면 이 테스트가 깨진다.
+
+    1500m 는 초등에겐 0점이지만 중학교(400~2000)·고등학교(600~3000)에겐 아니다.
+    """
+    mid = evaluate_location(_facts(school=None, middle_school=_group("중학교",
+                                                                    distance_m=1500)),
+                            as_of=TODAY)
+    high = evaluate_location(_facts(school=None, high_school=_group("고등학교",
+                                                                   distance_m=1500)),
+                             as_of=TODAY)
+    assert mid.score is not None and high.score is not None
+    assert high.score > mid.score      # 같은 거리라도 고등학교가 덜 불리하다
 
 
 # ---------------------------------------------------------------------------

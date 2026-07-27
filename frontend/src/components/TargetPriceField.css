@@ -16,9 +16,12 @@
   color: var(--text-secondary);
 }
 
+/* 굵기는 400/600 두 단계만 쓴다(tokens.css §타이포). 700 은 맑은고딕(Windows 폴백)에서
+   600 과 **똑같이 렌더**되므로 macOS 에서만 보이는 차이가 된다 — 위계 채널로 못 쓴다.
+   같은 26px 금액인 .card__price 와 굵기를 맞춘다. */
 .target__value {
   font-size: var(--fs-price);
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .target__note {

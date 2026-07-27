@@ -487,16 +487,22 @@ def _httpx_get(url: str, headers: dict[str, str], params: dict[str, str]) -> dic
     이 함수도 키를 아는 계층이다. 헤더·URL 이 예외·traceback 에 실려 나가는 경로를
     구조적으로 막아 둔다 — 호출부가 기억해서 지우게 두지 않는다.
     """
+    import json as _json
+
     import httpx
 
+    from app.core.http import request_capped
     from app.core.masking import masked_error
 
     secrets = tuple(v.split(" ", 1)[-1] for k, v in headers.items()
                     if k.lower() in ("authorization", "x-api-key"))
     try:
-        resp = httpx.get(url, headers=headers, params=params, timeout=20.0)
-        resp.raise_for_status()
-        return resp.json()
+        # ⚠️ SR25-1 — 예전에는 `httpx.get(...).json()` 이었다. `.json()` 은 본문을
+        #    **전부 읽은 뒤** 파싱하므로 상한이 없었다. 스트리밍으로 받으면서 센다.
+        _resp, body = request_capped(httpx, "GET", url, headers=headers,
+                                     params=params, timeout=20.0,
+                                     what="카카오 로컬")
+        return _json.loads(body)
     except Exception as exc:                     # noqa: BLE001 - 마스킹해 다시 올린다
         raise masked_error(exc, prefix="카카오 로컬 요청 실패: ",
                            extra_secrets=secrets) from None

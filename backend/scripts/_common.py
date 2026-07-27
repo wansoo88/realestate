@@ -35,8 +35,9 @@ if str(BACKEND_DIR) not in sys.path:
 from app.core.masking import install_log_masking, mask_secrets  # noqa: E402
 
 __all__ = [
-    "BACKEND_DIR", "REPO_ROOT", "configure_logging", "database_url", "load_env",
-    "make_engine", "mask_secrets", "require", "safe_dsn",
+    "BACKEND_DIR", "MAX_DOWNLOAD_BYTES", "REPO_ROOT", "DownloadTooLarge",
+    "capped_get", "capped_urlopen_read", "configure_logging", "database_url",
+    "load_env", "make_engine", "mask_secrets", "read_capped", "require", "safe_dsn",
 ]
 
 #: 요청 URL 을 통째로 INFO 로 찍는 라이브러리들. 공공데이터포털은 **인증키를 쿼리스트링에
@@ -123,6 +124,80 @@ def require(name: str) -> str:
     if not value:
         raise SystemExit(f"[FAIL] {name} 이(가) 필요합니다 — .env 를 확인하세요.")
     return value
+
+
+# ---------------------------------------------------------------------------
+# 다운로드 상한 — SR17-5 → SR18-6 → SR22-2 → SR23-1 → SR24-2 로 **다섯 번** 지적됐다
+#
+# 개별 수집기마다 `resp.content` 를 그냥 반환하면, 원천이 바뀌거나 포털이 오류
+# 스트림을 내보낼 때 응답 전체가 메모리에 올라간다. 이 스크립트들은 배포 서버
+# (mem_limit 192m 짜리 컨테이너 옆)에서 사람이 손으로 돌리므로, 상한 없는 읽기는
+# 호스트 메모리를 먹는 유일한 경로다.
+#
+# 반복 지적의 진짜 원인은 "각 수집기가 각자 기억해야 한다"였다. 그래서 **여기 한 곳**에
+# 두고 모든 수집기가 이걸 부르게 한다(`tests/test_script_hygiene.py` 가 강제한다).
+# ---------------------------------------------------------------------------
+
+#: 한 응답에서 받아들이는 본문 상한(바이트). 실측상 가장 큰 원천은 학구도 shp zip
+#: (초·중·고 각 10~40MB)이다. 그 두 배 남짓을 상한으로 둔다 — 이 위는 "원천이 바뀌었다"
+#: 이지 정상 수집이 아니다.
+MAX_DOWNLOAD_BYTES = 96 * 1024 * 1024
+
+#: 한 번에 읽는 덩어리. 너무 작으면 느리고 너무 크면 상한을 넘겨 읽는다.
+_CHUNK = 256 * 1024
+
+
+class DownloadTooLarge(RuntimeError):
+    """응답 본문이 상한을 넘었다. **끝까지 읽지 않고** 중단한다."""
+
+
+def read_capped(chunks: Any, *, max_bytes: int = MAX_DOWNLOAD_BYTES,
+                what: str = "응답", declared: Any = None) -> bytes:
+    """바이트 덩어리 이터러블을 **상한까지만** 모은다.
+
+    `declared` 는 Content-Length 헤더값(있으면). 있으면 한 바이트도 읽기 전에 막는다.
+    상한을 넘으면 `DownloadTooLarge` — 잘린 본문을 정상인 척 돌려주지 않는다
+    (잘린 CSV 는 파싱은 되고 행만 줄어드는, 이 프로젝트가 가장 경계하는 조용한 실패다).
+    """
+    if declared is not None:
+        text = str(declared).strip()
+        if text.isdigit() and int(text) > max_bytes:
+            raise DownloadTooLarge(
+                f"[FAIL] {what}: 응답 크기 {int(text):,}바이트가 상한 "
+                f"{max_bytes:,}바이트를 넘습니다 — 원천이 바뀌었는지 확인하세요.")
+    buf = bytearray()
+    for chunk in chunks:
+        if not chunk:
+            continue
+        buf += chunk
+        if len(buf) > max_bytes:
+            raise DownloadTooLarge(
+                f"[FAIL] {what}: 응답이 상한 {max_bytes:,}바이트를 넘어 중단했습니다 "
+                "— 원천이 바뀌었는지 확인하세요(잘린 본문을 쓰지 않습니다).")
+    return bytes(buf)
+
+
+def capped_get(client: Any, url: str, *, method: str = "GET",
+               max_bytes: int = MAX_DOWNLOAD_BYTES, what: str = "응답",
+               **kwargs: Any) -> bytes:
+    """httpx 클라이언트로 **스트리밍** 요청 후 상한까지만 읽는다.
+
+    `client.get(...).content` 대신 이걸 쓴다 — 전자는 상한이 걸리기 전에 이미
+    본문 전체를 메모리에 올린다.
+    """
+    with client.stream(method, url, **kwargs) as resp:
+        resp.raise_for_status()
+        return read_capped(resp.iter_bytes(chunk_size=_CHUNK), max_bytes=max_bytes,
+                           what=what, declared=resp.headers.get("content-length"))
+
+
+def capped_urlopen_read(resp: Any, *, max_bytes: int = MAX_DOWNLOAD_BYTES,
+                        what: str = "응답") -> bytes:
+    """`urllib.request.urlopen()` 응답을 상한까지만 읽는다."""
+    return read_capped(iter(lambda: resp.read(_CHUNK), b""), max_bytes=max_bytes,
+                       what=what,
+                       declared=resp.headers.get("Content-Length")
+                       if hasattr(resp, "headers") else None)
 
 
 # ⚠️ import 만으로 로깅 억제·마스킹이 걸린다(SR17-3). 스크립트가 부르는 것을 잊어도

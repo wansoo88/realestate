@@ -55,6 +55,11 @@ class Settings(BaseSettings):
     postgres_user: str = ""
     postgres_password: str = ""
     redis_url: str = "redis://redis:6379/0"
+    #: 서버측 쿼리 상한(ms). API·워커가 쓰는 엔진에만 걸린다(SR24-4).
+    #: 0 으로 끌 수 있게 두지만 **끄지 말 것** — 한 번의 평범한 조회가 192m 짜리 db
+    #: 컨테이너를 눕힐 수 있고, 클라이언트 타임아웃은 서버 쿼리를 멈추지 못한다.
+    #: 대량 적재 배치는 이 엔진을 쓰지 않는다(`scripts/_common.make_engine`).
+    db_statement_timeout_ms: int = 10_000
 
     # --- 외부 API ---
     anthropic_api_key: str = ""

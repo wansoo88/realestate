@@ -217,7 +217,6 @@
 }
 
 .cond__value-off {
-  font-family: var(--ff);
   color: var(--text-estimated);
   white-space: nowrap;
 }
@@ -310,6 +309,6 @@
 .cond__cancel {
   width: 100%;
   margin-top: var(--sp-1);
-  color: var(--accent);
+  color: var(--accent-text);
   font-size: var(--fs-footnote);
 }

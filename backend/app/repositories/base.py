@@ -264,10 +264,28 @@ class RecommendationRepository(Protocol):
     #:    ⚠️ `bbox` 는 **좌표가 있는 단지만** 찾는다 — geom 이 NULL 이면 공간 연산이
     #:       NULL 을 내고 자연히 빠진다. 호출부는 이 사실을 사용자에게 고지해야 한다
     #:       (좌표 확보율이 100% 가 아니다 · `geocode_coverage`).
+    #:
+    #: ⚠️ **내 조건(평수·연식·세대수)은 여기서 걸러야 한다.** 예산과 달리 이건
+    #:    "제외 사유"가 아니라 **후보가 아님**이다 — 59㎡를 원하는 사람에게 84㎡ 는
+    #:    사유를 달아 봐야 답이 아니고, 조회 상한(50개 단지)만 잡아먹는다.
+    #:    미상(면적·연식·세대수 NULL)은 **통과시키지 않는다**(모르는 것을 조건에 맞다고
+    #:    우기면 "조건에 안 맞는 게 나온다"가 그대로 재현된다). 대신 몇 개가 그렇게
+    #:    빠졌는지는 `candidate_scope_stats` 가 세고 러너가 notes 로 말한다.
     def recommendation_candidates(
         self, *, region_codes: list[str], max_price_krw: int | None = None,
         limit: int = 50, bbox: BBox | None = None,
+        area_min_m2: float | None = None, area_max_m2: float | None = None,
+        built_after: int | None = None, min_households: int | None = None,
     ) -> list[ComplexSummary]: ...
+
+    #: 조건 때문에 조회에서 빠진 단지 수 `{scope_total, area_dropped, built_dropped,
+    #: built_unknown, households_dropped, households_unknown}`.
+    #: **거르는 것과 말하지 않는 것은 다르다** — 세지 않으면 "왜 3건뿐이냐"에 답할 수 없다.
+    def candidate_scope_stats(
+        self, *, region_codes: list[str] | None = None, bbox: BBox | None = None,
+        area_min_m2: float | None = None, area_max_m2: float | None = None,
+        built_after: int | None = None, min_households: int | None = None,
+    ) -> dict[str, int]: ...
 
     #: 좌표 확보 현황 `(좌표 있는 단지 수, 전체 단지 수)`.
     #: bbox 검색에서 **몇 개가 구조적으로 빠지는지**를 숫자로 말하기 위한 것이다.

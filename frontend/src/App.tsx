@@ -34,19 +34,27 @@ import { useAuth } from "./hooks/useAuth";
 import { useMapArea } from "./hooks/useMapArea";
 import { useProfile } from "./hooks/useProfile";
 import { useRecommendation } from "./hooks/useRecommendation";
+import { useTagFilter } from "./hooks/useTagFilter";
 import { readTargetPrice } from "./lib/affordability";
 import { SORT_OPTIONS, isSortKey, sortComplexes, type SortKey } from "./lib/complexSort";
 import { formatKrwShort } from "./lib/format";
-import { filterChips, type MapFilterState } from "./lib/mapFilters";
+import { filterList } from "./lib/listFilter";
+import { effectiveBudgetKrw, filterChips, type MapFilterState } from "./lib/mapFilters";
 import { NOTICE_NOT_ADVICE, NOTICE_TRADE_DELAY } from "./lib/notices";
 import { appliedScope, scopeFields, type SearchScope } from "./lib/searchScope";
+import { complexTagFacts } from "./lib/tags";
+import { ListFilterBar } from "./components/ListFilterBar";
 import "./App.css";
 
-type Tab = "map" | "money" | "advice";
+/**
+ * 우측 패널에 남는 것은 **목록 두 개뿐**이다(사용자 요청).
+ * "내 자금"은 목록이 아니라 계산 결과라서 탭이 아니라 **내 조건 안의 버튼**으로 옮겼다 —
+ * 탭은 "무엇을 볼까"를 고르는 자리인데, 자금계획은 조건을 고치러 가는 길에 가깝다.
+ */
+type Tab = "map" | "advice";
 
 const TABS: Array<{ id: Tab; label: string }> = [
   { id: "map", label: "주변 단지" },
-  { id: "money", label: "내 자금" },
   { id: "advice", label: "AI 추천" },
 ];
 
@@ -82,6 +90,8 @@ export function Home({
   onPlanTargetChange,
 }: HomeProps) {
   const [tab, setTab] = useState<Tab>("map");
+  /** 자금계획 화면을 띄웠는가. 탭이 아니라 **내 조건에서 열고 닫는 화면**이다. */
+  const [moneyOpen, setMoneyOpen] = useState(false);
   const [snap, setSnap] = useState<SnapPoint>("peek");
   const [selected, setSelected] = useState<number | null>(null);
   /** 목록에서 가리키는 중인 단지 — 지도 마커를 들어올린다(선택과 다르다: 지도를 움직이지 않는다). */
@@ -100,6 +110,16 @@ export function Home({
   // 필터 스위치 — 기본은 켜짐. 끌 수 있어야 "왜 안 보이지?"에 사용자가 스스로 답한다.
   const [budgetApplied, setBudgetApplied] = useState(true);
   const [preferApplied, setPreferApplied] = useState(true);
+
+  /**
+   * "예산 내만 보기" — **기본은 꺼짐**.
+   *
+   * 켠 채로 시작하면 처음 보는 화면에서 이미 몇 건이 사라져 있고, 사용자는 그게 전부인 줄
+   * 안다. 예산을 넘는 집을 **보는 것** 자체가 이 도구의 기능이다(살 수 있는지는 자금계획이
+   * 숫자로 답한다). 대신 켜고 끈 상태와 숨긴 건수를 목록 위에 항상 적는다.
+   */
+  const [budgetOnly, setBudgetOnly] = useState(false);
+  const mapTags = useTagFilter();
 
   const budgetKrw = afford.data?.max_purchase_krw ?? null;
 
@@ -134,6 +154,30 @@ export function Home({
     [map.items, sort, rankById],
   );
 
+  /**
+   * 예산·특성 필터를 적용한 결과. **정렬 뒤에** 건다 — 순서를 바꾸지 않고 걸러내기만 한다.
+   * 예산 기준은 지도 조회에 쓴 값과 **같은 숫자**(희망가 우선, 없으면 한도)여야
+   * "지도엔 있는데 목록엔 없는 단지"가 생기지 않는다.
+   */
+  const listBudgetKrw = effectiveBudgetKrw(filters);
+  const mapOutcome = useMemo(
+    () =>
+      filterList(
+        listItems.map((item) => ({
+          item,
+          priceKrw: item.recent_price_krw,
+          facts: complexTagFacts(item),
+        })),
+        {
+          budgetOnly,
+          budgetKrw: listBudgetKrw,
+          tags: mapTags.tags,
+          includeUnknownTag: mapTags.includeUnknown,
+        },
+      ),
+    [listItems, budgetOnly, listBudgetKrw, mapTags.tags, mapTags.includeUnknown],
+  );
+
   const onBoundsChange = useCallback(
     (bbox: string, zoom: number) => {
       // 지도를 움직이면 시트를 내려 지도가 가려지지 않게 한다(ux §3).
@@ -150,8 +194,15 @@ export function Home({
 
   const showOnMap = useCallback((id: number) => {
     setTab("map");
+    setMoneyOpen(false); // 지도를 보러 가는데 자금 화면이 덮고 있으면 안 된다
     setSelected(id);
     setSnap("half");
+  }, []);
+
+  const openMoney = useCallback(() => {
+    setMoneyOpen(true);
+    // 폰에서는 시트가 접혀 있을 수 있다 — 열었는데 안 보이면 아무 일도 안 일어난 것처럼 읽힌다.
+    setSnap((s) => (s === "peek" ? "half" : s));
   }, []);
 
   const startRecommendation = useCallback(() => {
@@ -218,19 +269,18 @@ export function Home({
 
   const clearPlanComplex = useCallback(() => setSelected(null), []);
 
-  const title =
-    tab === "map"
+  const title = moneyOpen
+    ? "내 자금"
+    : tab === "map"
       ? map.level === "cluster"
         ? `지역 ${map.clusters.length}곳`
         : `단지 ${map.items.length}건`
-      : tab === "money"
-        ? "내 자금"
-        : "AI 추천";
+      : "AI 추천";
 
   /* 정렬은 목록 바로 위에 둔다. 네이티브 select 를 쓰는 이유: 키보드·스크린리더·모바일
      기본 피커가 전부 공짜로 따라오고, 직접 만든 드롭다운은 그 셋을 대개 못 만든다. */
   const sortControl =
-    tab === "map" && map.level === "complex" && listItems.length > 0 ? (
+    !moneyOpen && tab === "map" && map.level === "complex" && listItems.length > 0 ? (
       <label className="app__sort">
         <span className="sr-only">목록 정렬</span>
         <select
@@ -251,8 +301,16 @@ export function Home({
     <main className="app">
       <h1 className="sr-only">부동산 AI 자문</h1>
 
-      {/* 좌상단(폰) · 좌측 패널(데스크톱) — 조건은 지도를 보는 내내 보이고 고칠 수 있어야 한다 */}
-      <FilterRail chips={chips} onToggle={toggleChip} onEdit={onEditConditions} />
+      {/* 좌상단(폰) · 좌측 패널(데스크톱) — 조건은 지도를 보는 내내 보이고 고칠 수 있어야 한다.
+          "내 자금"도 여기서 연다: 목록 탭이 아니라 **내 조건에 딸린 계산 결과**이기 때문. */}
+      <FilterRail
+        chips={chips}
+        onToggle={toggleChip}
+        onEdit={onEditConditions}
+        onOpenMoney={openMoney}
+        moneyOpen={moneyOpen}
+        maxPurchaseKrw={afford.data?.max_purchase_krw ?? null}
+      />
 
       <MapView
         onBoundsChange={onBoundsChange}
@@ -265,91 +323,16 @@ export function Home({
       />
 
       <BottomSheet snap={snap} onSnapChange={setSnap} title={title} actions={sortControl}>
-        <div className="app__tabs" role="tablist" aria-label="화면 전환">
-          {TABS.map((t) => (
+        {/* 자금 화면일 때는 탭을 감춘다 — 지금 어디에 있는지가 분명해야 돌아갈 길도 분명하다 */}
+        {moneyOpen ? (
+          <div className="app__money">
             <button
-              key={t.id}
               type="button"
-              role="tab"
-              id={`tab-${t.id}`}
-              aria-selected={tab === t.id}
-              // 패널은 하나만 렌더링한다 → 모든 탭이 같은 패널을 가리킨다.
-              // 존재하지 않는 id 를 가리키면 보조기기에서 깨진 참조가 된다.
-              aria-controls="app-panel"
-              className={`app__tab${tab === t.id ? " app__tab--on" : ""}`}
-              onClick={() => setTab(t.id)}
+              className="app__moneyback"
+              onClick={() => setMoneyOpen(false)}
             >
-              {t.label}
+              ← 목록으로
             </button>
-          ))}
-        </div>
-
-        <div id="app-panel" role="tabpanel" aria-labelledby={`tab-${tab}`}>
-          {tab === "map" && (
-            <>
-              {map.error && (
-                <p className="app__error" role="alert">
-                  {map.error}
-                </p>
-              )}
-              {map.loading && <p className="app__status">불러오는 중…</p>}
-
-              {!map.loading && map.level === "cluster" && (
-                <>
-                  <p className="app__hint">지도를 확대하면 개별 단지가 표시됩니다.</p>
-                  <ul className="app__clusters">
-                    {map.clusters.map((c) => (
-                      <li key={c.region_code} className="app__cluster">
-                        <span className="app__cluster-count num">{c.count}</span>
-                        <span className="app__cluster-region">{c.region_code}</span>
-                        <span className="app__cluster-price num estimated">
-                          {c.median_price_krw ? `중위 ${formatKrwShort(c.median_price_krw)}` : "—"}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                </>
-              )}
-
-              {!map.loading && map.level === "complex" && (
-                <>
-                  {listItems.length === 0 && (
-                    <p className="app__status">
-                      이 범위에 조건에 맞는 단지가 없습니다. 지도를 옮기거나 조건 스위치를
-                      꺼 보세요.
-                    </p>
-                  )}
-                  {listItems.length > 0 && (
-                    // 전국 순위처럼 읽히지 않게 정렬 범위를 밝힌다
-                    <p className="app__scope">지금 보이는 지도 범위 기준</p>
-                  )}
-                  {/* 고른 단지의 자금계획으로 바로 건너뛴다 — 계산은 이미 돌고 있고,
-                      이 버튼은 그 결과가 어디 있는지 알려 주는 길이다. */}
-                  {planComplex && (
-                    <button
-                      type="button"
-                      className="app__planjump"
-                      onClick={() => setTab("money")}
-                    >
-                      {planComplex.name} 자금계획 보기
-                    </button>
-                  )}
-                  {listItems.map((item) => (
-                    <ComplexCard
-                      key={item.id}
-                      item={item}
-                      selected={selected === item.id}
-                      rank={rankById[item.id]}
-                      onSelect={handleSelect}
-                      onHover={setHovered}
-                    />
-                  ))}
-                </>
-              )}
-            </>
-          )}
-
-          {tab === "money" && (
             <AffordabilityPanel
               data={afford.data}
               loading={afford.loading}
@@ -361,29 +344,139 @@ export function Home({
               onClearComplex={clearPlanComplex}
               targetPriceKrw={targetPriceKrw}
             />
-          )}
+          </div>
+        ) : (
+          <>
+            <div className="app__tabs" role="tablist" aria-label="화면 전환">
+              {TABS.map((t) => (
+                <button
+                  key={t.id}
+                  type="button"
+                  role="tab"
+                  id={`tab-${t.id}`}
+                  aria-selected={tab === t.id}
+                  // 패널은 하나만 렌더링한다 → 모든 탭이 같은 패널을 가리킨다.
+                  // 존재하지 않는 id 를 가리키면 보조기기에서 깨진 참조가 된다.
+                  aria-controls="app-panel"
+                  className={`app__tab${tab === t.id ? " app__tab--on" : ""}`}
+                  onClick={() => setTab(t.id)}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
 
-          {tab === "advice" && (
-            <RecommendPanel
-              phase={rec.phase}
-              job={rec.job}
-              error={rec.error}
-              budgetKrw={budgetKrw}
-              regionCodes={regionCodes}
-              onRegionsChange={setRegionCodes}
-              // 지도가 들고 있는 범위를 **그대로** 넘긴다(화면이 bbox 를 새로 계산하지 않는다).
-              currentBbox={map.bbox}
-              areaBbox={areaBbox}
-              onCaptureArea={setAreaBbox}
-              onClearArea={clearArea}
-              appliedScope={appliedScopeState}
-              onStart={startRecommendation}
-              onCancel={rec.cancel}
-              onShowOnMap={showOnMap}
-              onEditConditions={onEditConditions}
-            />
-          )}
-        </div>
+            <div id="app-panel" role="tabpanel" aria-labelledby={`tab-${tab}`}>
+              {tab === "map" && (
+                <>
+                  {map.error && (
+                    <p className="app__error" role="alert">
+                      {map.error}
+                    </p>
+                  )}
+                  {map.loading && <p className="app__status">불러오는 중…</p>}
+
+                  {!map.loading && map.level === "cluster" && (
+                    <>
+                      <p className="app__hint">지도를 확대하면 개별 단지가 표시됩니다.</p>
+                      <ul className="app__clusters">
+                        {map.clusters.map((c) => (
+                          <li key={c.region_code} className="app__cluster">
+                            <span className="app__cluster-count num">{c.count}</span>
+                            <span className="app__cluster-region">{c.region_code}</span>
+                            <span className="app__cluster-price num estimated">
+                              {c.median_price_krw ? `중위 ${formatKrwShort(c.median_price_krw)}` : "—"}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    </>
+                  )}
+
+                  {!map.loading && map.level === "complex" && (
+                    <>
+                      {listItems.length === 0 && (
+                        <p className="app__status">
+                          이 범위에 조건에 맞는 단지가 없습니다. 지도를 옮기거나 조건 스위치를
+                          꺼 보세요.
+                        </p>
+                      )}
+                      {listItems.length > 0 && (
+                        // 전국 순위처럼 읽히지 않게 정렬 범위를 밝힌다
+                        <p className="app__scope">지금 보이는 지도 범위 기준</p>
+                      )}
+                      {/* 예산 토글 + 특성 칩. 목록이 있을 때만 — 거를 게 없으면 조작도 없다. */}
+                      {listItems.length > 0 && (
+                        <ListFilterBar
+                          listLabel="주변 단지"
+                          outcome={mapOutcome}
+                          budgetOnly={budgetOnly}
+                          onBudgetOnlyChange={setBudgetOnly}
+                          onToggleTag={mapTags.toggle}
+                          onClearTags={mapTags.clear}
+                          includeUnknownTag={mapTags.includeUnknown}
+                          onIncludeUnknownChange={mapTags.setIncludeUnknown}
+                        />
+                      )}
+                      {/* 필터로 0건이 됐으면 "없다"가 아니라 "걸러졌다"고 말한다 */}
+                      {listItems.length > 0 && mapOutcome.entries.length === 0 && (
+                        <p className="app__status">
+                          필터에 걸려 {listItems.length}건이 모두 가려졌습니다. 예산 토글이나
+                          특성 칩을 꺼 보세요.
+                        </p>
+                      )}
+                      {/* 고른 단지의 자금계획으로 바로 건너뛴다 — 계산은 이미 돌고 있고,
+                          이 버튼은 그 결과가 어디 있는지 알려 주는 길이다. */}
+                      {planComplex && (
+                        <button type="button" className="app__planjump" onClick={openMoney}>
+                          {planComplex.name} 자금계획 보기
+                        </button>
+                      )}
+                      {mapOutcome.entries.map((entry) => (
+                        <ComplexCard
+                          key={entry.item.id}
+                          item={entry.item}
+                          selected={selected === entry.item.id}
+                          rank={rankById[entry.item.id]}
+                          tags={entry.tags}
+                          unknownTags={entry.unknownTags}
+                          budget={entry.budget}
+                          onSelect={handleSelect}
+                          onHover={setHovered}
+                        />
+                      ))}
+                    </>
+                  )}
+                </>
+              )}
+
+              {tab === "advice" && (
+                <RecommendPanel
+                  phase={rec.phase}
+                  job={rec.job}
+                  error={rec.error}
+                  budgetKrw={budgetKrw}
+                  // 목록 필터가 쓰는 예산은 지도와 **같은 숫자**여야 한다(희망가 우선).
+                  listBudgetKrw={listBudgetKrw}
+                  budgetOnly={budgetOnly}
+                  onBudgetOnlyChange={setBudgetOnly}
+                  regionCodes={regionCodes}
+                  onRegionsChange={setRegionCodes}
+                  // 지도가 들고 있는 범위를 **그대로** 넘긴다(화면이 bbox 를 새로 계산하지 않는다).
+                  currentBbox={map.bbox}
+                  areaBbox={areaBbox}
+                  onCaptureArea={setAreaBbox}
+                  onClearArea={clearArea}
+                  appliedScope={appliedScopeState}
+                  onStart={startRecommendation}
+                  onCancel={rec.cancel}
+                  onShowOnMap={showOnMap}
+                  onEditConditions={onEditConditions}
+                />
+              )}
+            </div>
+          </>
+        )}
 
         {/* 고지는 조용하지만 사라지지 않게 상시 노출한다(lib/notices) */}
         <footer className="app__foot">

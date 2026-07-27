@@ -93,7 +93,7 @@
   padding: 0 var(--sp-3);
   border-radius: var(--r-pill);
   background: var(--accent-weak);
-  color: var(--accent);
+  color: var(--accent-text);
   font-size: var(--fs-caption);
   font-weight: 600;
 }
@@ -167,8 +167,9 @@
   border-radius: inherit;
 }
 
+/* 마커 글자는 "8.4억" — 등폭 패밀리를 쓰면 숫자만 Consolas 로 떨어져 '억'과 어긋난다.
+   자릿수 정렬은 tabular-nums 만으로 충분하다. */
 .map-pill__value {
-  font-family: var(--ff-num);
   font-variant-numeric: tabular-nums;
   font-weight: 600;
   line-height: 1.2;
@@ -233,7 +234,7 @@
 .map-pill--rank {
   background: var(--accent-weak);
   border: 1px solid var(--accent);
-  color: var(--accent);
+  color: var(--accent-text);
   box-shadow: none;
 }
 

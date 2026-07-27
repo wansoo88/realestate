@@ -148,15 +148,49 @@ class RecommendationIn(BaseModel):
     agents: list[str] | None = None
     top_n: int = Field(default=10, ge=1, le=50)
 
+    # --- 내 조건(선호) — 후보 선별에 실제로 쓰이는 값들 --------------------
+    #
+    # ⚠️ **여기 없는 조건은 추천에 도달하지 못한다.** 평수가 정확히 그랬다:
+    #    지도(`/map/complexes`)에는 `area_min_m2`/`area_max_m2` 가 있는데 추천 요청에는
+    #    없어서, 같은 화면의 같은 조건이 지도는 거르고 추천은 안 걸렀다(사용자 제보).
+    #    검증 규칙은 `/map/complexes` 와 **같게** 둔다(`gt=0`) — 같은 값을 두 규칙으로
+    #    검사하면 한쪽만 통과하는 값이 생기고, 그 순간 두 화면이 서로 다른 말을 한다.
+    #
+    # 안 보내면 서버가 **저장된 "내 조건"(`user_preference.prefer`)을 폴백으로 쓴다**
+    # (app/domain/conditions.py). 프론트가 한 줄 빠뜨려도 조건이 증발하지 않게 하려는 것이다.
+    # 보내면 이번 요청에 한해 그 값이 이긴다.
+    # ⚠️ `allow_inf_nan=False` (SR24-6). `Infinity` 는 `gt=0` 을 **통과한다**(inf > 0).
+    #    통과하면 `_positive_number` 가 뒤에서 `None` 으로 만들어 조건이 사라지는데,
+    #    사용자에게는 조건이 걸린 결과처럼 보인다 — 이 제품이 가장 경계하는 조용한 실패다.
+    #    `NaN`·`-Infinity` 는 이미 422 이므로 규칙을 하나로 맞춘다(지도 쿼리도 동일).
+    area_min_m2: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    area_max_m2: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    built_after: int | None = Field(default=None, ge=1900, le=2100)
+    min_households: int | None = Field(default=None, ge=0, le=1_000_000)
+    #: 저장된 "내 조건"을 이번 요청에 쓸 것인가. **끄는 방법이 있어야 한다** —
+    #: 폴백만 있으면 화면에서 면적 칩을 껐는데 추천은 계속 걸러지는 상태가 되고,
+    #: 그건 이번 사고의 거울상(끈 조건이 계속 켜져 있음)이다. `null` 은 "안 보냄"과
+    #: 같으므로 이 스위치가 필요하다(값으로는 '조건 없음'을 표현할 수 없다).
+    use_saved_conditions: bool = True
+
     @field_validator("region_codes")
     @classmethod
     def _check_region_codes(cls, value: list[str]) -> list[str]:
+        """⚠️ **오류 문장에 입력값을 넣지 않는다**(SR25-2).
+
+        pydantic 은 `ValueError` 의 문자열을 그대로 `msg` 로 만들고, 422 핸들러는
+        `msg` 를 통과시킨다. 그래서 여기서 값을 문장에 넣으면 그 값이 **원문 그대로**
+        응답으로 되돌아간다(실측: 3,000자 입력 → 응답 3,127바이트 전량 반사).
+        지금 이 필드는 법정동코드라 피해가 없지만, 같은 패턴을 자산·비밀번호 필드에
+        쓰는 순간 그날 조용히 사고가 된다. **위치(index)로 지목하고 값은 말하지 않는다.**
+        """
         out: list[str] = []
-        for raw in value:
+        for idx, raw in enumerate(value):
             code = str(raw).strip()
             if not _REGION_CODE_RE.match(code):
                 raise ValueError(
-                    f"region_codes 는 숫자 2~10자리 법정동코드여야 합니다: {code!r}")
+                    f"region_codes[{idx}] 가 형식에 맞지 않습니다 — "
+                    "숫자 2~10자리 법정동코드여야 합니다(값은 응답에 싣지 않습니다)")
             out.append(code)
         return out
 

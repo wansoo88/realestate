@@ -1,4 +1,4 @@
-"""초등학교 학구도 파싱·적재 테스트 (app/ingest/school_zone.py · scripts/load_school_zone.py).
+"""학구도 파싱·적재 테스트 (app/ingest/school_zone.py · scripts/load_school_zone.py).
 
 여기서 고정하는 것은 "돌아간다"가 아니라 **틀리면 조용히 틀리는 것들**이다.
 학구 배정은 리포트에 단정형으로 나가는 주장이라, 어긋나도 예외가 안 나는 결함이 제일 위험하다.
@@ -6,9 +6,10 @@
 고정 대상 (전부 변이 테스트로 확인했다 — 방어를 빼면 실제로 빨개진다)
   1. shx 오프셋·길이의 **16비트 워드 → 바이트** 환산 (×2 빠뜨리면 2번째부터 어긋남)
   2. 링 방향에 따른 **구멍(hole) 분리** (안 하면 도넛 학구의 구멍이 외곽으로 승격)
-  3. **초등학교 전용 필터** (중·고가 섞이면 최근접 중학교가 '배정 초등학교'가 된다)
+  3. **학교급 필터** (급이 섞이면 최근접 중학교가 '배정 초등학교'가 된다)
   4. 자연키가 (학구ID, **학교ID**) — 공동학구가 있어 학구ID 단독은 키가 못 된다
   5. 적재 SQL 의 자기교차 보정·좌표변환·멱등 구문
+  6. **초등 통학구역과 중·고 학교군은 모델이 다르다**(§6) — 같게 만들면 거짓말이 된다
 """
 from __future__ import annotations
 
@@ -24,15 +25,19 @@ import pytest
 from app.ingest.school_zone import (
     CAPITAL_AREA_SD,
     ELEMENTARY,
+    HIGH,
+    MIDDLE,
     SchoolLink,
     SchoolLocation,
     build_records,
+    build_zone_records,
     district_source_ref,
     parse_link_csv,
     parse_school_location_csv,
     parse_zone_shapefile,
     school_source_ref,
     shp_polygon_to_wkb,
+    zone_source_ref,
 )
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -94,8 +99,11 @@ def _shapefile_zip(records: list[bytes], attributes: list[dict[str, str]]) -> by
         shp += body
         shx += struct.pack(">ii", offset_bytes // 2, len(body) // 2)
 
+    # 실제 배포본과 같은 컬럼 집합. EDU_NM(교육지원청)이 필수인 이유는
+    # 고등학교 학교군 이름이 '1학교군'처럼 교육지원청 안에서만 유일해서다.
     columns = [("OBJECTID", 10), ("HAKGUDO_ID", 10), ("HAKGUDO_NM", 40),
-               ("HAKGUDO_GB", 1), ("SD_CD", 2), ("SGG_CD", 3), ("BASE_DT", 10)]
+               ("HAKGUDO_GB", 1), ("SD_CD", 2), ("SGG_CD", 3), ("BASE_DT", 10),
+               ("EDU_NM", 30)]
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
         zf.writestr("zone.shp", bytes(shp))
@@ -496,3 +504,149 @@ def test_달러인용_구분자_충돌은_조용히_넘어가지_않는다():
     module = _load_module()
     with pytest.raises(ValueError, match="달러인용"):
         module._literal("학교$sz$이름")
+
+
+# ---------------------------------------------------------------------------
+# 6. 중·고 학교군 (013) — 초등과 **다른 모델**임을 고정한다
+#
+# 여기서 지키는 것은 "돌아간다"가 아니라 다음 둘이다:
+#   ① 학교군을 초등 모델(1행=1(구역,학교))로 넣지 못한다 — 넣는 순간 배정이 된다.
+#   ② 구역 1행 + 후보 N — 후보 수가 남아야 "배정 후보 N곳"이라고 말할 수 있다.
+# ---------------------------------------------------------------------------
+
+def _group_zone(zone_id: str, *, name: str | None = None, wkb: bytes | None = None):
+    from app.ingest.school_zone import ZonePolygon
+
+    return ZonePolygon(zone_id=zone_id, zone_name=name or f"{zone_id}학교군",
+                       sd_cd="11", base_dt="2026-03-20",
+                       wkb=wkb or shp_polygon_to_wkb(_polygon_record([SQUARE])),
+                       edu_office="서울특별시강남서초교육지원청", zone_gb="0")
+
+
+def test_학교군은_구역_1행에_후보_N_으로_묶인다():
+    """★ 초등처럼 학교마다 행을 만들면 지오메트리가 4~14벌 복제되고(실측 32MB·30MB),
+    무엇보다 '구역 하나에 학교 여럿'이라는 사실이 표현되지 않는다.
+    """
+    zones = [_group_zone("Z2001")]
+    links = [SchoolLink("Z2001", "B1", "가중학교", MIDDLE),
+             SchoolLink("Z2001", "B2", "나중학교", MIDDLE),
+             SchoolLink("Z2001", "B3", "다중학교", MIDDLE)]
+    locations = {sid: SchoolLocation(sid, f"{sid}중", MIDDLE, 37.5, 127.0)
+                 for sid in ("B1", "B2", "B3")}
+    records, report = build_zone_records(zones, links, locations, level=MIDDLE)
+
+    assert len(records) == 1, "학교군은 구역마다 1행이다"
+    record = records[0]
+    assert record.source_ref == zone_source_ref("Z2001") == "kesi:Z2001"
+    assert record.zone_kind == "학교군"
+    assert record.level == MIDDLE
+    assert [m.school_id for m in record.members] == ["B1", "B2", "B3"]
+    assert report.members == 3
+    assert record.edu_office == "서울특별시강남서초교육지원청"
+
+
+def test_초등을_학교군_경로로_넣으면_거부한다():
+    """★ 변이 가드 — 통학구역을 학교군으로 넣으면 3,246행이 2,656개 '학교군'이 되고
+    '배정 초등학교'가 통째로 사라진다. 조용히 통과시키지 않는다.
+    """
+    with pytest.raises(ValueError, match="build_records"):
+        build_zone_records([_group_zone("Z1")], [], {}, level=ELEMENTARY)
+
+
+def test_학교군도_다른_급_링크는_막는다():
+    zones = [_group_zone("Z2001")]
+    links = [SchoolLink("Z2001", "B9", "가고등학교", HIGH)]     # 급이 다르다
+    locations = {"B9": SchoolLocation("B9", "가고등학교", HIGH, 37.5, 127.0)}
+    records, report = build_zone_records(zones, links, locations, level=MIDDLE)
+    assert records == []
+    assert report.wrong_level == 1
+
+
+def test_후보_학교_좌표가_하나도_없으면_구역째_버리고_센다():
+    """지오메트리만 남으면 "학교군 안인데 학교는 0곳"이라는 판정이 나간다."""
+    zones = [_group_zone("Z2001")]
+    links = [SchoolLink("Z2001", "B1", "가중학교", MIDDLE)]
+    records, report = build_zone_records(zones, links, {}, level=MIDDLE)
+    assert records == []
+    assert report.zones_without_member == ["Z2001"]
+    assert report.schools_without_location == ["B1"]
+
+
+def test_학교군_자연키는_초등과_모양이_다르다():
+    """섞이면 upsert 가 서로를 덮는다. 초등은 'kesi:Z/B', 학교군은 'kesi:Z'."""
+    assert zone_source_ref("Z2001") == "kesi:Z2001"
+    assert "/" in district_source_ref("Z1", "B1")
+    assert "/" not in zone_source_ref("Z2001")
+
+
+def test_학교군_적재SQL_은_배정학교를_적지_않고_후보를_단다():
+    """★ 변이 가드 — school_poi_id 에 후보 하나를 적으면 조회가 그걸 '배정'으로 읽는다.
+
+    013 의 CHECK 가 DB 에서도 막지만, 적재기가 그런 SQL 을 만들지 않는 것이 먼저다.
+    """
+    module = _load_module()
+    zones = [_group_zone("Z2001")]
+    links = [SchoolLink("Z2001", "B1", "가중학교", MIDDLE),
+             SchoolLink("Z2001", "B2", "나중학교", MIDDLE)]
+    locations = {sid: SchoolLocation(sid, f"{sid}중", MIDDLE, 37.5, 127.0)
+                 for sid in ("B1", "B2")}
+    records, _ = build_zone_records(zones, links, locations, level=MIDDLE)
+    sql = "".join(module.iter_zone_sql(records, "middle"))
+
+    assert "INSERT INTO school_district_member" in sql
+    assert "SELECT NULL, g.geom" in sql, "학교군 행의 배정 학교는 NULL 이어야 한다"
+    assert "school_level" in sql and "중학교" in sql
+    assert "'학교군'" in sql or "학교군" in sql
+    # 초등과 같은 안전장치들이 학교군 경로에도 있어야 한다.
+    assert "ST_MakeValid" in sql and "ST_CollectionExtract" in sql
+    assert "ST_Transform" in sql and "5186" in sql
+    assert sql.count("ON CONFLICT") >= 3        # poi · school_district · member
+    assert "INSERT INTO ingest_log" in sql and "kesi_school_zone:middle" in sql
+    assert sql.rstrip().endswith("COMMIT;")
+
+
+def test_학교군_적재는_구역을_지우지_않고_구성원만_교체한다():
+    """구역 삭제는 금지(원천 반쪽 배포 사고). 구성원은 이번 배포분 기준으로 정리한다."""
+    module = _load_module()
+    zones = [_group_zone("Z2001")]
+    links = [SchoolLink("Z2001", "B1", "가중학교", MIDDLE)]
+    locations = {"B1": SchoolLocation("B1", "가중학교", MIDDLE, 37.5, 127.0)}
+    records, _ = build_zone_records(zones, links, locations, level=MIDDLE)
+    sql = "".join(module.iter_zone_sql(records, "middle"))
+
+    assert "DELETE FROM school_district_member" in sql
+    # 지우는 대상은 **member 뿐**이다. 구역(school_district) 자체를 지우는 문장이
+    # 있으면 안 된다 — 'school_district_member' 를 걸러내고 남는 게 있으면 실패.
+    assert "DELETE FROM school_district\n" not in sql
+    assert "DELETE FROM school_district " not in sql, "구역을 지우면 안 된다"
+    assert "member_removed" in sql and "stale" in sql
+
+
+def test_학교군_stale_은_급별로_센다():
+    """★ 변이 가드 — 급 필터를 빼면 중학교 적재가 초등 3,246행을 '없어진 행'으로 센다."""
+    module = _load_module()
+    stale = module._zone_stale_count(MIDDLE)
+    assert "school_level = '중학교'" in stale
+    # 초등 경로도 마찬가지다.
+    assert "school_level = '초등학교'" in module._STALE_COUNT
+
+
+def test_두_적재경로가_학교군에서도_같은_문장을_쓴다():
+    module = _load_module()
+    zones = [_group_zone("Z2001")]
+    links = [SchoolLink("Z2001", "B1", "가중학교", MIDDLE)]
+    locations = {"B1": SchoolLocation("B1", "가중학교", MIDDLE, 37.5, 127.0)}
+    records, _ = build_zone_records(zones, links, locations, level=MIDDLE)
+    sql = "".join(module.iter_zone_sql(records, "middle"))
+    for statement in module._zone_pipeline(MIDDLE):
+        assert statement in sql, "직접 적재 경로에만 있는 문장이 있다(경로 분기)"
+
+
+def test_학교급별로_다른_SHP_파일을_읽는다():
+    """급마다 원천 파일이 다르다 — 초등 zip 하나로 중·고를 만들어내지 않는다."""
+    module = _load_module()
+    files = {key: name for key, (_, name) in module.LEVEL_FILES.items()}
+    assert files == {"elementary": "elementary_zone.zip",
+                     "middle": "middle_zone.zip",
+                     "high": "high_zone.zip"}
+    assert len(set(files.values())) == 3

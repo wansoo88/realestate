@@ -13,6 +13,7 @@ const LABELS: Record<string, string> = {
   "policy-researcher": "정책 연구가",
   "market-timing-analyst": "타이밍 분석가",
   "risk-auditor": "리스크 검증가",
+  "redevelopment-analyst": "재건축 분석가",
   "portfolio-advisor": "종합 자문가",
 };
 

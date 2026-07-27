@@ -27,14 +27,26 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class SchoolFact:
-    """배정 초등학교 정보. 학구도(school_district) 공간판정 결과를 담는다.
+    """학교급 하나의 학구도 공간판정 결과. **급마다 뜻이 다르다.**
 
     ``in_district`` 는 ``ST_Contains(school_district.geom, complex.geom)`` 결과다.
     ``distance_m`` 는 통학 거리(직선/네트워크)일 뿐 **도보 시간이 아니며**, 학군 배정의
     근거도 아니다. 배정 근거는 오직 ``in_district`` 다.
+
+    ⚠️ ``in_district`` 가 참이라고 해서 "이 학교에 간다"가 되는 건 아니다.
+       그 판단은 ``candidate_count`` 와 ``zone_kind`` 를 함께 봐야 한다:
+
+         통학구역(초등) · 후보 1곳  → 배정이라고 말할 수 있다.
+         통학구역(초등) · 후보 N곳  → **공동학구**. 배정 학교를 단정할 수 없다.
+         학교군(중·고)             → 후보 N곳. 어떻게 배정되는지는 **원천에 없다**.
+
+       그래서 이 모델은 '배정'을 필드로 갖지 않는다. 가진 것은 셀 수 있는 사실뿐이고,
+       그것을 어떤 문장으로 낼지는 ``analysis.assess_school*`` 이 정한다.
     """
 
     name: str | None = None
+    #: 학교급(초등학교|중학교|고등학교). 기본값은 하위호환을 위한 초등이다.
+    level: str = "초등학교"
     in_district: bool = False
     distance_m: float | None = None
     crosses_main_road: bool | None = None
@@ -42,6 +54,16 @@ class SchoolFact:
     district_as_of: str | None = None
     #: 해당 지역 학구도 데이터 자체가 확보됐는가. False 면 학군 항목을 비운다.
     district_data_available: bool = True
+    #: 구역 이름(원천 HAKGUDO_NM). '서울언주초통학구역' · '강남서초학교군'.
+    zone_name: str | None = None
+    #: 구역 종류(통학구역|학교군). **원천 데이터셋 제목에서 온 낱말**이지 배정 방식이 아니다.
+    zone_kind: str | None = None
+    #: 이 단지가 속한 구역(들)에 연계된 학교 수. 1이면 배정, 2 이상이면 후보다.
+    candidate_count: int | None = None
+    #: 단지를 덮는 구역의 수(자유학구 등으로 겹칠 수 있다).
+    zone_count: int | None = None
+    #: 교육지원청명(원천 연계정보 CSV). 고등학교 '1학교군'처럼 이름이 겹칠 때 필요하다.
+    education_office: str | None = None
     #: 학업성취도(%) — 출처·기준연도가 함께 있을 때만 사용한다.
     achievement_pct: float | None = None
     achievement_source: str | None = None
@@ -98,7 +120,12 @@ class HazardFact:
 class LocationFacts:
     """단지 하나의 입지 사실 묶음. location-analyst 의 입력."""
 
+    #: 초등 통학구역. 이름이 `school` 인 것은 013 이전부터 쓰던 자리라서다.
     school: SchoolFact | None = None
+    #: 중학교 학교군. 배정이 아니라 **후보 범위**다(models.SchoolFact ⚠️).
+    middle_school: SchoolFact | None = None
+    #: 고등학교 학교군. 수도권 학구당 학교 평균 14.4곳 — 사실상 광역이다.
+    high_school: SchoolFact | None = None
     stations: tuple[StationFact, ...] = ()
     plans: tuple[TransitPlan, ...] = ()
     pois: tuple[PoiFact, ...] = ()
@@ -172,7 +199,12 @@ class LocationAssessment:
     confidence: float
     verdict: str
     rationale: str
+    #: 초등 통학구역 판정(`assess_school`). 키에 `assigned_elementary` 가 있다.
     school: dict | None = None
+    #: 중·고 학교군 판정(`assess_school_group`). **`assigned_*` 키가 없다** —
+    #: 학교군은 배정을 말하지 않으므로 그런 키를 만들지 않는 것이 방어선이다.
+    middle_school: dict | None = None
+    high_school: dict | None = None
     transit: dict = field(default_factory=dict)
     amenities: dict = field(default_factory=dict)
     penalties: tuple[dict, ...] = ()

@@ -38,6 +38,7 @@ from app.agents.llm import (
 from app.agents.scoring import (
     ScoreResult,
     build_axis_signals,
+    defaulted_axes,
     normalize_weights,
     score_item,
     summary_notes,
@@ -46,6 +47,17 @@ from app.domain.affordability.models import AffordabilityResult
 from app.domain.listings.dedup import ListingGroup, trust_score
 from app.domain.location.analysis import evaluate_location
 from app.domain.location.models import LocationAssessment, LocationFacts
+from app.domain.redevelopment.analysis import (
+    PURPOSE_LIVE,
+    CostGuardError,
+    RedevAssessment,
+    assert_no_cost_estimate,
+    assert_no_cost_topic,
+    assess_redevelopment,
+    contains_cost_topic,
+    redact_cost_topic,
+)
+from app.domain.redevelopment.models import RedevProject
 from app.domain.valuation.models import DongValuation, Liquidity, ListingRow, TradeRow
 from app.domain.valuation.stats import (
     ask_gap_pct,
@@ -90,6 +102,10 @@ EXCLUDED_OVER_BUDGET = "over_budget"         # 예산 초과
 EXCLUDED_AVOIDED = "avoided"                 # 사용자가 기피한 조건에 해당(F5)
 EXCLUDED_RANK_CUTOFF = "below_rank_cutoff"   # 분석은 통과했지만 상위 N 밖
 
+#: 기피 조건 키 — 초기 단계 정비사업(api-spec.md §2 `avoid.redevelopment_early_stage`).
+#: 계약에는 있었지만 판정 코드가 없어 **저장만 되고 아무 일도 하지 않던** 값이다.
+AVOID_REDEV_EARLY = "redevelopment_early_stage"
+
 #: 실거래 기준 후보에 붙는 표준 문구. UI 가 그대로 노출해도 되도록 완결형으로 둔다.
 TRADE_BASIS_NOTE = ("현재 등록된 매물이 없습니다 — 최근 실거래 기준 추정가입니다. "
                     "실제 매수 가능 가격은 다를 수 있습니다.")
@@ -113,6 +129,9 @@ class Candidate:
     #: 입지 사실(학군·교통·인프라·유해요소). 리포지토리가 공간쿼리로 채워 넘긴다.
     #: 없으면 location-analyst 는 판단 보류를 낸다(지어내지 않는다).
     location: LocationFacts | None = None
+    #: 매칭된 정비사업 구역. **None 은 '정비사업 없음'이 아니라 '확인되지 않음'이다**
+    #: (수집 범위가 서울·인천뿐이다). 도메인이 그 구분을 문구로 낸다.
+    redevelopment: RedevProject | None = None
 
     @property
     def price_basis(self) -> str:
@@ -163,7 +182,11 @@ class AnalysisContext:
     affordability: AffordabilityResult
     candidates: list[Candidate]
     avoid: dict[str, Any] = field(default_factory=dict)
-    #: 사용자 조건 가중치(`user_preference.weights`) — 가격·입지·가치·리스크.
+    #: 매수 목적 — `live`(실거주) | `invest`(투자). api-spec §2 와 같은 값.
+    #: ⚠️ 정비사업 판정이 이 값에 따라 **정반대**가 된다(관리처분 단계는 투자에는
+    #:    '확실하지만 이미 반영', 실거주에는 '이주 임박 — 부적합'이다).
+    purpose: str = PURPOSE_LIVE
+    #: 사용자 조건 가중치(`user_preference.weights`) — 가격·입지·가치·리스크·재건축.
     #: **여기서 순위가 실제로 바뀐다.** 비어 있으면 기존 동작(신뢰도 가중 평균)으로
     #: 폴백하고 그 사실을 notes 에 남긴다(app/agents/scoring.py).
     weights: dict[str, Any] = field(default_factory=dict)
@@ -457,6 +480,31 @@ def _assessment_to_finding(assessment: LocationAssessment) -> Finding:
     ))
 
 
+def _nearest_station_dict(assessment: LocationAssessment | None) -> dict[str, Any] | None:
+    """최근접 역 — **입지 분석이 이미 잰 값을 그대로 노출**한다(재계산하지 않는다).
+
+    화면이 "🚇역세권" 배지를 달려면 거리가 필요하다. 그런데 **판정(500m 이내인가)이
+    아니라 값(m)을 계약으로 둔다**:
+      · 임계값은 표시 관례라 바뀐다. 판정을 서버가 굳혀 보내면 과거 job 의 payload 에
+        옛 임계값이 그대로 저장돼 되돌릴 수 없다(payload 는 실행 결과 스냅샷이다).
+      · 값이 없으면 `null` — "역이 없다"가 아니라 "모른다"다. 판정 boolean 만 주면
+        모름과 아님이 같은 false 로 뭉개진다.
+    거리는 **직선거리**(geography)다. 도보 시간이 아니므로 `basis` 로 못박는다.
+    """
+    if assessment is None:
+        return None
+    ns = (assessment.transit or {}).get("nearest_station")
+    if not ns or ns.get("distance_m") is None:
+        return None
+    return {
+        "name": ns.get("name"),
+        "distance_m": round(float(ns["distance_m"]), 1),
+        "line_count": ns.get("line_count"),
+        "lines": list(ns.get("lines") or []),
+        "basis": "straight_line",
+    }
+
+
 def location_finding(candidate: Candidate, as_of: dt.date, *,
                      avoid: Iterable[str] | None = None) -> Finding:
     """입지 판정. 입지 사실이 없으면 지어내지 않고 판단 보류."""
@@ -465,6 +513,88 @@ def location_finding(candidate: Candidate, as_of: dt.date, *,
                             ["입지 데이터(학군·교통·인프라) 미수집"])
     assessment = evaluate_location(candidate.location, avoid=avoid, as_of=as_of)
     return _assessment_to_finding(assessment)
+
+
+# ---------------------------------------------------------------------------
+# [3] redevelopment-analyst — 정비사업 단계 → 리스크-수익 프로파일
+#
+# ⚠️ 이 에이전트는 **점수를 한 방향으로 밀지 않는다.** 같은 '관리처분' 단계가
+#    투자에는 "확실하지만 이미 가격에 반영", 실거주에는 "이주 임박 — 부적합"이다.
+#    그래서 항상 `why`(상방)와 `why_not`(하방)을 **둘 다** 만든다.
+# ⚠️ 추가분담금 **금액은 우리 코드가 만들지 않는다.** 도메인이 문장을 만들 때
+#    `assert_no_cost_estimate` 가 막고, 여기서 finding 으로 옮길 때 **한 번 더** 막는다.
+#    LLM 경로는 다르게 다룬다 — 재료를 아예 주지 않고, 주제어가 나오면 요약을 폐기한다
+#    (`portfolio_summary` 참조). 완전한 차단을 주장하지 않는다(CR30-1).
+# ---------------------------------------------------------------------------
+AGENT_REDEV = "redevelopment-analyst"
+
+
+def redevelopment_assessment(candidate: Candidate, as_of: dt.date, *,
+                             purpose: str = PURPOSE_LIVE) -> RedevAssessment:
+    """이 후보의 정비사업 판정. 매칭된 구역이 없으면 '미확보' 판정을 낸다."""
+    return assess_redevelopment(candidate.redevelopment, purpose=purpose, as_of=as_of)
+
+
+def redevelopment_finding(assessment: RedevAssessment) -> Finding:
+    """판정 → Finding. 구역이 확인되지 않으면 **판단 보류**(0 점이 아니다)."""
+    if not assessment.available:
+        return insufficient(AGENT_REDEV, list(assessment.missing))
+
+    # 이중 방어 — 도메인을 우회해 만들어진 문장이 섞여 들어올 여지를 남기지 않는다.
+    assert_no_cost_estimate(assessment.rationale, assessment.verdict,
+                            *(detail for _, detail in assessment.risks),
+                            *assessment.upsides)
+
+    evidence = [Evidence(claim=e["claim"], source=e["source"], as_of=e.get("as_of"),
+                         source_url=e.get("source_url"))
+                for e in assessment.evidence]
+    risks = [Risk(severity, detail) for severity, detail in assessment.risks]
+    return validate_finding(Finding(
+        agent_id=AGENT_REDEV,
+        verdict=assessment.verdict,
+        rationale=assessment.rationale,
+        evidence=evidence,
+        risks=risks,
+        score=assessment.score,
+        confidence=assessment.confidence,
+        basis=assessment.basis,
+        missing=list(assessment.missing),
+    ))
+
+
+def _redev_dict(assessment: RedevAssessment) -> dict[str, Any]:
+    """추천 아이템에 실리는 정비사업 블록.
+
+    점수만 주면 검증할 수 없다. **단계·원문 단계명·상방·하방·직접 확인할 것**을 함께 준다.
+    """
+    return {
+        "available": assessment.available,
+        "stage": assessment.stage,
+        "raw_stage": assessment.raw_stage,
+        "score": assessment.score,
+        "confidence": assessment.confidence,
+        "verdict": assessment.verdict,
+        "early_stage": assessment.early_stage,
+        "years_since_milestone": assessment.years_since_milestone,
+        "supply_ratio": assessment.supply_ratio,
+        "upsides": list(assessment.upsides),
+        "risks": [{"severity": s, "detail": d} for s, d in assessment.risks],
+        "must_verify": list(assessment.must_verify),
+        "missing": list(assessment.missing),
+        "detail": dict(assessment.detail),
+    }
+
+
+def avoids_early_redevelopment(avoid: dict[str, Any] | None) -> bool:
+    """사용자가 '초기 단계 재건축'을 기피로 걸었나 (api-spec §2).
+
+    문자열 'false'·'0' 을 참으로 읽지 않는다 — 기피 조건은 **후보를 지우는** 판정이라
+    잘못 켜지면 사용자가 볼 수 있었던 집이 통째로 사라진다.
+    """
+    value = (avoid or {}).get(AVOID_REDEV_EARLY)
+    if isinstance(value, str):
+        return value.strip().lower() not in ("", "false", "0", "no", "off")
+    return bool(value)
 
 
 # ---------------------------------------------------------------------------
@@ -512,6 +642,10 @@ class LLMBudget:
     over_budget: int = 0            #: 호출 상한에 걸려 시도조차 못 한 후보 수
     circuit_open: int = 0           #: 연속 실패로 차단된 뒤 건너뛴 후보 수
     oversized: int = 0              #: 프롬프트가 길이 상한을 넘어 폐기한 후보 수
+    #: 응답이 **분담금 주제**를 건드려 폐기한 후보 수 (SR24-3 / CR-029·CR-030 차단 1).
+    #: `failures` 와 따로 센다 — 이건 장애가 아니라 **내용 위반**이라 회로를 열면 안 된다
+    #: (한 후보의 문장이 규칙을 어겼다고 남은 후보의 요약까지 끊을 이유가 없다).
+    cost_blocked: int = 0
 
     @property
     def tripped(self) -> bool:
@@ -548,6 +682,21 @@ NOTE_LLM_OVERSIZED = (
     "근거가 많아 프롬프트 길이 상한을 넘은 {n}건은 규칙 기반 요약입니다"
     "(근거를 잘라서 요약하지 않습니다)."
 )
+#: ★ 조용히 바꾸지 않는다. AI 요약이 **주지도 않은 주제**(추가분담금)를 꺼냈다는 것은
+#: 사용자가 알아야 하는 사실이다 — 문장만 슬쩍 규칙 기반으로 바꾸고 넘어가면,
+#: "AI 가 분담금을 말하려 했다"는 신호가 아무 데도 안 남는다.
+#:
+#: ⚠️ 이 문장은 **실제로 하는 일만** 적는다(CR30-1). 예전 문구는 두 군데가 거짓이었다:
+#:   ① 폐기 사유를 "금액을 언급해서"라고 단정했지만, 지금 기준은 **주제어**다
+#:      (금액이 없는 언급도 폐기한다 — 재료를 준 적이 없으므로).
+#:   ② "어떤 경로로도 그 금액을 제시하지 않습니다"는 **지킬 수 없는 약속**이었다.
+#:      주제어 없이 금액만 쓰는 문장은 텍스트 검사로 잡히지 않는다. 그래서 쓰지 않는다.
+NOTE_LLM_COST_BLOCKED = (
+    "AI 요약 {n}건이 추가분담금·부담 관련 표현을 써서 폐기하고 규칙 기반 요약으로 "
+    "대체했습니다(금액 여부와 무관하게 폐기합니다). 분담금 자료는 공개 데이터에 없어 "
+    "AI 에게 전달하지도, 분석에 반영하지도 않았습니다 — 규모는 조합 사무실·"
+    "정비사업 정보몽땅에서 직접 확인하세요."
+)
 
 
 def llm_notes(budget: LLMBudget | None, *, llm_connected: bool) -> list[str]:
@@ -563,6 +712,8 @@ def llm_notes(budget: LLMBudget | None, *, llm_connected: bool) -> list[str]:
         out.append(NOTE_LLM_BUDGET.format(limit=budget.max_calls, n=budget.over_budget))
     if budget.oversized:
         out.append(NOTE_LLM_OVERSIZED.format(n=budget.oversized))
+    if budget.cost_blocked:
+        out.append(NOTE_LLM_COST_BLOCKED.format(n=budget.cost_blocked))
     return out
 
 
@@ -575,6 +726,12 @@ PORTFOLIO_SYSTEM = """당신은 부동산 분석 결과를 요약하는 역할�
 4. 투자를 권유하는 표현을 쓰지 마세요.
 5. 확신할 수 없으면 "확인 필요"라고 쓰세요.
 6. 단점(why_not)을 반드시 포함하세요. 장점만 나열하면 안 됩니다.
+7. **'분담'·'부담'·'환급'·'추가 비용' 이라는 낱말을 아예 쓰지 마세요.**
+   조합 내부 자료라 공개 데이터에 없고, 위 분석 결과에도 **한 줄도 들어 있지 않습니다.**
+   이 주제의 안내("조합에서 직접 확인하세요")는 시스템이 고정 문구로 따로 붙이므로
+   당신이 쓸 필요가 없습니다. 이 낱말이 하나라도 들어가면 **요약 전체가 폐기되고**
+   규칙 기반 문장으로 대체됩니다 — 금액을 썼는지 여부와 무관합니다.
+   세대수·연도·거리·면적·가격은 **분석 결과에 있는 값이면** 숫자로 써도 됩니다.
 
 JSON 으로만 답하세요:
 {"headline": "한 줄 요약", "why": ["근거1","근거2"], "why_not": ["리스크1"],
@@ -596,6 +753,28 @@ def _fallback_summary(findings: list[Finding]) -> dict[str, Any]:
                          "등기부등본으로 권리관계 확인(본 시스템은 확인하지 않음)"],
         "generated_by": "fallback",
     }
+
+
+def _cost_free_finding(finding: Finding) -> dict[str, Any]:
+    """LLM 프롬프트에 실을 finding — **분담금 주제 문장을 빼고** 넘긴다.
+
+    `Finding.to_dict()` 의 텍스트 필드를 **하나씩 명시적으로** 훑는다. 재귀 순회로
+    "문자열이면 무조건" 처리하지 않는 이유는, 나중에 텍스트 필드가 늘었을 때 조용히
+    통과시키는 것보다 **눈에 띄게 빠뜨리는 편이 낫기 때문**이다 — 빠뜨리면 호출부의
+    `contains_cost_topic(user)` fail-safe 가 잡아 호출 자체를 막는다.
+
+    ⚠️ 이 함수는 **프롬프트 전용**이다. 카드에 실리는 `findings`(응답)에는 원문이
+       그대로 남는다 — 사용자에게는 분담금 고지가 **보여야** 한다.
+    """
+    d = finding.to_dict()
+    d["verdict"] = redact_cost_topic(d.get("verdict"))
+    d["rationale"] = redact_cost_topic(d.get("rationale"))
+    d["missing"] = [t for t in (redact_cost_topic(m) for m in d.get("missing") or []) if t]
+    d["risks"] = [r for r in ({**r, "detail": redact_cost_topic(r.get("detail"))}
+                              for r in d.get("risks") or []) if r["detail"]]
+    d["evidence"] = [e for e in ({**e, "claim": redact_cost_topic(e.get("claim"))}
+                                 for e in d.get("evidence") or []) if e["claim"]]
+    return d
 
 
 def portfolio_summary(findings: list[Finding], llm: LLMClient | None,
@@ -620,9 +799,29 @@ def portfolio_summary(findings: list[Finding], llm: LLMClient | None,
             "affordability 원본에서 파생한 검사값을 넘기세요. (security.md §6)"
         )
 
-    payload = [f.to_dict() for f in findings]
+    # ★ CR30-1 — **분담금 주제를 모델에게서 빼앗는다.**
+    #
+    # 예전에는 `COST_DISCLOSURE`("추가분담금은 조합 내부 자료라 확인할 수 없어…")를
+    # rationale 에 실어 보내면서 세대수 증감을 함께 줬다. 모델이 분담금을 말한 것은
+    # 우리가 시켰기 때문이다 — 그리고 그 뒤에 정규식으로 금액을 쫓았다. 표기 변형이
+    # 무한하므로 그 싸움은 이길 수 없다(문장 분리·거리·어간·필드 분리로 4종이 뚫렸다).
+    #
+    # 그래서 재료를 뺀다. 고지는 **LLM 출력과 무관하게** 코드가 붙인다:
+    #   · `_merge_actions` 가 `must_verify`(1번이 분담금 직접확인)를 next_actions 맨 앞에
+    #   · `run_mvp_pipeline` 이 결과 notes 에 고정 문장
+    #   · `scoring.summary_notes` 의 coverage_gap
+    # 잃는 정보가 없고, 대신 **출력에 주제어가 보이는 것 자체가 이상 신호**가 된다.
+    payload = [_cost_free_finding(f) for f in findings]
     user = data_block("analysis_results", payload) + \
         "\n\n위 분석 결과만으로 요약하세요. 없는 사실을 만들지 마세요."
+
+    # fail-safe: 위 정리를 빠져나간 분담금 문구가 하나라도 남아 있으면 **보내지 않는다.**
+    # (미래에 Finding 에 새 텍스트 필드가 생기고 `_cost_free_finding` 을 갱신하지 않으면
+    #  여기서 걸린다 — 조용히 재료가 되살아나는 것을 막는 구조적 문이다.)
+    if contains_cost_topic(user):
+        logger.error("프롬프트에 분담금 재료가 남아 LLM 호출을 건너뜁니다"
+                     " — _cost_free_finding 갱신 필요")
+        return _fallback_summary(findings)
 
     # 자산 원본 금액이 섞였는지 호출 직전에 걸러낸다 (best-effort tripwire, security.md §6).
     # ⚠️ 주 방어는 이게 아니라 finding 이 파생값만 싣는 구조다.
@@ -667,13 +866,42 @@ def portfolio_summary(findings: list[Finding], llm: LLMClient | None,
         why_not = [r.detail for f in findings for r in f.risks] or \
             ["확인된 하방 리스크 없음 — 데이터 부족일 수 있습니다."]
 
-    return {
+    summary = {
         "headline": raw["headline"],
         "why": [str(x) for x in raw["why"]][:6],
         "why_not": [str(x) for x in why_not][:6],
         "next_actions": [str(x) for x in (raw.get("next_actions") or [])][:5],
         "generated_by": "llm",
     }
+
+    # ★ 마지막 문(SR24-3 / CR-029·CR-030 차단 1) — **카드에 찍히는 문자열**을 검사한다.
+    #
+    # 카드의 headline·why·why_not·next_actions 는 도메인이 아니라 **여기 LLM 출력**이
+    # 만든다. 그 경로에 검사가 없어서 "추가분담금 약 1.2억 원 예상"이 사용자 카드까지
+    # 도달했고(CR-029), 금액 근접 정규식으로 막았더니 문장 분리·거리·어간·필드 분리로
+    # 다시 뚫렸다(CR-030). 그래서 **금액을 찾는 것을 그만뒀다.**
+    #
+    # 지금 기준은 한 가지다 — **분담금 주제어가 보이면 폐기.**
+    #   · 위에서 재료를 뺐으므로 모델이 이 주제를 꺼낼 근거가 없다 → 나오면 지어낸 것이다.
+    #   · 금액 표기 변형을 쫓지 않으므로 "다음 변형"이 없다.
+    #   · 옳은 문장("확인되지 않았습니다")이 걸려도 **잃는 정보가 0**이다 —
+    #     같은 내용을 코드가 고정 문장으로 이미 말한다(`_merge_actions` · notes).
+    #
+    # ⚠️ 예외로 죽이지 않는다. 요약 한 줄 때문에 추천 전체(순위·가격 근거·제외 사유)를
+    #    날리는 것은 과하다. 대신 규칙 기반 요약으로 **강등**하고, 강등했다는 사실을
+    #    센다(`budget.cost_blocked` → `NOTE_LLM_COST_BLOCKED`). 조용히 바꾸지 않는다.
+    try:
+        assert_no_cost_topic(summary["headline"], *summary["why"],
+                             *summary["why_not"], *summary["next_actions"])
+    except CostGuardError as exc:
+        # 적발 문구는 남긴다(운영자가 어떤 모델이 무슨 문장을 뱉었는지 알아야 고친다).
+        # 사용자 자산·소득이 아니라 **모델이 지어낸 문장**이라 마스킹 대상이 아니다.
+        logger.warning("AI 요약이 분담금 주제를 건드려 규칙 기반으로 대체합니다: %s", exc)
+        if budget is not None:
+            budget.cost_blocked += 1
+        return _fallback_summary(findings)
+
+    return summary
 
 
 # ---------------------------------------------------------------------------
@@ -684,9 +912,20 @@ def _avoid_tokens(avoid: dict[str, Any] | None) -> list[str]:
     """느슨하게 들어오는 기피 조건에서 문자열 토큰만 긁어낸다.
 
     입지와 무관한 토큰(1층·재건축 등)은 하위 로직(``_canonical_avoids``)이 걸러낸다.
+
+    ⚠️ **꺼진 조건(False·빈 값)은 토큰이 아니다** (2026-07-27 수정). 화면은 체크를 풀면
+    `{"main_road_noise": false}` 를 그대로 저장한다 — 예전에는 값과 무관하게 키를
+    실어서, 사용자가 **체크를 해제한 기피 조건이 계속 적용됐다.** 조건을 껐는데
+    결과가 그대로인 형태라 원인을 짐작할 수도 없다(이 프로젝트가 경계하는 조용한 실패).
     """
     tokens: list[str] = []
     for key, val in (avoid or {}).items():
+        if val is None or val is False:
+            continue
+        if isinstance(val, (list, tuple, set)) and not val:
+            continue
+        if isinstance(val, str) and not val.strip():
+            continue
         tokens.append(str(key))
         if isinstance(val, str):
             tokens.append(val)
@@ -747,6 +986,23 @@ def _rank_cutoff_entry(item: dict[str, Any], top_n: int) -> dict[str, Any]:
     return entry
 
 
+#: 카드 하나에 실을 '직접 확인할 것' 최대 개수. 너무 길면 아무도 안 읽는다.
+_MAX_ACTIONS = 6
+
+
+def _merge_actions(summary_actions: list[str], must_verify: list[str]) -> list[str]:
+    """요약이 만든 액션 + **시스템이 확인해 주지 못하는 것**을 합친다.
+
+    ⚠️ `must_verify` 를 앞에 둔다. LLM 이 쓴 일반적인 조언보다 "추가분담금은 우리가
+    확인해 주지 않는다"가 먼저 읽혀야 한다 — 그걸 확인했다고 믿는 순간이 가장 위험하다.
+    """
+    out: list[str] = []
+    for item in list(must_verify) + list(summary_actions):
+        if item and item not in out:
+            out.append(item)
+    return out[:_MAX_ACTIONS]
+
+
 def _derive_forbidden(ctx: AnalysisContext) -> list[int]:
     """tripwire 검사값을 방어적으로 보강한다.
 
@@ -783,6 +1039,9 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
     # 저장된 가중치는 **클라이언트의 주장**이다. 여기서 다시 정규화하고,
     # 모르는 키는 버리되 목록으로 받아 notes 에 남긴다(조용히 버리지 않는다).
     weights, unknown_weight_keys = normalize_weights(ctx.weights)
+    # 사용자가 준 적 없어 기본값이 들어간 축(재건축). notes 로 반드시 말한다.
+    defaulted = defaulted_axes(ctx.weights)
+    avoid_early_redev = avoids_early_redevelopment(ctx.avoid)
 
     items: list[dict[str, Any]] = []
     excluded: list[dict[str, Any]] = []
@@ -827,6 +1086,19 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
                 reason="; ".join(loc_assess.exclusion_reasons)))
             continue
 
+        # 정비사업 판정은 **제외 판정보다 먼저** 필요하다(초기 단계 기피가 여기서 걸린다).
+        redev_assess = redevelopment_assessment(cand, ctx.as_of, purpose=ctx.purpose)
+
+        # 하드 제외 ③ — '초기 단계 재건축 기피'(api-spec §2). 감점이 아니라 제외다.
+        # ⚠️ **확인된 초기 단계일 때만** 뺀다. 정보가 없는 단지를 "초기일지도 모르니"
+        #    빼면, 수집이 안 된 경기도 단지가 통째로 사라진다(모름 ≠ 해당).
+        if avoid_early_redev and redev_assess.available and redev_assess.early_stage:
+            excluded.append(excluded_entry(
+                cand, code=EXCLUDED_AVOIDED,
+                reason=(f"기피 조건(초기 단계 재건축) — {redev_assess.detail.get('zone_name')} "
+                        f"구역이 {redev_assess.detail.get('stage_label')} 단계입니다")))
+            continue
+
         # 환금성은 여기서 한 번 계산해 finding(문구)과 가치 축 점수가 같은 값을 보게 한다.
         liq = candidate_liquidity(cand, ctx.as_of)
         valuation = valuation_finding(cand, ctx.as_of, band=band, liq=liq)
@@ -841,21 +1113,29 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
                     else insufficient("location-analyst",
                                       ["입지 데이터(학군·교통·인프라) 미수집"]))
         listing_f = listing_finding(cand, median, ctx.as_of)
-        findings = [finance, listing_f, valuation, location]
+        redev_f = redevelopment_finding(redev_assess)
+        findings = [finance, listing_f, valuation, location, redev_f]
 
-        # 총점: 사용자 가중치(가격·입지·가치·리스크)를 실제로 곱한다.
+        # 총점: 사용자 가중치(가격·입지·가치·리스크·재건축)를 실제로 곱한다.
         # 근거 없는 축은 **총점에서 빼고 재정규화**하되 무엇이 빠졌는지 응답에 남긴다.
         # 점수를 매길 근거가 하나도 없으면 **0 이 아니라 None** 이다.
         # 0.0 은 "나쁘다"로 읽힌다 — "모른다"와 구분되지 않으면 그것도 환각이다(G2).
         signals = build_axis_signals(
             valuation=valuation, listing=listing_f, location=location,
-            liq=liq, has_ask=cand.ask_price_krw is not None)
+            liq=liq, has_ask=cand.ask_price_krw is not None, redevelopment=redev_f)
         score = score_item(findings=findings, signals=signals, weights=weights)
         scores.append(score)
 
         items.append({
             "complex": {"id": cand.complex_id, "name": cand.complex_name},
             "unit_type": {"area_m2": cand.area_m2},
+            # --- 화면 배지용 **값** (판정이 아니다) ----------------------------
+            # total_households: 모르면 **null**. 0·false 로 만들지 않는다 —
+            #   16,462개 중 2,666개가 미확보이고 "모름"과 "아님"은 다르다.
+            # nearest_station: 입지 분석이 이미 잰 최근접 역 거리(직선, m).
+            #   임계값 판정(1,000세대·500m)은 표시 계층이 한다(_nearest_station_dict 주석).
+            "total_households": cand.total_households,
+            "nearest_station": _nearest_station_dict(loc_assess),
             # 특정 매물의 동은 호가 표기 기준(추정) — confidence 를 낮게 실어 보낸다.
             # 호가가 없으면 특정 물건이 없으므로 building 도 없다(추정하지 않는다).
             "building": ({"id": rep.building_id, "confidence": 0.6,
@@ -864,6 +1144,9 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
             # F4 동별 가치 차이: aptDong 실거래 실측(basis=trade_measured, 높은 신뢰)
             # 이거나, 표본/동정보 부족 시 폴백을 명시한다. 없는 걸 지어내지 않는다.
             "dong_valuation": _dong_valuation_dict(dong_val),
+            # 재건축·재개발 진행 단계와 그 **양면**(상방/하방) + 직접 확인할 것.
+            # available=false 는 '정비사업 없음'이 아니라 '확인되지 않음'이다.
+            "redevelopment": _redev_dict(redev_assess),
             # --- 가격 계약 (프론트가 반드시 구분해 표시해야 하는 부분) --------
             # price_basis="listing" → est_price_krw == ask_price_krw (지금 살 수 있는 값)
             # price_basis="trade"   → ask_price_krw is None, est_price_krw 는 **추정치**
@@ -917,7 +1200,8 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
         item["headline"] = summary["headline"]
         item["why"] = summary["why"]
         item["why_not"] = summary["why_not"]
-        item["next_actions"] = summary["next_actions"]
+        item["next_actions"] = _merge_actions(summary["next_actions"],
+                                              item["redevelopment"]["must_verify"])
         # 이 카드의 문장이 AI 가 쓴 것인지 규칙이 쓴 것인지 **카드 단위로** 밝힌다.
         # notes 만으로는 "어느 카드가 규칙 기반인지"를 사용자가 알 수 없다.
         item["summary_basis"] = summary["generated_by"]
@@ -943,7 +1227,20 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
     # 가중치가 **어떻게 반영됐는지**(그리고 무엇이 반영되지 않았는지)를 목록 상단에도 말한다.
     # 개별 카드의 score_notes 만 남기면 사용자는 카드를 하나씩 열어야 알 수 있다.
     notes += summary_notes(weights=weights, unknown_keys=unknown_weight_keys,
-                           results=scores, total_items=len(items))
+                           results=scores, total_items=len(items), defaulted=defaulted)
+    # 재건축 정보가 **확인되지 않은** 후보가 있으면 그 사실을 말한다.
+    # 말하지 않으면 사용자는 "재건축 이슈가 없는 단지"로 읽는다 — 정반대일 수 있다.
+    unknown_redev = sum(1 for it in items[:top_n]
+                        if not (it.get("redevelopment") or {}).get("available"))
+    if unknown_redev:
+        notes.append(
+            f"추천 {len(items[:top_n])}건 중 {unknown_redev}건은 정비사업 구역 정보가 "
+            "확인되지 않았습니다 — '재건축 이슈가 없다'는 뜻이 아닙니다"
+            "(수집 범위: 서울·인천. 경기도는 미수집).")
+    if any((it.get("redevelopment") or {}).get("available") for it in items[:top_n]):
+        notes.append(
+            "재건축 판정은 고시된 진행 단계만 봅니다. **추가분담금은 조합 내부 자료라 "
+            "공개 데이터에 없어 반영하지 않았습니다** — 금액은 조합에 직접 확인하세요.")
     if any(it["price_basis"] == PRICE_BASIS_TRADE for it in items[:top_n]):
         notes.append(
             "일부 후보는 현재 등록된 매물이 없어 최근 실거래 기준으로 세운 추정입니다"

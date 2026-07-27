@@ -1,0 +1,50 @@
+/* 특성 배지 — 옅은 채움 pill. 캡션 크기를 넘지 않는다(금액이 주인공이다). */
+
+.tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+  margin: var(--sp-1) 0 0;
+}
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px var(--sp-2);
+  border-radius: var(--r-pill);
+  font-size: var(--fs-caption);
+  font-weight: 400; /* 굵기를 올리지 않는다 — 금액보다 튀면 위계가 무너진다 */
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+/* 이모지는 12px 미만에서 형태가 뭉개진다(글리프가 축소되며 획이 뭉침).
+   13px 글자보다는 여전히 작아 배지 안에서 글자가 주인공인 위계는 그대로다. */
+.tag__icon {
+  font-size: 12px;
+  line-height: 1;
+}
+
+.tag--large_complex {
+  background: var(--tag-large-bg);
+  color: var(--tag-large-fg);
+}
+
+.tag--near_station {
+  background: var(--tag-station-bg);
+  color: var(--tag-station-fg);
+}
+
+.tag--redevelopment {
+  background: var(--tag-redev-bg);
+  color: var(--tag-redev-fg);
+}
+
+/* 판정 불가 — 색을 주지 않고 점선으로 "확정이 아님"을 형태로도 말한다(색맹 대비) */
+.tag--unknown {
+  background: transparent;
+  color: var(--tag-unknown-fg);
+  border: 0.5px dashed var(--hairline-strong);
+  padding: 0 calc(var(--sp-2) - 1px);
+}
