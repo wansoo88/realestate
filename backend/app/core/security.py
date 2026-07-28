@@ -323,11 +323,24 @@ _ALGORITHM = "HS256"
 ACCESS_TTL_SECONDS = int(ACCESS_TTL.total_seconds())
 REFRESH_TTL_SECONDS = int(REFRESH_TTL.total_seconds())
 
+#: HS256 서명키 최소 길이(바이트). RFC 7518 §3.2 — HMAC 키는 해시 출력(256bit) 이상.
+#: ⚠️ PyJWT 는 짧은 키에 **경고만** 내고 서명한다. 빈 문자열도 서명·검증에 성공하며
+#:    그건 "누구나 아는 키" = 임의 user_id 위조다. 그래서 사용 지점에서 막는다
+#:    (`hash_password` 가 Argon2 하한을, `load_key` 가 32바이트를 막는 것과 같은 규약).
+#:    기동 점검(`Settings.validate_runtime`)이 1차 방어이고 이건 2차다 — 배치·스크립트처럼
+#:    `create_app()` 을 안 타는 경로가 생겨도 약한 키로는 토큰이 나가지 않는다.
+MIN_JWT_SECRET_BYTES = 32
+
 
 def create_token(user_id: int, *, secret: str, kind: str = "access",
                  now: dt.datetime | None = None) -> str:
     if kind not in ("access", "refresh"):
         raise ValueError("kind 는 access 또는 refresh")
+    if len(secret) < MIN_JWT_SECRET_BYTES:
+        # 길이만 말한다 — 값도, 값의 일부도 메시지에 넣지 않는다.
+        raise ValueError(
+            f"JWT 서명키가 너무 짧습니다({MIN_JWT_SECRET_BYTES}자 이상 필요). "
+            "JWT_SECRET 을 확인하세요")
     now = now or dt.datetime.now(dt.timezone.utc)
     ttl = ACCESS_TTL if kind == "access" else REFRESH_TTL
     payload = {

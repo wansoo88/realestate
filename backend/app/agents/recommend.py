@@ -43,6 +43,7 @@ from app.agents.orchestrator import (
     AnalysisContext,
     Candidate,
     excluded_record,
+    region_index_keys,
     run_mvp_pipeline,
 )
 from app.agents.scoring import BASIS_USER_WEIGHTED
@@ -60,6 +61,7 @@ from app.domain.listings.dedup import AREA_TOLERANCE_M2, group_duplicates
 from app.domain.rules.loader import load_rules
 from app.domain.valuation.models import MIN_SAMPLE, PERIOD_LADDER, TradeRow
 from app.domain.valuation.stats import eligible_trades
+from app.domain.valuation.timeadjust import SCOPE_SIDO, SCOPE_SIGUNGU
 
 logger = logging.getLogger("app.agents.recommend")
 
@@ -82,10 +84,16 @@ JOB_FAILED = "failed"
 #:   · 메모리: 조립 루프 파이썬 피크 1.5MiB · DB 정렬 78kB. db 컨테이너 192MB 와
 #:     무관하다(예전 OOM 은 이 경로가 아니다). 개별 문장은 전부 `statement_timeout`
 #:     10초의 1/8 이하다.
-#: 120 을 고른 이유: 보고된 사례(강남에서 조건 충족 96개)를 여유 있게 덮으면서,
-#: 그 위로는 `MAX_CANDIDATES`(200)가 먼저 걸려 추가 조회가 버려지기 시작한다
-#: (송파 실측: 단지 100개에서 이미 후보 200개 = 상한). 상한을 더 올리면 시간만 늘고
-#: 사용자가 보는 결과는 같아진다.
+#: 120 을 고른 이유는 **시간 예산**이다(결과 불변이 아니다 — CR32-2, 2026-07-28).
+#:   · 보고된 사례(강남에서 조건 충족 96개)를 여유 있게 덮는다.
+#:   · 단지가 조밀한 곳은 120 에서 이미 `MAX_CANDIDATES`(200)에 닿는다
+#:     — 송파 실측: 상한 120 에서 후보 200 = 상한(200 으로 올려도 200).
+#:   · **그러나 그것이 일반적이지 않다.** 리뷰어 실측(상한 120 → 200):
+#:       강남 조건없음 123 → 151 · 강남 59~85㎡ 83 → 195 · 광진 조건없음 140 → 167.
+#:     즉 상한을 올리면 **사용자가 보는 후보는 실제로 늘어난다.** 안 올리는 이유는
+#:     조립 비용(단지당 ~13ms · 50→120 이 +1.0초, 200 이면 +2.8초)이지 결과가
+#:     같아져서가 아니다. 시간을 더 쓸 수 있다면 올릴 여지가 남아 있는 값이다.
+#:   · 절단이 나면 조용히 버리지 않는다 — `_capped` 가 notes 로 말한다.
 CANDIDATE_COMPLEX_LIMIT = 120
 #: 조립된 Candidate 총량 상한(단지 × 면적그룹이 폭증하지 않게).
 MAX_CANDIDATES = 200
@@ -168,9 +176,14 @@ def _analyze(repo: Any, settings: Any, user_id: int, criteria: dict[str, Any],
 
     assembly = _assemble_candidates(repo, criteria, budget, conditions)
     candidates = assembly.candidates
+    # 적정가 밴드의 **시점 보정**용 지역 지수. 후보 루프 밖에서 지역당 한 번만 읽는다.
+    # ⚠️ 이 한 줄이 빠지면 아무 오류 없이 밴드가 예전 값(시점 혼합)으로 돌아간다 —
+    #    서울 후보가 조직적으로 ~10% 싸 보이고, 못 사는 단지가 '예산 안'으로 통과한다.
+    market_indexes = load_market_indexes(repo, candidates)
     ctx = AnalysisContext(
         affordability=afford, candidates=candidates,
         avoid=avoid, weights=weights, forbidden_amounts=forbidden,
+        market_indexes=market_indexes,
         # 정비사업 판정이 목적에 따라 **정반대**가 된다(관리처분 = 투자엔 '확실',
         # 실거주엔 '이주 임박 — 부적합'). 예산 계산에만 쓰던 값을 여기로도 넘긴다.
         purpose=prop.purpose,
@@ -452,6 +465,55 @@ def _bbox_scope_notes(repo: Any, region_codes: list[str], intersected: bool) -> 
         total=int(total), missing=missing,
         missing_pct=round(missing * 100.0 / int(total), 1) if total else 0.0))
     return notes
+
+
+def load_market_indexes(repo: Any, candidates: list[Candidate]) -> dict[str, Any] | None:
+    """후보들이 걸쳐 있는 **지역의 시장지수를 한 번에** 읽어 온다(적정가 밴드 시점 보정).
+
+    왜 여기서, 왜 한 번에
+    ---------------------
+    보정은 후보마다 필요하지만 지수는 **지역 단위**다. 후보 루프 안에서 조회하면
+    후보 200건 × (시군구+시도) = 최대 400 쿼리가 되고, 그중 서로 다른 것은 보통
+    한두 개다(대개 한 요청은 한 지역을 본다). 그래서 지역 키로 접어 **한 번씩만** 읽는다.
+
+    반환값의 의미 (⚠️ None 과 {} 를 같게 다루지 말 것)
+    --------------------------------------------------
+    · `None` — 리포지토리에 `market_index` 가 없다. 조회를 **시도조차 못 했다**.
+      파이프라인은 예전처럼 보정 없이 돌고, 밴드에는 `time_adjustment` 가 비어 있다.
+    · `{}`   — 조회했는데 지역 키가 하나도 없었다(후보 전부 region_code 미상 등).
+      보정은 안 되지만 **사유가 남는다.**
+    운영에서 "배치를 안 돌렸다"와 "배선이 빠졌다"는 완전히 다른 사고라 구분해 둔다.
+
+    조회가 실패해도 **추천을 죽이지 않는다** — 보정은 정확도를 올리는 기능이지
+    추천의 전제가 아니다. 대신 조용히 넘어가지 않고 로그를 남기고, 그 지역은
+    지수 없이(=사유가 남는 채로) 돈다.
+    """
+    lookup = getattr(repo, "market_index", None)
+    if lookup is None:
+        logger.info(
+            "repo 에 market_index 가 없어 적정가 밴드의 시점 보정을 하지 않습니다 "
+            "— 밴드는 6~36개월 거래를 섞은 값입니다(상승장에서 낮게 나옵니다).")
+        return None
+
+    keys: dict[str, str] = {}                 # {지역코드: scope}
+    for cand in candidates:
+        sgg, sido = region_index_keys(cand.region_code)
+        if sgg:
+            keys[sgg] = SCOPE_SIGUNGU
+        if sido:
+            keys[sido] = SCOPE_SIDO
+
+    out: dict[str, Any] = {}
+    for code, scope in keys.items():
+        try:
+            out[code] = lookup(code, scope)
+        except Exception:  # noqa: BLE001 - 보정 하나 때문에 추천을 죽이지 않는다
+            logger.exception("시장지수 조회 실패 (region=%s scope=%s) — "
+                             "이 지역은 시점 보정 없이 진행합니다", code, scope)
+    ready = sum(1 for idx in out.values() if getattr(idx, "reference_ym", None))
+    logger.info("시장지수 조회: 지역 %d곳(쿼리 %d회) · 기준월 확보 %d곳",
+                len(keys), len(keys), ready)
+    return out
 
 
 @dataclass
@@ -776,6 +838,9 @@ def _build(c: Any, area: float, trades: list[Any], listings: list[Any],
         complex_name=c.name,
         unit_type_id=None,                # 실거래엔 unit_type 매핑이 없다 — 면적으로 묶는다
         area_m2=area,
+        # 시점 보정에 쓸 지역(법정동코드). 없으면(구현·데이터 미상) 보정하지 않고
+        # 그 사실이 밴드 사유로 남는다 — 지수 1.0 으로 가정하지 않는다.
+        region_code=getattr(c, "region_code", None),
         group=group,
         trades=[t for t in trades if abs(t.area_m2 - area) <= AREA_TOLERANCE_M2],
         total_households=c.total_households,

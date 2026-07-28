@@ -66,6 +66,13 @@ from app.domain.valuation.stats import (
     fair_price_band,
     liquidity,
 )
+from app.domain.valuation.timeadjust import (
+    SCOPE_SIDO,
+    SCOPE_SIGUNGU,
+    MarketIndex,
+    adjustment_evidence,
+    select_index,
+)
 
 logger = logging.getLogger("agents")
 
@@ -120,6 +127,10 @@ class Candidate:
     complex_name: str
     unit_type_id: int | None
     area_m2: float
+    #: 이 단지의 법정동코드(`complex.region_code`, 10자리). **시점 보정의 유일한 입력**이다 —
+    #: 시장지수는 지역별이라 이 값이 없으면 어느 지수를 쓸지 정할 수 없다.
+    #: None 이면 보정하지 않고 그 사실이 밴드에 사유로 남는다(지수 1.0 으로 가정하지 않는다).
+    region_code: str | None = None
     #: 대표 호가 그룹. **None 일 수 있다(1급 시민).**
     #: 공공 API 에는 호가가 없으므로 호가 0건인 단지도 실거래 기준으로 후보가 된다.
     #: ⚠️ 여기에 가짜 대표 호가를 만들어 끼우지 말 것 — 하류가 그걸 진짜 호가로 믿는다.
@@ -150,13 +161,82 @@ class Candidate:
         return self.group.representative.floor if self.group is not None else None
 
 
-def reference_band(candidate: Candidate, as_of: dt.date):
+#: 지역코드 자릿수. `complex.region_code` 는 10자리 법정동코드이고, 지수 표
+#: (`market_price_index`)의 키는 **시군구 5자리 · 시도 2자리**다(migration 015).
+SIGUNGU_CODE_LEN = 5
+SIDO_CODE_LEN = 2
+
+
+def region_index_keys(region_code: str | None) -> tuple[str | None, str | None]:
+    """법정동코드 → (시군구 키, 시도 키). 자릿수가 모자라면 그 층위는 **None**.
+
+    반쪽짜리 코드로 억지 조회를 하지 않는다 — '11'만 있는 값에서 5자리 키를 만들면
+    엉뚱한 시군구 지수를 붙이게 된다.
+    """
+    code = (region_code or "").strip()
+    return (code[:SIGUNGU_CODE_LEN] if len(code) >= SIGUNGU_CODE_LEN else None,
+            code[:SIDO_CODE_LEN] if len(code) >= SIDO_CODE_LEN else None)
+
+
+def candidate_index(candidate: Candidate,
+                    indexes: dict[str, Any] | None) -> MarketIndex | None:
+    """이 후보에 쓸 시장지수. **키 조회 + 사유가 남게 하는 폴백**만 한다.
+
+    어느 지수를 쓸지 고르는 **정책은 도메인**에 있다(`timeadjust.select_index`:
+    커버리지를 통과한 것 중 기준월이 가장 최근인 지수, 같으면 시군구). 그 규칙을 여기
+    배선 계층에 두면 도메인이 공개 API 로 다른 정책을 선언하게 되고, 다음 사람이
+    `fair_price_band(index=select_index(...))` 라는 **정식 경로**로 옛 정책을 타게 된다
+    (CR33-2 — 그 경로가 실제로 남산타운 −12.3% 를 냈다).
+
+    ⚠️ **`select_index` 가 None 을 줘도 그대로 None 을 돌려주지 않는다.**
+    `fair_price_band` 는 `index=None` 이면 `time_adjustment` 자체를 비운 채 밴드를
+    내는데, 그건 "보정하지 않았다"가 아니라 **"보정을 시도조차 안 했다"** 를 뜻한다
+    (models.PriceBand 주석). 조회를 해 놓고 그 값을 쓰면 왜 보정이 안 됐는지가
+    응답에서 사라진다 — 이 저장소가 가장 경계하는 조용한 실패다.
+    그래서 가진 지수를 **그대로 넘겨** `adjust_trades` 가 사유(REASON_NO_INDEX ·
+    REASON_LOW_COVERAGE …)를 남기게 한다.
+
+    `indexes is None`(조회 자체를 안 함)일 때만 None 을 돌려준다.
+    """
+    if indexes is None:
+        return None
+    sgg_key, sido_key = region_index_keys(candidate.region_code)
+    sgg = indexes.get(sgg_key) if sgg_key else None
+    sido = indexes.get(sido_key) if sido_key else None
+    chosen = select_index(candidate.trades, sigungu=sgg, sido=sido)
+    if chosen is not None:
+        return chosen
+    # 어느 쪽도 커버리지 문턱을 못 넘겼다. 사유를 남길 수 있게 **점이 있는 쪽**을 우선
+    # 넘긴다(빈 지수를 넘기면 '지수 없음'이라는 덜 정확한 사유가 나간다).
+    with_points = next((idx for idx in (sgg, sido) if idx is not None and idx.points),
+                       None)
+    if with_points is not None:
+        return with_points
+    if sgg is not None or sido is not None:
+        return sgg or sido                 # 조회됐지만 비어 있는 지수 → REASON_NO_INDEX
+    # 이 지역은 조회 결과가 아예 없다(배치 미실행 · 조회 실패 · 지역코드 미상).
+    # **빈 지수를 만들어 넘긴다.** 값을 지어내는 게 아니다 — 점이 0개라 보정은 절대
+    # 일어나지 않고, 오직 "조회했고 없었다"를 밴드에 **사유로 남기기 위한** 자리다.
+    # 여기서 None 을 돌려주면 `time_adjustment` 가 통째로 비어 '시도조차 안 함'과
+    # 구분되지 않는다(= 조용한 실패).
+    return MarketIndex(region_code=sgg_key or sido_key or "",
+                       scope=SCOPE_SIGUNGU if sgg_key else SCOPE_SIDO, points={})
+
+
+def reference_band(candidate: Candidate, as_of: dt.date, *,
+                   indexes: dict[str, Any] | None = None):
     """이 후보의 적정가 밴드. 호가가 있으면 그 층으로 보정한다.
 
     호가가 없으면 보정할 대상 층이 없으므로 단지·면적 기준 밴드를 그대로 쓴다.
+
+    `indexes` 를 주면 창 안의 거래를 **각각 기준월 수준으로 환산**한 뒤 분위수를 낸다
+    (시점 혼합 보정 — `app/domain/valuation/timeadjust.py`). 주지 않으면 예전과 같은 값이다.
+    ⚠️ 이 인자를 빠뜨리면 **아무 동작 변화 없이** 밴드가 조용히 과소평가된다(서울 ≈10%).
+       그래서 파이프라인은 `ctx.market_indexes` 를 반드시 넘긴다.
     """
     return fair_price_band(candidate.trades, area_m2=candidate.area_m2, as_of=as_of,
-                           target_floor=candidate.target_floor)
+                           target_floor=candidate.target_floor,
+                           index=candidate_index(candidate, indexes))
 
 
 def reference_price_krw(candidate: Candidate, band: Any) -> int | None:
@@ -195,6 +275,18 @@ class AnalysisContext:
     #: tripwire 검사값(프롬프트 구성에는 쓰지 않는다). 비워두면 파이프라인이
     #: affordability 파생값으로 보강하고, 그래도 비면 fail-loud 로 막는다.
     forbidden_amounts: list[int] = field(default_factory=list)
+    #: 지역별 시장지수 캐시 — `{지역코드: MarketIndex}` (시군구 5자리 · 시도 2자리 키).
+    #: 적정가 밴드의 **시점 보정**에 쓴다(migration 015 · timeadjust.py).
+    #:
+    #: ⚠️ **None 과 {} 는 다르다.**
+    #:   · `None` = 지수를 **조회조차 하지 않았다**. 밴드는 예전 값 그대로이고
+    #:     `time_adjustment` 도 비어 있다(단위 테스트·구형 호출부).
+    #:   · `{}`   = 조회했는데 하나도 없었다(배치 미실행 등). 보정은 안 되지만
+    #:     **사유가 밴드에 남는다** — 운영에서 이 둘은 완전히 다른 사고다.
+    #: ⚠️ 후보 루프 안에서 채우지 않는다. 러너가 후보 전체의 지역을 모아 **한 번에**
+    #:    조회해 넘긴다(`recommend.load_market_indexes`). 후보마다 조회하면
+    #:    후보 200건 × 2층위 = 400 쿼리가 된다.
+    market_indexes: dict[str, Any] | None = None
     #: **적용할 예산 상한**(원). 사용자가 희망 매매가를 지정하면 그 값이 온다.
     #: None 이면 `affordability.max_purchase_krw`(최대 실구매 가능 금액)를 쓴다 — 기존 동작.
     #:
@@ -297,14 +389,18 @@ def candidate_liquidity(candidate: Candidate, as_of: dt.date) -> Liquidity:
 
 
 def valuation_finding(candidate: Candidate, as_of: dt.date, *,
-                      band: Any | None = None, liq: Liquidity | None = None) -> Finding:
+                      band: Any | None = None, liq: Liquidity | None = None,
+                      indexes: dict[str, Any] | None = None) -> Finding:
     """시세 판정. **호가 유무에 따라 판정 축이 다르다.**
 
     호가 있음 → 호가 갭(ask_gap)으로 "적정가 상단/하단"을 판정한다.
     호가 없음 → 비교할 호가가 없다. 갭을 계산하지 않고(None) **적정가 밴드 자체**를
                 근거로 제시한다. 없는 숫자를 만들어 내면 그 순간 G2 위반이다.
+
+    `band` 를 받으면 그대로 쓴다(파이프라인이 한 번 계산해 넘긴다 — 같은 숫자를 두 번
+    만들지 않는다). 직접 부르는 호출부는 `indexes` 로 시점 보정을 켤 수 있다.
     """
-    band = reference_band(candidate, as_of) if band is None else band
+    band = reference_band(candidate, as_of, indexes=indexes) if band is None else band
     if not band.available:
         return insufficient("valuation-trader", [band.reason or "실거래 표본 부족"])
 
@@ -346,28 +442,55 @@ def valuation_finding(candidate: Candidate, as_of: dt.date, *,
                           "현재 매수 가능한 매물이 확인되지 않았습니다. "
                           "아래 가격은 호가가 아니라 최근 실거래 기준 추정입니다."))
 
+    # 시점 보정을 **시도했는데 못 한** 경우. 조용히 넘기지 않는다 —
+    # 이 밴드는 6~36개월 거래를 시점 구분 없이 섞은 값이고, 상승장에서는 그만큼
+    # 낮게 나온다(실측: 서울 ≈10% · 경기 ≈3% · 인천 ≈0.9%). 호가가 없는 후보에서는
+    # 이 값이 곧 **예산 판정 기준가**라 표시 오차로 끝나지 않는다.
+    if band.time_adjustment is not None and not band.time_adjustment.applied:
+        risks.append(Risk(
+            "medium",
+            f"적정가 밴드에 시점 보정을 적용하지 못했습니다"
+            f"({band.time_adjustment.reason}). 최근 {band.period_months}개월 거래를 "
+            f"시점 구분 없이 섞은 값이라 상승장에서는 실제 시세보다 낮게 나옵니다."))
+
     # 점수: 갭이 작을수록 좋다(0% 기준). ±20% 를 0점 경계로 본다.
     # ⚠️ 호가가 없으면 **점수를 매기지 않는다(None)**. 매길 축(호가 vs 적정가)이 없다.
     #    0 점을 주면 "나쁘다"로 읽히고, 임의 점수를 주면 근거 없는 서열이 생긴다.
     score = max(0.0, min(100.0, 100.0 - abs(gap) * 5)) if gap is not None else None
 
+    # 시점 보정을 했으면 **밴드의 숫자가 언제 시점 값인지**를 문장에 박는다.
+    # "현재 시세"라고 쓰지 않는다 — 기준월은 완결된 가장 최근 달이고, 그 사실이
+    # 사용자가 이 숫자를 얼마나 믿을지 정하는 근거다(timeadjust 규칙 3).
+    ym = band.as_of_label
+    median_label = (f"{ym} 시점 환산 중위 {band.median_krw:,}원" if ym
+                    else f"중위 {band.median_krw:,}원")
     if ask is not None:
         rationale = (
-            f"동일 타입 {band.sample_size}건 중위 {band.median_krw:,}원 대비 "
+            f"동일 타입 {band.sample_size}건 {median_label} 대비 "
             f"호가 {ask:,}원은 {gap:+.1f}% 입니다. 환금성은 {liq.grade}."
         )
     else:
         rationale = (
             f"{TRADE_BASIS_NOTE} 동일 타입 최근 {band.period_months}개월 실거래 "
             f"{band.sample_size}건 기준 적정가 밴드는 "
-            f"{band.p25_krw:,}~{band.p75_krw:,}원(중위 {band.median_krw:,}원)입니다. "
+            f"{band.p25_krw:,}~{band.p75_krw:,}원({median_label})입니다. "
             f"비교할 호가가 없어 호가 갭은 계산하지 않았습니다. 환금성은 {liq.grade}."
         )
-    evidence = band.to_evidence(as_of=as_of) and [
-        Evidence(claim=f"중위 실거래가 {band.median_krw:,}원",
-                 source="국토교통부 실거래가",
-                 as_of=as_of.isoformat(), data_rows=band.sample_size)
+    # 근거 문구는 밴드가 직접 만든다(`PriceBand.to_evidence`) — 보정된 숫자를 여기서
+    # "중위 실거래가"라고 다시 이름 붙이면 **다른 값을 같은 이름으로 부르는** 셈이 된다.
+    evidence = [
+        Evidence(claim=e["claim"], source=e["source"], as_of=e["as_of"],
+                 data_rows=e.get("data_rows"))
+        for e in band.to_evidence(as_of=as_of)
     ]
+    # 보정을 실제로 한 경우에만 '무엇으로 얼마나 옮겼는지'를 근거로 덧붙인다.
+    # 보정하지 않았으면 `adjustment_evidence` 가 빈 목록이다(없는 근거를 만들지 않는다).
+    if band.time_adjustment is not None:
+        evidence += [
+            Evidence(claim=e["claim"], source=e["source"], as_of=e["as_of"],
+                     data_rows=e.get("data_rows"))
+            for e in adjustment_evidence(band.time_adjustment)
+        ]
     # 동별 실측이 있으면 근거와 문구에 싣는다. 실측이 아니면(폴백) 지어내지 않는다.
     if dong.available:
         top = dong.dongs[0]
@@ -399,6 +522,7 @@ def _price_band_dict(band: Any) -> dict[str, Any] | None:
     """
     if band is None or not band.available:
         return None
+    adj = band.time_adjustment
     return {
         "p25_krw": band.p25_krw,
         "median_krw": band.median_krw,
@@ -407,6 +531,27 @@ def _price_band_dict(band: Any) -> dict[str, Any] | None:
         "period_months": band.period_months,
         "expanded": band.expanded,
         "source": "국토교통부 실거래가",
+        # --- 시점 계약 (이 숫자는 **언제** 시점 값인가) ---------------------
+        # as_of_ym      : 보정했으면 기준월('2026-06'), 아니면 **null**.
+        #                 null 은 "지금 시세"가 아니라 **"시점을 말할 수 없다"** 이다 —
+        #                 6~36개월 거래를 섞은 값이라 어느 달의 가격도 아니다.
+        # time_adjusted : 이 밴드가 실제로 환산된 값인가. 표시 문구가 여기서 갈린다.
+        # time_adjustment: 시도했으면 결과(성공/실패+사유), 시도조차 안 했으면 null.
+        #                 ⚠️ null 과 `{"applied": false}` 를 같게 다루지 말 것.
+        "as_of_ym": band.as_of_label,
+        "time_adjusted": band.is_time_adjusted,
+        "time_adjustment": ({
+            "applied": adj.applied,
+            "reference_ym": adj.reference_ym,
+            "scope": adj.scope,
+            "region_code": adj.region_code,
+            "shift_pct": adj.shift_pct,
+            "coverage_pct": adj.coverage_pct,
+            "sample_size": adj.sample_size,
+            "basis": adj.basis,
+            "reason": adj.reason,
+            "note": adj.note(),
+        } if adj is not None else None),
     }
 
 
@@ -549,8 +694,24 @@ def is_cost_guard_degraded(assessment: RedevAssessment) -> bool:
     return bool((assessment.detail or {}).get(COST_GUARD_DETAIL_KEY))
 
 
-def _cost_guard_degraded(exc: BaseException) -> RedevAssessment:
-    """분담금 방어가 걸린 후보의 표준 반환 — **판정만 비우고 후보는 살린다.**"""
+def _cost_guard_degraded() -> RedevAssessment:
+    """분담금 방어가 걸린 후보의 표준 반환 — **판정만 비우고 후보는 살린다.**
+
+    ⚠️ **진단문(`str(exc)`)을 응답에 싣지 않는다** (SR27-1 · CR32-4, 2026-07-28)
+    -------------------------------------------------------------------------
+    예전에는 `detail["cost_guard_error"]` 에 예외 문자열을 담았다. 그런데 그 문자열은
+    `주제어 '분담' + 금액 '1억 2천만 원'` 처럼 **가드가 막은 금액을 그대로 인용**하고,
+    `_redev_dict → payload → _item_to_dict` 를 타고 사용자 카드까지 나갔다(실측).
+    막은 값을 오류 메시지로 되돌려 주는 셈이라 **방어가 자기 목적과 반대로 동작**한다 —
+    SR-025 가 422 응답에서 `input` 을 지우며 닫은 것과 같은 패턴(CWE-209)이다.
+
+    조용해지지는 않는다. 역할을 나눈다:
+      · **운영자**  — 호출부의 `logger.exception` 이 예외 메시지 + 스택을 남긴다
+                      (로그 마스킹 필터가 걸린 경로다).
+      · **사용자**  — `verdict`("정비사업 판정 보류") · `rationale` · `missing` 으로
+                      *판정을 못 냈다*는 사실을 보고, 결과 notes 에 건수도 적힌다.
+    한 값이 두 독자를 겸하려다 금액이 샜다. 겸하지 않는다.
+    """
     return RedevAssessment(
         available=False, stage=STAGE_UNKNOWN, raw_stage="", score=None, confidence=0.0,
         verdict="정비사업 판정 보류",
@@ -558,7 +719,7 @@ def _cost_guard_degraded(exc: BaseException) -> RedevAssessment:
         missing=(COST_GUARD_DEGRADED_REASON,),
         must_verify=("정비사업 여부·단계는 관할 구청 주거정비과 또는 정비사업 "
                      "정보몽땅에서 직접 확인하세요.",),
-        detail={COST_GUARD_DETAIL_KEY: True, "cost_guard_error": str(exc)},
+        detail={COST_GUARD_DETAIL_KEY: True},
     )
 
 
@@ -582,13 +743,14 @@ def redevelopment_assessment(candidate: Candidate, as_of: dt.date, *,
     """
     try:
         return assess_redevelopment(candidate.redevelopment, purpose=purpose, as_of=as_of)
-    except CostGuardError as exc:
-        # 운영자가 원인을 찾을 수 있도록 스택까지 남긴다. 여기 실리는 것은 구역명·단계명
-        # 같은 공개 수집값이지 사용자 자산이 아니다(마스킹 대상 아님).
+    except CostGuardError:
+        # 원인(어떤 주제어·어떤 금액이 걸렸는가)이 남는 **유일한 자리**다 —
+        # 응답에는 싣지 않는다(SR27-1). 스택까지 남겨 운영자가 코드 위치를 찾게 한다.
+        # 여기 실리는 것은 구역명·단계명 같은 공개 수집값이지 사용자 자산이 아니다.
         logger.exception(
             "정비사업 판정이 분담금 검사에 걸려 이 후보만 판정 보류로 내립니다 "
             "(complex_id=%s)", candidate.complex_id)
-        return _cost_guard_degraded(exc)
+        return _cost_guard_degraded()
 
 
 def redevelopment_pair(candidate: Candidate, as_of: dt.date, *,
@@ -608,11 +770,12 @@ def redevelopment_pair(candidate: Candidate, as_of: dt.date, *,
     try:
         return (assessment, redevelopment_finding(assessment),
                 is_cost_guard_degraded(assessment))
-    except CostGuardError as exc:
+    except CostGuardError:
+        # 예외 문자열은 로그에만(SR27-1) — 카드에는 '판정 보류' 사실만 나간다.
         logger.exception(
             "정비사업 Finding 변환이 분담금 검사에 걸려 이 후보만 판정 보류로 내립니다 "
             "(complex_id=%s)", candidate.complex_id)
-        degraded = _cost_guard_degraded(exc)
+        degraded = _cost_guard_degraded()
         return degraded, redevelopment_finding(degraded), True
 
 
@@ -1087,6 +1250,54 @@ def _merge_actions(summary_actions: list[str], must_verify: list[str]) -> list[s
     return out[:_MAX_ACTIONS]
 
 
+#: 시점 보정 고지 문구. **"현재 시세"라는 말을 쓰지 않는다** — 기준월은 완결된 가장
+#: 최근 달이고(신고 지연 때문에 이번 달은 표본이 덜 찼다), 그 사실이 사용자가 이 숫자를
+#: 얼마나 믿을지 정하는 근거다(timeadjust 규칙 3).
+NOTE_TIME_ADJUSTED = (
+    "적정가 밴드는 {yms} 시점으로 환산했습니다({n}건) — 6~36개월 거래를 그대로 섞으면 "
+    "창의 중간 시점 가격이 되어 상승장에서 낮게 나오기 때문입니다"
+    "(자체 시장지수, 국토교통부 실거래가 기반). 그 시점 이후의 실제 거래가는 다를 수 있습니다."
+)
+#: ★ 조용히 넘어가면 안 되는 쪽. 보정을 **시도했는데 못 한** 후보가 있으면 반드시 말한다.
+NOTE_TIME_NOT_ADJUSTED = (
+    "추천 {n}건은 시점 보정을 적용하지 못해 최근 6~36개월 거래를 시점 구분 없이 섞은 "
+    "적정가입니다(사유: {reasons}). 상승장에서는 실제 시세보다 낮게 나오며, 호가가 없는 "
+    "후보에서는 이 값이 예산 판정 기준가라 **살 수 없는 후보가 예산 안으로 통과**할 수 있습니다."
+)
+#: 배선 자체가 꺼진 경우(지수 조회를 하지 않음). 운영에서는 이 문장이 보이면 안 된다.
+NOTE_TIME_NOT_ATTEMPTED = (
+    "적정가 밴드에 시점 보정을 적용하지 않았습니다(시장지수 미조회). 6~36개월 거래를 "
+    "시점 구분 없이 섞은 값이라 어느 시점의 가격도 아닙니다."
+)
+
+
+def time_adjust_notes(items: list[dict[str, Any]], *, attempted: bool) -> list[str]:
+    """시점 보정이 **실제로 걸렸는지**를 결과 상단에서 말한다.
+
+    왜 카드 안(`price_band.time_adjustment`)만으로 부족한가 — 사용자는 카드를 하나씩
+    열어 보지 않는다. 그리고 이 보정은 **가격의 의미 자체**를 바꾼다(체결가 혼합 →
+    특정 시점 환산). 어느 쪽인지 모르면 두 값을 같은 잣대로 비교하게 된다.
+    """
+    bands = [it.get("price_band") for it in items if it.get("price_band")]
+    if not bands:
+        return []
+    if not attempted:
+        return [NOTE_TIME_NOT_ATTEMPTED]
+
+    done = [b for b in bands if b.get("time_adjusted")]
+    missed = [b for b in bands if not b.get("time_adjusted")]
+    out: list[str] = []
+    if done:
+        yms = sorted({b["as_of_ym"] for b in done if b.get("as_of_ym")})
+        out.append(NOTE_TIME_ADJUSTED.format(yms="·".join(yms), n=len(done)))
+    if missed:
+        reasons = sorted({(b.get("time_adjustment") or {}).get("reason") or "사유 미상"
+                          for b in missed})
+        out.append(NOTE_TIME_NOT_ADJUSTED.format(n=len(missed),
+                                                 reasons="; ".join(reasons)))
+    return out
+
+
 def _derive_forbidden(ctx: AnalysisContext) -> list[int]:
     """tripwire 검사값을 방어적으로 보강한다.
 
@@ -1140,7 +1351,10 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
 
         # 가격 근거를 먼저 확정한다. 호가가 있으면 호가(사실), 없으면 실거래 중위(추정).
         # 밴드는 여기서 한 번만 계산해 valuation 에 넘긴다(같은 숫자를 두 번 만들지 않는다).
-        band = reference_band(cand, ctx.as_of)
+        # ⚠️ 지수는 **루프 밖에서 이미 조회돼** 있다(ctx.market_indexes) — 여기서 DB 를
+        #    때리지 않는다. 시점 보정이 붙으면 아래 `price` 가 곧 예산 판정 기준가라
+        #    보정 여부가 **후보의 통과/제외를 바꾼다**(그게 이 배선의 목적이다).
+        band = reference_band(cand, ctx.as_of, indexes=ctx.market_indexes)
         price = reference_price_krw(cand, band)
 
         # 하드 제외 ⓪ — 가격 근거가 아예 없다(호가 없음 + 실거래 표본 부족).
@@ -1155,8 +1369,12 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
         # 하드 제외 ① — 아무리 점수가 높아도 못 사는 집은 추천이 아니다.
         # ⚠️ 실거래 기준이면 비교값이 **추정치**다. 사유 문구에 그 사실을 남긴다.
         if budget and price > budget:
+            # 실거래 기준이면 **어느 시점의 추정치인지**까지 적는다. 보정된 값을
+            # 그냥 "최근 실거래 중위"라고 부르면 사용자가 원본 체결가로 읽는다.
+            trade_label = (f"{band.as_of_label} 시점 환산 중위 {price:,}원(추정)"
+                           if band.as_of_label else f"최근 실거래 중위 {price:,}원(추정)")
             label = (f"호가 {price:,}원" if basis == PRICE_BASIS_LISTING
-                     else f"최근 실거래 중위 {price:,}원(추정)")
+                     else trade_label)
             # ⚠️ 여기 적히는 금액은 **후보 가격**과 **예산 한도(파생값)** 뿐이다.
             #    보유현금·연소득 원본을 문장에 넣지 않는다(SR4-2).
             excluded.append(excluded_entry(
@@ -1311,6 +1529,7 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
 
     notes = ["타이밍 분석(market-timing-analyst)은 2차 기능입니다.",
              "입지 분석은 데이터 수집 후 제공됩니다."]
+    notes += time_adjust_notes(items[:top_n], attempted=ctx.market_indexes is not None)
     # "AI 추천"을 눌렀는데 요약이 규칙 기반이면 **그 사실을 말한다.**
     # 추천이 있는 경우에만 붙인다 — 후보가 0건이면 요약 자체가 없었으므로 할 말이 아니다.
     if items[:top_n]:

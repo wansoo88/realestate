@@ -206,6 +206,20 @@
   color: var(--text-estimated);
 }
 
+/* 시점 꼬리표("2026-06 시점 환산") — 이 숫자가 **언제의 가격인지**는 출처·표본보다
+   중요한 정보라 메타 안에서 한 칸만 올린다(캡션 색). 금액보다 튀면 "확신의 농도"가 깨진다. */
+.report__band-asof {
+  color: var(--text-secondary);
+}
+
+/* 시점 보정을 못 한 밴드의 설명 — 줄을 바꿔 금액 아래에 눕힌다(경고가 아니라 사실 고지). */
+.report__band-why {
+  display: block;
+  margin-top: 2px;
+  font-size: var(--fs-caption);
+  color: var(--text-estimated);
+}
+
 .report__dong {
   display: flex;
   flex-wrap: wrap;

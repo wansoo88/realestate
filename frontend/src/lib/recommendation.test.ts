@@ -7,8 +7,9 @@
  *  · 출처 없는 근거는 근거로 세지 않는다
  */
 import { describe, expect, it } from "vitest";
-import type { Finding, RecommendationItem } from "../api/client";
+import type { Finding, PriceBand, RecommendationItem } from "../api/client";
 import {
+  bandTimeView,
   dongView,
   findingView,
   jobPhase,
@@ -127,6 +128,170 @@ describe("priceView — 호가와 실거래는 같은 숫자가 아니다", () =
     );
     expect(v.askKrw).toBeNull();
     expect(v.gapPct).toBeNull();
+  });
+});
+
+/**
+ * CR33-3 — 밴드 중위는 **언제의 가격인가**.
+ *
+ * 서버는 창 안의 거래를 기준월로 환산한 뒤 밴드를 낸다. 환산된 값을 그냥
+ * "국토교통부 실거래가"라고 부르면 원본 체결가로 읽힌다 — 다른 숫자다.
+ * 반대로 필드가 없는 응답에서 "보정됨"이라 말하면 **없는 걸 있다고 하는 것**이다.
+ */
+function band(over: Partial<PriceBand> = {}): PriceBand {
+  return {
+    p25_krw: 1_380_000_000,
+    median_krw: 1_400_000_000,
+    p75_krw: 1_450_000_000,
+    sample_size: 37,
+    period_months: 6,
+    expanded: false,
+    source: "국토교통부 실거래가",
+    ...over,
+  };
+}
+
+const ADJUSTED = band({
+  as_of_ym: "2026-06",
+  time_adjusted: true,
+  time_adjustment: {
+    applied: true,
+    reference_ym: "2026-06",
+    scope: "sigungu",
+    region_code: "11680",
+    shift_pct: 4.2,
+    coverage_pct: 96.7,
+    sample_size: 37,
+    basis: "trade_time_adjusted",
+    reason: null,
+  },
+});
+
+const NOT_ADJUSTED = band({
+  as_of_ym: null,
+  time_adjusted: false,
+  time_adjustment: {
+    applied: false,
+    reference_ym: "2026-06",
+    scope: "sido",
+    coverage_pct: 41.2,
+    reason: "거래 시점의 지수 확보율이 낮아 시점 보정을 하지 않았습니다",
+  },
+});
+
+describe("bandTimeView — 보정됨 / 보정 안 됨 / 모름", () => {
+  it("보정됐으면 기준월을 밝힌다", () => {
+    const v = bandTimeView(ADJUSTED);
+    expect(v.adjusted).toBe(true);
+    expect(v.unknown).toBe(false);
+    expect(v.asOfYm).toBe("2026-06");
+    expect(v.label).toBe("2026-06 시점 환산");
+  });
+
+  it("⛔ '현재 시세'라고 쓰지 않는다 — 기준월은 오늘이 아니라 완결된 가장 최근 달이다", () => {
+    expect(bandTimeView(ADJUSTED).label).not.toContain("현재");
+    expect(bandTimeView(ADJUSTED).label).not.toContain("시세");
+  });
+
+  it("보정 안 됐으면 그 사실과 사유를 말한다", () => {
+    const v = bandTimeView(NOT_ADJUSTED);
+    expect(v.adjusted).toBe(false);
+    expect(v.unknown).toBe(false);
+    expect(v.label).toBe("시점 보정 없음");
+    expect(v.detail).toContain("특정 시점의 가격이 아닙니다");
+    expect(v.detail).toContain("지수 확보율이 낮아");
+  });
+
+  it("사유가 없어도 '어느 시점도 아니다'라는 사실은 말한다", () => {
+    const v = bandTimeView(band({ time_adjusted: false, time_adjustment: { applied: false } }));
+    expect(v.label).toBe("시점 보정 없음");
+    expect(v.detail).toBe("기간 내 거래를 시점 구분 없이 섞은 값이라 특정 시점의 가격이 아닙니다.");
+  });
+
+  it("★ 필드가 아예 없으면(구버전 응답) 아무것도 주장하지 않는다", () => {
+    const v = bandTimeView(band());
+    expect(v.unknown).toBe(true);
+    expect(v.adjusted).toBe(false);
+    expect(v.label).toBeNull();
+    expect(v.detail).toBeNull();
+  });
+
+  it("밴드 자체가 없어도 같다(침묵)", () => {
+    expect(bandTimeView(null).unknown).toBe(true);
+    expect(bandTimeView(undefined).adjusted).toBe(false);
+  });
+
+  it("두 필드가 어긋나면 보정을 주장하지 않는다(서버 결함 방어)", () => {
+    // time_adjusted 만 true, 실제 결과는 미적용 → 안 한 보정을 했다고 말하면 안 된다
+    const v = bandTimeView(
+      band({ as_of_ym: "2026-06", time_adjusted: true, time_adjustment: { applied: false } }),
+    );
+    expect(v.adjusted).toBe(false);
+    expect(v.asOfYm).toBeNull();
+  });
+
+  it("time_adjustment 없이 time_adjusted 만 와도 보정 사실은 인정한다(기준월은 as_of_ym)", () => {
+    const v = bandTimeView(band({ as_of_ym: "2026-05", time_adjusted: true }));
+    expect(v.adjusted).toBe(true);
+    expect(v.label).toBe("2026-05 시점 환산");
+  });
+
+  it("보정됐는데 기준월이 이상하면 월을 지어내지 않는다", () => {
+    const v = bandTimeView(
+      band({ as_of_ym: "언젠가", time_adjusted: true, time_adjustment: { applied: true } }),
+    );
+    expect(v.adjusted).toBe(true);
+    expect(v.asOfYm).toBeNull();
+    expect(v.label).toBe("시점 환산(기준월 미상)");
+  });
+
+  it("as_of_ym 이 비어도 time_adjustment.reference_ym 으로 기준월을 찾는다", () => {
+    const v = bandTimeView(
+      band({ time_adjusted: true, time_adjustment: { applied: true, reference_ym: "2026-06" } }),
+    );
+    expect(v.label).toBe("2026-06 시점 환산");
+  });
+
+  it("사유가 내부 코드면 화면에 내지 않는다(plainReason 경유)", () => {
+    const v = bandTimeView(
+      band({ time_adjusted: false, time_adjustment: { applied: false, reason: "IDX_ERR_42" } }),
+    );
+    expect(v.detail).not.toContain("IDX_ERR_42");
+  });
+});
+
+describe("priceView 라벨 — 보정값을 원본 실거래가라 부르지 않는다", () => {
+  const trade = (b: PriceBand | null) =>
+    item({
+      price_basis: "trade",
+      ask_price_krw: null,
+      ask_gap_pct: null,
+      est_price_krw: 1_400_000_000, // = 밴드 중위(서버 reference_price_krw)
+      price_estimated: true,
+      price_band: b,
+    });
+
+  it("★ 보정된 중위가 기준가면 라벨도 기준월을 말한다", () => {
+    expect(priceView(trade(ADJUSTED)).label).toBe("2026-06 시점 환산 추정가");
+  });
+
+  it("보정 안 됐으면 예전 문구 그대로다", () => {
+    expect(priceView(trade(NOT_ADJUSTED)).label).toBe("최근 실거래 기준 추정가");
+  });
+
+  it("★ 필드가 없으면 보정을 주장하지 않는다", () => {
+    expect(priceView(trade(band())).label).toBe("최근 실거래 기준 추정가");
+    expect(priceView(trade(null)).label).toBe("최근 실거래 기준 추정가");
+  });
+
+  it("기준가가 밴드 중위가 아니면 그 숫자에 대해 환산을 주장하지 않는다", () => {
+    // 라벨은 **화면에 뜬 숫자**에 대한 주장이다 — 근거를 잃으면 조용히 물러선다
+    const v = priceView({ ...trade(ADJUSTED), est_price_krw: 1_230_000_000 });
+    expect(v.label).toBe("최근 실거래 기준 추정가");
+  });
+
+  it("호가 기준 후보는 밴드가 환산돼도 여전히 '호가'다(호가는 환산 대상이 아니다)", () => {
+    expect(priceView(item({ price_band: ADJUSTED })).label).toBe("호가");
   });
 });
 

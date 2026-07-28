@@ -106,8 +106,11 @@ export interface ComplexItem {
   point: [number, number];
   households: number | null;
   /**
-   * 특성 태그(역세권·재건축)용 사실값. **지도 응답에는 아직 오지 않는다** —
-   * 없으면 모름으로 다뤄 태그를 달지 않는다. 서버가 실어 주는 날 자동으로 붙는다.
+   * 특성 태그(역세권·재건축)용 사실값. `GET /map/complexes` 응답에도 **실제로 실린다**
+   * (CR32-5 — 이전 라운드까지는 지도 응답에 없었다). 없으면(단지별로 값이 없거나
+   * 서버가 구버전이면) 모름으로 다뤄 태그를 달지 않는다(lib/tags.ts).
+   * ⚠️ 지도 응답의 `redevelopment` 에는 `verdict`·`score` 가 오지 않는다(의도됨) —
+   *    `available` 로만 판정한다(그리고 `available: false` 는 "미확인"이지 "없음"이 아니다).
    */
   nearest_station?: NearestStation | null;
   redevelopment?: RedevelopmentInfo | null;
@@ -276,6 +279,48 @@ export interface Finding {
   missing: string[];
 }
 
+/**
+ * 적정가 밴드의 **시점 보정** 결과 (서버 `domain/valuation/timeadjust.py::TimeAdjustment`).
+ *
+ * 6~36개월 창의 거래를 시점 구분 없이 섞으면 밴드 중위는 "창의 중간 시점" 가격이 된다.
+ * 그래서 서버가 각 거래를 **기준월**로 환산한 뒤 분위수를 낸다.
+ *
+ * ⚠️ `applied === false` 도 정상 응답이다 — 지수가 없거나 커버리지가 모자라면
+ *    서버는 **보정을 포기하고 사유를 남긴다**. 값의 유무가 아니라 `applied` 로 판단한다.
+ */
+export interface TimeAdjustment {
+  /** 실제로 환산했는가. 이 값이 표시 문구를 가른다. */
+  applied: boolean;
+  /** 환산 기준월("2026-06"). "오늘"이 아니라 **완결된 가장 최근 달**이다. */
+  reference_ym?: string | null;
+  /** 지수 층위("sigungu" | "sido") — 내부 코드다. 화면에 그대로 내지 않는다. */
+  scope?: string | null;
+  region_code?: string | null;
+  /** 보정으로 중위가 몇 % 움직였는가(음수 가능). */
+  shift_pct?: number | null;
+  /** 창 안 거래 중 지수를 가진 비율(%). */
+  coverage_pct?: number | null;
+  sample_size?: number | null;
+  basis?: string | null;
+  /** 보정하지 않은 사유. **내부 코드일 수 있다** → `lib/plainTerms.plainReason` 을 거친다. */
+  reason?: string | null;
+  /** 사람이 읽는 한 줄(서버 생성). 있으면 그대로 쓴다 — 재조립하지 않는다. */
+  note?: string | null;
+}
+
+/**
+ * 적정가 밴드.
+ *
+ * 🕒 시점 계약 (CR33-3 — 이 세 필드가 없으면 화면이 보정값을 원본 실거래가라 부르게 된다)
+ *  · `as_of_ym`        보정했으면 기준월("2026-06"), 아니면 **null**.
+ *                      null 은 "지금 시세"가 아니라 **"시점을 말할 수 없다"** 이다.
+ *  · `time_adjusted`   이 밴드가 실제로 환산된 값인가.
+ *  · `time_adjustment` 시도했으면 결과(성공/실패+사유), 시도조차 안 했으면 null.
+ *
+ * ⚠️ 셋 다 **선택 필드**다. 구버전 서버나 다른 엔드포인트에서는 오지 않는다.
+ *    없으면 "보정 안 됨"이 아니라 **모름**이다 — 어느 쪽도 주장하지 않는다
+ *    (판단은 `lib/recommendation.ts::bandTimeView` 한 곳에서만 한다).
+ */
 export interface PriceBand {
   p25_krw: number;
   median_krw: number;
@@ -284,6 +329,9 @@ export interface PriceBand {
   period_months: number;
   expanded: boolean;
   source: string;
+  as_of_ym?: string | null;
+  time_adjusted?: boolean;
+  time_adjustment?: TimeAdjustment | null;
 }
 
 export interface DongValuation {

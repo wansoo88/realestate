@@ -58,9 +58,16 @@ SECRET_PARAM_KEYS: tuple[str, ...] = (
 
 #: 값 자체를 문자열 어디서든 지워야 하는 환경변수. 파라미터 이름을 못 알아봐도
 #: (리다이렉트·본문 echo·헤더 덤프 등) 실제 비밀값이면 지워진다.
+#:
+#: ⚠️ **새 비밀 칸을 `.env.example` 에 만들면 여기에도 넣는다.** 이름 기반 규칙
+#: (`_QUERY_RE` 등)은 파라미터 이름이 우리가 아는 형태일 때만 듣고, 경로형 URL·
+#: dict repr·오류 본문의 되비침은 못 잡는다. 그 구멍으로 SR24-1(경로형 인증키)이
+#: 났고, `NEIS_API_KEY` 는 칸만 만들어진 채 이 목록에 없었다(SR29-2).
+#: `tests/test_script_hygiene.py` 가 `.env.example` 과 이 목록을 대조한다(SR29-9).
 SECRET_ENV_VARS: tuple[str, ...] = (
     "MOLIT_API_KEY", "DATA_GO_KR_API_KEY",
     "KAKAO_REST_API_KEY", "KAKAO_JS_APP_KEY",
+    "NEIS_API_KEY",
     "ANTHROPIC_API_KEY",
     "JWT_SECRET", "FIELD_ENCRYPTION_KEY",
     "POSTGRES_PASSWORD",

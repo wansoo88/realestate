@@ -11,6 +11,9 @@
 4. **동(棟)별 가격 차이는 실측한다(dong_effect).** 운영 MOLIT API 가 aptDong 을 77~93%
    제공함이 확인돼(erd §0 정정, 2026-07-25) 좌표추정이 아니라 실거래로 직접 측정한다.
    단, 동 표본이 MIN_SAMPLE_DONG 미만이거나 동 정보가 없으면 실측하지 않고 폴백을 알린다.
+5. **시점을 섞지 않는다(선택).** `fair_price_band(index=...)` 를 주면 창 안 거래를 각각
+   기준월 수준으로 환산한 뒤 분위수를 낸다. 안 주면 예전과 같은 값이다. 왜 필요한지와
+   보정을 거부하는 조건은 `app/domain/valuation/timeadjust.py` 참조.
 """
 from __future__ import annotations
 
@@ -32,6 +35,7 @@ from app.domain.valuation.models import (
     TradeRow,
     floor_band,
 )
+from app.domain.valuation.timeadjust import MarketIndex, adjust_trades
 
 #: 전용면적 매칭 허용 오차(㎡). 같은 타입도 소수점 표기가 흔들린다.
 AREA_TOLERANCE_M2 = 0.5
@@ -177,8 +181,14 @@ def fair_price_band(
     as_of: dt.date | None = None,
     target_floor: int | None = None,
     ladder: Sequence[int] = PERIOD_LADDER,
+    index: MarketIndex | None = None,
 ) -> PriceBand:
-    """적정가 밴드. 표본이 부족하면 기간을 넓히고, 그래도 부족하면 포기한다."""
+    """적정가 밴드. 표본이 부족하면 기간을 넓히고, 그래도 부족하면 포기한다.
+
+    `index` 를 주면 창 안의 거래를 **각각** 기준월 수준으로 환산한 뒤 분위수를 낸다
+    (규칙 5). 주지 않으면 예전과 **완전히 같은 값**을 낸다 — 보정은 선택이고, 켜지
+    않았는데 조용히 값이 달라지는 일은 없다.
+    """
     all_trades = list(trades)
     as_of = as_of or dt.date.today()
 
@@ -201,6 +211,10 @@ def fair_price_band(
             reason=(f"표본 {len(available)}건으로 최소 {MIN_SAMPLE}건에 미달합니다. "
                     f"최근 {ladder[-1]}개월까지 확장했으나 부족합니다."),
         )
+
+    # 시점 보정 — 창을 고른 **뒤에** 한다. 창 선택은 건수로만 정해지므로 보정과 무관하고,
+    # 순서를 바꾸면 보정 실패 시 창까지 달라져 재현이 안 된다.
+    chosen, adjustment = adjust_trades(chosen, index)
 
     prices = sorted(t.price_krw for t in chosen)
     median = int(statistics.median(prices))
@@ -225,6 +239,9 @@ def fair_price_band(
         period_months=chosen_months,
         expanded=expanded,
         floor_effect=effects,
+        # 보정을 **시도한 경우에만** 결과를 싣는다. index 를 안 준 호출에는 None 이 남아
+        # "보정 안 함"과 "보정 시도 안 함"이 구분된다(models.PriceBand 주석).
+        time_adjustment=adjustment if index is not None else None,
     )
 
 

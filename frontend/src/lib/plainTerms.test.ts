@@ -3,7 +3,7 @@
  * 서버가 문구를 바꾸면 치환이 안 걸릴 뿐, 문장을 잘못 재조립하는 일은 없어야 한다.
  */
 import { describe, expect, it } from "vitest";
-import { isInternalIdentifier, plainText, plainTexts } from "./plainTerms";
+import { isInternalIdentifier, plainReason, plainText, plainTexts } from "./plainTerms";
 
 describe("내부 식별자 판별", () => {
   it("코드 구분자(_ . -)를 가진 ASCII 토큰만 내부 식별자다", () => {
@@ -70,5 +70,38 @@ describe("실제로 화면에 새어나온 문장들", () => {
       "매물 신뢰도 점수",
       "학구도 미확보",
     ]);
+  });
+});
+
+/**
+ * 사유(reason) — 서버가 문장으로 줄 수도, 코드로 줄 수도 있다.
+ * 코드를 그대로 뱉으면 사용자는 `no_index` 를 읽는다. 모르는 코드는 **침묵**한다.
+ */
+describe("plainReason — 사유를 사람 말로", () => {
+  it("아는 코드는 사람 문장으로 바꾼다", () => {
+    expect(plainReason("no_index")).toContain("시장지수가 없어");
+    expect(plainReason("low_coverage")).toContain("지수가 모자라");
+    expect(plainReason("TOO_FEW")).toContain("최소 표본에 미달");
+  });
+
+  it("★ 모르는 코드는 화면에 내지 않는다 — 틀린 번역보다 침묵이 낫다", () => {
+    expect(plainReason("IDX_ERR_42")).toBeNull();
+    expect(plainReason("weirdcode")).toBeNull();
+    expect(plainReason("market-index.missing")).toBeNull();
+  });
+
+  it("서버가 한국어 문장을 주면 그대로 쓴다(식별자만 걷어낸다)", () => {
+    expect(plainReason("지역 시장지수가 없어 시점 보정을 하지 않았습니다")).toBe(
+      "지역 시장지수가 없어 시점 보정을 하지 않았습니다",
+    );
+    expect(plainReason("시점 보정을 하지 않았습니다(market_index)")).toBe(
+      "시점 보정을 하지 않았습니다",
+    );
+  });
+
+  it("값이 없으면 null 이다(빈 문자열을 만들어 내지 않는다)", () => {
+    expect(plainReason(null)).toBeNull();
+    expect(plainReason(undefined)).toBeNull();
+    expect(plainReason("   ")).toBeNull();
   });
 });

@@ -45,6 +45,7 @@ from app.domain.location.models import (
 )
 from app.domain.redevelopment.models import RedevProject
 from app.domain.valuation.models import ListingRow, TradeRow
+from app.domain.valuation.timeadjust import INDEX_METHOD, IndexPoint, MarketIndex
 from app.repositories.base import (
     STATUS_APPROVED,
     BBox,
@@ -1180,6 +1181,51 @@ class PostgisRepository:
             )
             for row in rows
         ]
+
+    # -- 시장 가격지수(시점 보정) ------------------------------------------
+    #
+    # ⚠️ 0행은 **"시장이 안 움직였다"가 아니라 "지수를 아직 안 만들었다"**이다.
+    #    도메인(`timeadjust.adjust_trades`)이 그 구분을 사유 문구로 낸다 —
+    #    지수가 없으면 보정하지 않고, 보정하지 않았다고 말한다(1.0 으로 가정하지 않는다).
+    #    표를 채우는 것은 배치다: `scripts/build_market_index.py`.
+    #
+    # ⚠️ `method` 를 **반드시 건다**(CR33-4). 표는 방법별로 값을 따로 보관하는데
+    #    (migration 015: "방법을 바꾸면 값이 달라지므로 섞이지 않게 기록한다"),
+    #    조회가 그걸 안 보면 v2 로 일부 지역만 재계산하는 날 `idx(A)/idx(B)` 가
+    #    시장 변화가 아니라 **방법 차이**를 재게 된다. 오류도 안 난다 — 값만 틀린다.
+    _MARKET_INDEX_SQL = text("""
+        SELECT ym, idx_value, sample_size, is_complete
+          FROM market_price_index
+         WHERE region_code = :region_code AND scope = :scope AND method = :method
+         ORDER BY ym
+    """)
+
+    def market_index(self, region_code: str, scope: str) -> MarketIndex:
+        """한 지역의 월별 시장지수. 없으면 **빈 지수**(points={}) 를 돌려준다.
+
+        빈 지수를 None 대신 돌려주는 이유: 호출부가 "지수를 조회했으나 없었다"와
+        "조회조차 안 했다"를 구분할 수 있어야 한다. 도메인은 둘 다 보정하지 않지만,
+        운영에서 배치가 안 돌고 있는 것과 배선이 안 된 것은 완전히 다른 사고다.
+
+        읽는 방법은 `INDEX_METHOD` 하나로 고정한다. 코드가 새 방법으로 바뀌었는데
+        배치를 아직 안 돌렸으면 0행 → **보정 안 함 + 사유**가 나간다(옛 방법 값을
+        새 방법인 척 쓰지 않는다).
+        """
+        with self._engine.connect() as conn:
+            rows = conn.execute(self._MARKET_INDEX_SQL, {
+                "region_code": region_code, "scope": scope, "method": INDEX_METHOD,
+            }).all()
+        # 표본 문턱·완결 판정은 **적재 시점에 이미 적용됐다**(build_market_index.py).
+        # 여기서 다시 판정하면 두 곳이 서로 다른 답을 낼 수 있으므로 저장값을 그대로 쓴다.
+        return MarketIndex(
+            region_code=region_code, scope=scope,
+            points={
+                row.ym: IndexPoint(ym=row.ym, value=float(row.idx_value),
+                                   sample_size=row.sample_size,
+                                   is_complete=row.is_complete)
+                for row in rows
+            },
+        )
 
     # -- 정비사업(재건축·재개발) -------------------------------------------
     #

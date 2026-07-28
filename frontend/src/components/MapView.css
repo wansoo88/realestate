@@ -69,16 +69,8 @@
   padding: var(--sp-2) var(--sp-2) var(--sp-2) var(--sp-3);
   border-radius: var(--r-pill);
   background: var(--material);
-  -webkit-backdrop-filter: blur(18px) saturate(180%);
-  backdrop-filter: blur(18px) saturate(180%);
   border: 0.5px solid var(--hairline);
   box-shadow: var(--shadow-1);
-}
-
-@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-  .map__density {
-    background: var(--bg-elev);
-  }
 }
 
 .map__density-text {

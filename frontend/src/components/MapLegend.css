@@ -4,17 +4,9 @@
   max-width: min(320px, calc(100vw - var(--sp-4) * 2));
   border-radius: var(--r-btn);
   background: var(--material);
-  -webkit-backdrop-filter: blur(18px) saturate(180%);
-  backdrop-filter: blur(18px) saturate(180%);
   border: 0.5px solid var(--hairline);
   box-shadow: var(--shadow-1);
   overflow: hidden;
-}
-
-@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-  .legend {
-    background: var(--bg-elev);
-  }
 }
 
 .legend__toggle {

@@ -467,6 +467,113 @@ def test_refresh_수명은_7일이다():
 
 
 # ---------------------------------------------------------------------------
+# 기동 점검이 **실제로 돈다** (SR29-1)
+#
+# 이 절이 지키는 것은 계산이 아니라 **호출**이다. `validate_runtime()` 은 오랫동안
+# 정확한 목록을 돌려줬고 아무도 부르지 않았다 — 그래서 `JWT_SECRET=""` 로도 앱이 뜨고
+# 빈 문자열로 서명된 토큰이 발급·검증됐다(승인제 우회 = 임의 user_id 위조).
+# 원장(SR-015)은 그동안 이 함수를 방어 근거로 인용했다. 함수만 있고 안 불리는 상태가
+# 재발하지 않도록, 여기서는 **앱이 뜨는지 안 뜨는지**로 판정한다.
+# ---------------------------------------------------------------------------
+
+def _app_with_env(monkeypatch, **env):
+    """주어진 환경으로 앱을 만든다. 설정 캐시는 반드시 비우고 들어간다."""
+    from app.core.config import get_settings
+
+    base = {"JWT_SECRET": "x" * 40, "FIELD_ENCRYPTION_KEY": "k" * 32,
+            "POSTGRES_PASSWORD": "pw", "DEBUG": "false"}
+    base.update(env)
+    for name, value in base.items():
+        monkeypatch.setenv(name, value)
+    get_settings.cache_clear()
+    try:
+        from app.main import create_app
+        from app.repositories.memory import InMemoryRepository
+        return create_app(repo=InMemoryRepository())
+    finally:
+        get_settings.cache_clear()
+
+
+@pytest.mark.parametrize("env,expect", [
+    ({"JWT_SECRET": ""}, "JWT_SECRET"),
+    ({"JWT_SECRET": "short"}, "JWT_SECRET"),
+    ({"JWT_SECRET": "x" * 31}, "JWT_SECRET"),          # 경계: 32자 미만
+    ({"FIELD_ENCRYPTION_KEY": "k" * 31}, "FIELD_ENCRYPTION_KEY"),
+    ({"ARGON2_MEMORY_KIB": "8192"}, "ARGON2_MEMORY_KIB"),
+])
+def test_치명적_설정이면_앱이_아예_뜨지_않는다(monkeypatch, env, expect):
+    """★ 변이: `create_app` 에서 `enforce_runtime_settings` 호출을 지우거나 경고
+    로그로 바꾸면 앱이 정상적으로 떠 버려 여기서 잡힌다.
+
+    특히 `JWT_SECRET=""` 는 **아무 오류도 내지 않는다** — 토큰 발급·검증이 그대로
+    성공한다. 그래서 '뜨지 않는 것'만이 관측 가능한 방어다.
+    """
+    from app.core.config import RuntimeConfigError
+
+    with pytest.raises(RuntimeConfigError) as exc:
+        _app_with_env(monkeypatch, **env)
+    assert expect in str(exc.value)
+    # 값은 어디에도 싣지 않는다 — 항목 이름만 나간다.
+    assert "x" * 31 not in str(exc.value)
+    assert "k" * 31 not in str(exc.value)
+
+
+def test_기동을_막는_문제와_경고만_하는_문제를_구분한다(monkeypatch):
+    """⚠️ 기동 차단은 **서비스를 죽이는 조치**다. 운영에서 효력조차 없는 설정으로
+    앱을 못 뜨게 하면 안 된다.
+
+    `COOKIE_SECURE=false` 는 운영에서 `refresh_cookie_secure` 가 구조적으로 True 로
+    되돌리므로(위 테스트) 아무 효력이 없다 → 경고만. 반면 `JWT_SECRET` 은 잘못돼도
+    앱이 **정상처럼 동작한다** → 차단.
+    """
+    app = _app_with_env(monkeypatch, COOKIE_SECURE="false")
+    assert app is not None, "효력 없는 설정으로 서비스를 죽이지 않는다"
+
+    from app.core.config import Settings
+
+    weak = Settings(jwt_secret="", field_encryption_key="k" * 32, postgres_password="")
+    fatal = weak.fatal_runtime_problems()
+    assert any("JWT_SECRET" in p for p in fatal)
+    # DB 비밀번호는 없으면 첫 접속에서 큰 소리로 죽는다(조용한 약화가 아니다) → 경고.
+    assert any("POSTGRES_PASSWORD" in p for p in weak.validate_runtime())
+    assert not any("POSTGRES_PASSWORD" in p for p in fatal)
+
+
+def test_개발환경에서는_경고만_하고_뜬다(monkeypatch, caplog):
+    """로컬에서 설정이 덜 채워졌다고 개발자가 앱을 못 띄우게 만들지는 않는다.
+    대신 **조용히 넘어가지도 않는다** — 로그에 항목 이름이 남는다."""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="app"):
+        app = _app_with_env(monkeypatch, DEBUG="true", JWT_SECRET="short")
+    assert app is not None
+    assert any("JWT_SECRET" in r.message for r in caplog.records), caplog.text
+
+
+def test_약한_서명키로는_토큰_발급_자체가_거부된다():
+    """2차 방어 — `create_app()` 을 안 타는 경로(스크립트·배치)가 생겨도 막힌다.
+
+    PyJWT 는 빈 키로도 **서명에 성공한다**(경고만 낸다). 그래서 라이브러리에 기대지 않고
+    사용 지점에서 막는다. 메시지에 값은 담지 않는다.
+    """
+    from app.core.security import MIN_JWT_SECRET_BYTES, create_token
+
+    for weak in ("", "short", "x" * (MIN_JWT_SECRET_BYTES - 1)):
+        with pytest.raises(ValueError, match="서명키"):
+            create_token(1, secret=weak)
+        assert create_token(1, secret="y" * MIN_JWT_SECRET_BYTES)   # 경계는 통과
+
+
+def test_정상_설정이면_기동_점검이_아무것도_남기지_않는다(monkeypatch, caplog):
+    """오탐이 있으면 사람이 로그를 안 보게 된다."""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="app"):
+        assert _app_with_env(monkeypatch) is not None
+    assert not [r for r in caplog.records if "기동 점검" in r.message], caplog.text
+
+
+# ---------------------------------------------------------------------------
 # refresh 쿠키 설정 (SR15-1)
 # ---------------------------------------------------------------------------
 

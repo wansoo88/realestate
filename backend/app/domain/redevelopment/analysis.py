@@ -119,28 +119,63 @@ def redact_cost_topic(text: str | None) -> str:
     return " ".join(kept).strip()
 
 
-#: 수집 원문을 도려낸 자리에 남기는 표식. 낱말 경계가 사라지지 않게 공백을 둔다
-#: ("…{zone}구역" 에서 zone 만 지우면 앞뒤 글자가 붙어 없던 낱말이 생긴다).
-_QUOTE_PLACEHOLDER = " ⟦수집원문⟧ "
-#: 인용문 하나가 이보다 짧으면 도려내지 않는다. 한두 글자짜리 값('원'·'1')이
-#: 문장 곳곳에서 지워지면 검사 대상 문장이 걸레가 되고, 그 구멍으로 우리 금액이 샌다.
+#: 인용문 하나가 이보다 짧으면 **인용 구간으로 세지 않는다.** 한두 글자짜리 값('원'·'1')을
+#: 인용으로 인정하면 그 조각들이 문장 곳곳을 덮어 우리가 쓴 금액까지 인용으로 읽힌다.
 _MIN_QUOTE_LEN = 2
 
 
-def strip_source_quotes(text: str, quotes: Iterable[str | None]) -> str:
-    """문장에서 **수집 원문 그대로 인용된 부분**을 도려낸다.
+def quoted_spans(text: str, quotes: Iterable[str | None]) -> list[tuple[int, int]]:
+    """`text` 안에서 **수집 원문이 그대로 인용된** 구간 `[start, end)` 들.
 
-    우리 문장은 `f"{project.sigungu} {project.zone_name} … 원문 '{raw_stage}'"` 처럼
-    외부 값을 그대로 끼워 만든다. 분담금 **금액 lint** 는 "우리가 지어낸 숫자"를
-    찾는 검사이므로, 검사 전에 외부에서 온 조각을 빼는 것이 정확한 대상 설정이다.
+    같은 인용문이 여러 번 나오면 전부 담는다(겹쳐도 무방 — 아래에서 합집합으로 쓴다).
     """
-    out = str(text)
+    body_text = str(text)
+    spans: list[tuple[int, int]] = []
     for quote in quotes:
         body = str(quote or "").strip()
-        if len(body) < _MIN_QUOTE_LEN or body not in out:
+        if len(body) < _MIN_QUOTE_LEN:
             continue
-        out = out.replace(body, _QUOTE_PLACEHOLDER)
-    return out
+        start = body_text.find(body)
+        while start != -1:
+            spans.append((start, start + len(body)))
+            # 자기 자신과 겹쳐 나오는 출현까지 찾는다(+len 이 아니라 +1).
+            # 덮는 범위는 **넓을수록 안전한 쪽**이다 — 좁게 잡으면 인용문 안의 금액이
+            # '우리 것'으로 오인돼 CR31-1 방향의 오탐(판정 사망)이 난다.
+            start = body_text.find(body, start + 1)
+    return spans
+
+
+def money_outside_quotes(text: str,
+                         quotes: Iterable[str | None] = ()) -> re.Match[str] | None:
+    """**인용 구간 밖에 한 글자라도 걸친** 첫 금액 토큰. 없으면 None.
+
+    왜 "지우고 찾기"가 아니라 "찾고 위치 보기"인가 (SR27-2 · CR32-3, 2026-07-28)
+    ---------------------------------------------------------------------------
+    예전에는 인용문을 표식으로 **치환한 뒤** 그 결과에서 주제어와 금액을 찾았다.
+    치환은 문자열을 바꾸는 일이라 **검사어까지 갈랐다** — 수집값 `raw_stage="분담"`
+    두 글자면 고지 문구의 `추가분담금` 이 `추가⟦…⟧금` 으로 쪼개져 주제어가 사라지고,
+    그 필드의 검사가 통째로 no-op 이 됐다(실측). 즉 **외부 데이터가 우리 검사를 끌 수
+    있었다** — '검사 대상 축소'가 아니라 성질이 다른 결함이다.
+
+    지금은 원문을 **바꾸지 않는다.** 금액 토큰을 원문에서 찾은 뒤 그 토큰이 인용
+    구간에 **완전히 덮여 있는지**만 본다. 덮여 있으면 인용(사실), 한 글자라도 밖으로
+    나오면 우리가 쓴 것이다. 그래서
+      · 치환이 없으니 주제어가 갈라지지 않는다 → 검사를 끌 수 없다.
+      · 인용문이 금액의 **일부**만 덮는 경우(`'억원'` 만 인용)도 막힌다 —
+        치환 방식에서는 남은 `1.2` 가 금액으로 안 읽혀 통과했다.
+      · CR31-1 은 그대로 고쳐진다: `제3원구역`·`1억원지구` 처럼 **인용문이 금액을
+        통째로 덮는** 경우는 여전히 통과한다(우리가 지어낸 숫자가 아니다).
+    """
+    body_text = str(text)
+    spans = quoted_spans(body_text, quotes)
+    covered = bytearray(len(body_text))
+    for start, end in spans:
+        covered[start:end] = b"\x01" * (end - start)
+    for match in _MONEY_RE.finditer(body_text):
+        start, end = match.span()
+        if not all(covered[start:end]):
+            return match
+    return None
 
 
 def assert_no_cost_estimate(*texts: str | None,
@@ -167,8 +202,17 @@ def assert_no_cost_estimate(*texts: str | None,
 
     이 함수의 존재 이유는 *"우리가 없는 금액을 지어내는 것"* 을 막는 것이다.
     수집한 구역명에 숫자와 '원'이 들어 있는 것은 **우리가 지어낸 것이 아니라 사실의
-    인용**이다. 그래서 검사 전에 인용문을 도려낸다 — 검사를 약하게 만드는 게 아니라
-    **검사 대상을 원래 의도대로 되돌리는** 것이다. 우리 서술 부분은 그대로 다 본다.
+    인용**이다. 그래서 인용 구간 안의 금액은 세지 않는다 — 검사를 약하게 만드는 게
+    아니라 **검사 대상을 원래 의도대로 되돌리는** 것이다.
+
+    ⚠️ **인용문이 줄이는 것은 '금액'뿐이다** (SR27-2 · CR32-3, 2026-07-28)
+    ---------------------------------------------------------------------
+    주제어는 **원문 전체**에서 찾고, 금액만 **인용 구간 밖**에서 찾는다. 둘을 같은
+    (치환된) 문자열에서 찾던 예전 방식은, 수집값이 우리 검사어와 겹치기만 하면
+    (`raw_stage="분담"` 두 글자) 고지 문구의 주제어가 갈라져 **그 필드의 검사가 통째로
+    꺼졌다.** 외부 데이터가 우리 방어의 스위치를 쥐는 상태였다.
+    주제어는 우리 고지 문구(`COST_DISCLOSURE`)가 항상 갖고 있으므로 원문에서 찾아도
+    오탐이 늘지 않고, 금액 판정은 `money_outside_quotes` 가 **위치**로 가른다.
 
     ⚠️ LLM 출력에는 이 함수를 쓰지 않는다 — `assert_no_cost_topic` 을 쓴다.
        LLM 에게는 분담금 재료를 주지 않으므로, 주제를 꺼내는 것 자체가 이상 신호다.
@@ -183,10 +227,9 @@ def assert_no_cost_estimate(*texts: str | None,
         if not text:
             continue
         body = str(text)
-        if quotes:
-            body = strip_source_quotes(body, quotes)
+        # 주제어: 원문 전체. 금액: 인용 구간 밖. (뒤섞으면 외부값이 검사를 끈다 — SR27-2)
         topic = _COST_TOPIC_RE.search(body)
-        money = _MONEY_RE.search(body)
+        money = money_outside_quotes(body, quotes) if topic else None
         if topic and money:
             raise CostEstimateError(
                 "추가분담금 금액은 공개 데이터에 없습니다 — 지어낸 숫자를 출력할 수 "

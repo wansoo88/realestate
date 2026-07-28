@@ -83,6 +83,19 @@ def test_모든_축에_담당_에이전트와_신호_설명이_있다():
             assert spec.coverage_gap, f"{axis}: partial 인데 빠진 범위 설명이 없다"
 
 
+def test_가격축은_호가가_없어_점수가_안_나온다는_사실을_숨기지_않는다():
+    """운영 DB 의 listing 은 0행이다(2026-07-28). 이 축은 **모든 후보에서** 비어 있다.
+
+    그런데도 `coverage=full` 이면 축 설명만 읽는 사람은 가격을 따졌다고 믿는다.
+    가격이 31% 비중을 차지하는 서비스에서 그건 가장 비싼 거짓말이다.
+    """
+    spec = AXIS_SPECS[AXIS_PRICE]
+    assert spec.coverage == "partial"
+    assert "호가" in spec.coverage_gap
+    # 실거래 추정가를 호가 갭 판정인 것처럼 말하지 않는다.
+    assert "순위로 쓰지 않습니다" in spec.coverage_gap
+
+
 def test_리스크축은_미구현_범위를_숨기지_않는다():
     """risk-auditor(권리관계·깡통전세)는 2차 기능이다. 있는 척하면 안 된다."""
     gap = AXIS_SPECS[AXIS_RISK].coverage_gap

@@ -28,11 +28,23 @@ from app.domain.location.models import (
     TransitHope,
     TransitPlan,
 )
+from app.domain.location.school_quality import (
+    COMPARABLE_ACHIEVEMENT_SOURCES,
+    TAG_DEFINITION,
+    TOP_PERCENTILE_THRESHOLD,
+    AchievementFact,
+    SchoolDistrictTag,
+    assess_school_district_tag,
+)
 
 __all__ = [
+    "COMPARABLE_ACHIEVEMENT_SOURCES",
     "BUILDING_ESTIMATE_BASIS",
     "BUILDING_ESTIMATE_CONFIDENCE",
     "PLAN_STATUS_CONFIDENCE",
+    "TAG_DEFINITION",
+    "TOP_PERCENTILE_THRESHOLD",
+    "AchievementFact",
     "BuildingEstimate",
     "BuildingLocationFact",
     "HazardFact",
@@ -40,11 +52,13 @@ __all__ = [
     "LocationAssessment",
     "LocationFacts",
     "PoiFact",
+    "SchoolDistrictTag",
     "SchoolFact",
     "StationFact",
     "TransitHope",
     "TransitPlan",
     "assess_infra",
+    "assess_school_district_tag",
     "assess_school",
     "assess_transit",
     "estimate_buildings",

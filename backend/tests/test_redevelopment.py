@@ -1059,11 +1059,107 @@ def test_수집_원문_제외가_우회로가_되지_않는다():
             source_quotes=("제3원구역", "조합설립"))
 
 
-def test_인용문이_짧으면_도려내지_않는다():
-    """한두 글자 인용을 지우면 검사 문장이 걸레가 되고 그 구멍으로 금액이 샌다."""
+@pytest.mark.parametrize("text, quotes", [
+    ("분담금 3억원", ("원", "억")),
+    # ★ 한 글자짜리 조각들이 금액 토큰을 **통째로** 덮는 형태. `_MIN_QUOTE_LEN` 이
+    #   없으면 이 조합만으로 우리 금액 전체가 '인용'으로 읽혀 통과한다.
+    ("분담금 3억원", ("3", "억", "원")),
+    ("분담금은 1.2억원입니다", ("1", ".", "2", "억", "원")),
+])
+def test_인용문이_짧으면_인용_구간으로_세지_않는다(text, quotes):
+    """★ 변이 가드 — `_MIN_QUOTE_LEN` 을 1 로 낮추면 여기서 죽는다.
+
+    한두 글자짜리 값('원'·'1')을 인용으로 인정하면, 그 조각들이 문장 곳곳을 덮어
+    우리가 쓴 금액까지 인용으로 읽힌다.
+    """
     with pytest.raises(CostEstimateError):
-        # '원'(1글자)을 인용문이라 주장해도 문장에서 지워지지 않는다.
-        assert_no_cost_estimate("분담금 3억원", source_quotes=("원", "억"))
+        assert_no_cost_estimate(text, source_quotes=quotes)
+
+
+# ---------------------------------------------------------------------------
+# SR27-2 / CR32-3 — **외부 수집값이 이 검사를 끌 수 없다**
+#
+# CR31-1 조치(인용문 제외)의 첫 구현은 인용문을 표식으로 **치환한 뒤** 그 결과에서
+# 주제어와 금액을 찾았다. 치환은 문자열을 바꾸는 일이라 우리 **검사어까지 갈랐다** —
+# `raw_stage="분담"` 두 글자면 고지 문구의 `추가분담금` 이 쪼개져 주제어가 사라지고,
+# 그 필드의 lint 가 통째로 no-op 이 됐다. '검사 대상 축소'가 아니라
+# **외부 데이터가 방어의 스위치를 쥐는** 상태였다.
+#
+# 지금 규칙은 두 줄이다:
+#   · 주제어는 **원문 전체**에서 찾는다(치환하지 않으므로 갈라지지 않는다).
+#   · 금액은 **인용 구간 밖에 한 글자라도 걸치면** 우리 것이다.
+# ---------------------------------------------------------------------------
+
+#: 우리(코드)가 쓴 문장. 고지 문구와 같은 주제어를 갖는다.
+_OUR_SENTENCE = "추가분담금은 조합 내부 자료라 확인할 수 없습니다. 예상 분담금 1억 2천만 원."
+
+
+@pytest.mark.parametrize("quote", [
+    "분담",        # ← SR27-2 실측: 이 두 글자로 lint 가 통째로 꺼졌다
+    "분담금",
+    "추가분담금",
+    "부담",
+    "환급",
+    "확인할 수 없습니다",   # 우리 문장의 일부를 인용이라 주장해도 마찬가지
+])
+def test_인용문이_주제어를_삼켜도_검사가_꺼지지_않는다(quote):
+    """★ 변이 가드 — 주제어 탐색을 다시 '인용 제거본'에서 하면 여기서 죽는다.
+
+    수집값이 우리 검사어와 겹친다는 이유로 검사가 무력화되면, 그 검사는 외부
+    데이터가 끌 수 있는 스위치다. 인용문이 줄여도 되는 것은 **금액**뿐이다.
+    """
+    with pytest.raises(CostEstimateError):
+        assert_no_cost_estimate(_OUR_SENTENCE, source_quotes=(quote,))
+
+
+@pytest.mark.parametrize("quote", [
+    "1.2억",      # 금액 토큰의 앞부분만 인용
+    "억원",        # 단위만 인용
+    "2억",        # 아예 다른 금액을 인용
+])
+def test_인용문이_금액을_일부만_덮으면_우리_금액이다(quote):
+    """★ 인용 구간에 **완전히** 덮인 금액만 인용이다.
+
+    치환 방식에서는 `'억원'` 만 인용해도 남은 `1.2` 가 금액으로 안 읽혀 통과했다.
+    위치로 판정하면 토큰이 인용 밖으로 한 글자라도 나오는 순간 우리 것이다.
+    """
+    with pytest.raises(CostEstimateError):
+        assert_no_cost_estimate("분담금은 약 1.2억원으로 예상됩니다.", source_quotes=(quote,))
+
+
+def test_인용_구간에_완전히_덮인_금액만_통과한다():
+    """경계의 반대쪽 — 인용문이 금액을 통째로 덮으면 그건 **사실의 인용**이다.
+
+    이 성질이 곧 CR31-1 해소의 본체다(`1억원지구` 하나로 job 이 죽지 않는 이유).
+    """
+    from app.domain.redevelopment.analysis import money_outside_quotes
+
+    text = "성북구 1억원지구 재건축 구역에 포함됩니다. " + COST_DISCLOSURE
+    assert money_outside_quotes(text, ("1억원지구",)) is None
+    # 같은 문장에 **우리가** 금액을 한 줄 더 쓰면 그건 잡힌다.
+    poisoned = text + " 예상 분담금은 3억원입니다."
+    hit = money_outside_quotes(poisoned, ("1억원지구",))
+    assert hit is not None and hit.group(0) == "3억원"
+
+
+def test_인용문이_여러_번_나와도_전부_인용으로_센다():
+    """같은 구역명이 rationale 에 두 번 인용되는 문장(evidence 합류)에서도 안 죽는다."""
+    from app.domain.redevelopment.analysis import money_outside_quotes
+
+    text = "1억원지구 재건축입니다. 원문 '1억원지구' 기준입니다. " + COST_DISCLOSURE
+    assert money_outside_quotes(text, ("1억원지구",)) is None
+
+
+def test_인용_구간은_겹치는_출현까지_합쳐서_센다():
+    """★ 변이 가드 — 출현 탐색을 `start+len`(겹침 무시)으로 좁히면 여기서 죽는다.
+
+    합성 문자열이다(실데이터 구역명은 자기 자신과 겹치지 않는다). 고정하는 것은
+    **성질**이다: 인용 구간은 모든 출현의 **합집합**이고, 좁게 잡으면 인용문 안의
+    금액 꼬리가 '우리 것'으로 오인돼 판정이 죽는다 — CR31-1 과 같은 방향의 오탐이다.
+    """
+    # '1억1' 은 '1억1억1원' 안에서 offset 0 과 2 에 **겹쳐** 나온다.
+    # 합집합 [0,5) 로 덮으면 금액 토큰('1억'·'1억')이 전부 인용 안이다.
+    assert_no_cost_estimate("분담금 1억1억1원", source_quotes=("1억1",))
 
 
 @pytest.mark.parametrize("text, expected", [
@@ -1116,6 +1212,84 @@ def test_분담금_방어가_걸려도_추천은_살아남는다(monkeypatch):
     assert "뜻이 아니라" in " ".join(redev["missing"])
     # ④ 조용히 넘어가지 않는다 — 결과 notes 에 몇 건인지 적힌다.
     assert any("내부 금액 검사" in n and "1건" in n for n in out["notes"]), out["notes"]
+
+
+# ---------------------------------------------------------------------------
+# SR27-1 / CR32-4 — **막은 금액을 오류 메시지로 되돌려 주지 않는다**
+#
+# 가드가 발화하면 예전에는 `detail["cost_guard_error"]` 에 예외 문자열이 실렸고,
+# 그 문자열은 `주제어 '분담' + 금액 '1억 2천만 원'` 처럼 **막은 값을 그대로 인용**해
+# 사용자 카드까지 나갔다(실측). 방어의 실패 경로가 정확히 방어 대상을 보여 주는,
+# SR-025 가 422 `input` 을 지우며 한 번 닫았던 패턴이다.
+# ---------------------------------------------------------------------------
+
+#: 발화용 수집값. 카드 어디에도 남으면 안 되는 금액 토큰을 품고 있다.
+_MONEY_ZONE = "추가분담금 1억 2천만 원 예상구역"
+_MONEY_TOKENS = ("1억 2천만 원", "1억 ", "2천만 원", "1억", "2천만")
+
+
+def _fire_cost_guard(monkeypatch, zone_name=_MONEY_ZONE):
+    """**현실 경로**로 가드를 발화시킨다 — 새 외부 필드를 문장에 끼우고
+    `_source_quotes` 갱신을 잊은 상태(= docstring 이 대비한다고 말한 회귀)를 만든다.
+
+    가짜 예외를 주입하지 않는 이유: 실제 lint 메시지의 **모양**(금액을 인용한다)이
+    이 테스트의 대상이기 때문이다. 지어낸 메시지로는 그 성질을 고정하지 못한다.
+    """
+    from app.agents.orchestrator import run_mvp_pipeline
+    from app.domain.redevelopment import analysis as A
+
+    monkeypatch.setattr(A, "_source_quotes", lambda project: ())
+    cand = _pipeline_candidate(
+        1, "재건축단지",
+        redevelopment=_project("조합설립", STAGE_ASSOCIATION, zone_name=zone_name))
+    return run_mvp_pipeline(_pipeline_ctx([cand]), llm=None)
+
+
+def test_강등_카드_어디에도_차단한_금액이_남지_않는다(monkeypatch):
+    """★ 변이 가드 — `detail` 에 `cost_guard_error` 를 되살리면 여기서 죽는다.
+
+    카드 JSON **전체**를 훑는다. 특정 키만 보면 다음 사람이 다른 키로 같은 값을
+    싣는 순간 조용히 통과한다.
+    """
+    import json
+
+    out = _fire_cost_guard(monkeypatch)
+    redev = out["items"][0]["redevelopment"]
+
+    # ① 발화는 실제로 일어났다(테스트가 자기충족이 되지 않게 먼저 확인).
+    assert redev["detail"]["cost_guard_blocked"] is True
+    # ② 진단문 키 자체가 없다.
+    assert "cost_guard_error" not in redev["detail"], redev["detail"]
+    # ③ 응답 전체에 금액 토큰이 없다 — 어느 키로도.
+    blob = json.dumps(out, ensure_ascii=False, default=str)
+    for token in _MONEY_TOKENS:
+        assert token not in blob, f"차단한 금액 {token!r} 이 응답에 남아 있습니다"
+    # 수집 원문(구역명)도 함께 사라진다 — 강등 카드는 그 구역을 인용하지 않는다.
+    assert _MONEY_ZONE not in blob
+
+
+def test_금액을_지우되_조용해지지는_않는다(monkeypatch, caplog):
+    """막았다는 **사실**은 세 곳에 남는다 — 사용자 문구 · 결과 notes · 운영 로그.
+
+    "응답에서 뺐다"가 "아무 일도 없었던 것처럼 보인다"가 되면 그건 조용한 실패다.
+    """
+    import logging
+
+    with caplog.at_level(logging.ERROR, logger="agents"):
+        out = _fire_cost_guard(monkeypatch)
+
+    redev = out["items"][0]["redevelopment"]
+    # ① 사용자: '없다'가 아니라 '판정하지 못했다'.
+    assert redev["available"] is False
+    assert redev["verdict"] == "정비사업 판정 보류"
+    assert "판정하지 못했다" in " ".join(redev["missing"])
+    # ② 결과 notes: 몇 건인지 적힌다.
+    assert any("내부 금액 검사" in n and "1건" in n for n in out["notes"]), out["notes"]
+    # ③ 운영자: 원인(주제어·금액)이 로그에는 남는다 — 여기까지 지우면 고칠 수 없다.
+    logged = "\n".join(r.getMessage() + (str(r.exc_info[1]) if r.exc_info else "")
+                       for r in caplog.records)
+    assert "분담금 검사에 걸려" in logged
+    assert "1억 " in logged, "원인 문자열이 로그에도 없으면 운영자가 고칠 수 없다"
 
 
 def test_Finding_변환에서_걸려도_추천은_살아남는다(monkeypatch):

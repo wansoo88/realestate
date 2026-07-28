@@ -87,18 +87,44 @@ class PriceBand:
     expanded: bool = False
     floor_effect: dict[str, float] = field(default_factory=dict)
     reason: str | None = None          # available=False 일 때 왜인지
+    #: 시점 보정 결과(`app.domain.valuation.timeadjust.TimeAdjustment`).
+    #:
+    #: ⚠️ **None 은 "보정했다"가 아니라 "보정을 시도조차 안 했다"** 이다(지수 미전달).
+    #: 보정을 시도했으면 성공이든 실패든 객체가 들어 있고 사유가 남는다. 호출부는
+    #: `time_adjustment.applied` 로만 판단해야 한다 — 값의 유무로 판단하면
+    #: 미보정 밴드를 보정된 것으로 오해한다.
+    #: 타입을 `Any` 로 둔 이유: models 는 최하위 계층이라 timeadjust 를 import 하면
+    #: 순환이 된다(timeadjust 가 TradeRow·MIN_SAMPLE 을 여기서 가져간다).
+    time_adjustment: Any | None = None
+
+    @property
+    def is_time_adjusted(self) -> bool:
+        """이 밴드가 실제로 시점 보정된 값인가. **표시 문구가 이 값으로 갈린다.**"""
+        return bool(self.time_adjustment is not None and self.time_adjustment.applied)
+
+    @property
+    def as_of_label(self) -> str | None:
+        """이 밴드가 말하는 **시점**. 보정했으면 기준월, 아니면 None(= 시점 불명 혼합)."""
+        return self.time_adjustment.reference_ym if self.is_time_adjusted else None
 
     def to_evidence(self, source: str = "국토교통부 실거래가",
                     as_of: dt.date | None = None) -> list[dict[str, Any]]:
         if not self.available:
             return []
+        adj = self.time_adjustment
+        claim = f"중위 실거래가 {self.median_krw:,}원"
+        if self.is_time_adjusted:
+            # 보정된 숫자를 원본 실거래 중위처럼 내보내면 안 된다 — 다른 값이다.
+            claim = f"{adj.reference_ym} 시점 환산 중위 {self.median_krw:,}원"
         return [{
-            "claim": f"중위 실거래가 {self.median_krw:,}원",
+            "claim": claim,
             "source": source,
             "as_of": (as_of or dt.date.today()).isoformat(),
             "data_rows": self.sample_size,
             "period_months": self.period_months,
             "expanded": self.expanded,
+            "basis": adj.basis if adj is not None else "trade_raw",
+            "time_adjusted": self.is_time_adjusted,
         }]
 
 

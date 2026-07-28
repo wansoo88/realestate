@@ -817,6 +817,65 @@ describe("우측 패널 · 목록 필터", () => {
     expect(unknown.textContent).toContain("세대수 미상");
   });
 
+  /**
+   * CR32-5 — `GET /map/complexes` 가 이제 `nearest_station`·`redevelopment` 를 실제로
+   * 싣는다(client.ts 주석 정정). 그 값이 "주변 단지" 목록의 배지로 실제로 이어지는지,
+   * 그리고 `available:false` 를 "재건축 아님"으로 접지 않는지를 여기서 고정한다.
+   *
+   * `available:false` 를 `no` 로 접는 회귀가 생기면: ① 아래 칩을 눌렀을 때 판정 불가
+   * 안내가 "2건"이 아니라 "1건"(필드 자체가 없는 단지만)으로 줄고, ② "판정 불가 항목도
+   * 보기"를 눌러도 `available:false` 단지가 영영 돌아오지 않는다(matchTags 가 `no` 를
+   * 즉시 배제하고 `unknown` 목록에 넣지 않기 때문 — lib/listFilter.ts).
+   */
+  it("지도 응답의 nearest_station · redevelopment 로 배지가 붙고, available:false 는 미확인으로 남는다", async () => {
+    const user = mount([
+      complexItem({
+        id: 20,
+        name: "역세권재건축단지",
+        nearest_station: { name: "가나역", distance_m: 300, basis: "straight_line" },
+        redevelopment: { available: true, stage: "조합설립인가" },
+      }),
+      complexItem({
+        id: 21,
+        name: "미확인재건축A",
+        nearest_station: { distance_m: 900, basis: "straight_line" }, // 500m 밖 — 역세권 아님
+        redevelopment: { available: false }, // ⚠️ "없음"이 아니라 "미확인"
+      }),
+      complexItem({ id: 22, name: "미확인재건축B" }), // 필드 자체가 없는 경우도 미확인
+    ]);
+    render(<Authenticated />);
+
+    // ① 확인된 사실에는 실제로 배지가 붙는다.
+    const confirmed = (await screen.findByText("역세권재건축단지")).closest(
+      "article",
+    ) as HTMLElement;
+    expect(confirmed.querySelector(".tag--near_station")?.textContent).toContain("역세권");
+    expect(confirmed.querySelector(".tag--redevelopment")?.textContent).toContain("재건축");
+
+    // ② 500m 밖이라 역세권은 확실히 "아니다" — 배지 없음(오탐이 아니라 정상 미해당).
+    const unknownA = screen.getByText("미확인재건축A").closest("article") as HTMLElement;
+    expect(unknownA.querySelector(".tag--near_station")).toBeNull();
+    // ③ available:false 는 "재건축 아님"이 아니라 "미확인" — 기본 화면엔 배지가 없다.
+    expect(unknownA.querySelector(".tag--redevelopment")).toBeNull();
+
+    // ④ 재건축 칩을 누르면 확실한 1건만 남고, 미확인 2건은 "제외"로 집계된다
+    //    (필드가 없는 단지와 available:false 인 단지가 **같은 취급**을 받아야 한다).
+    await user.click(screen.getByRole("button", { name: /재건축 1건/ }));
+    expect(screen.queryByText("미확인재건축A")).toBeNull();
+    expect(screen.queryByText("미확인재건축B")).toBeNull();
+    expect(
+      screen.getByText(/정비사업 확인 정보가 없어 판정할 수 없는 2건은 제외했습니다/),
+    ).toBeTruthy();
+
+    // ⑤ "판정 불가 항목도 보기"를 누르면 두 단지 모두 되살아나고, "아님"이 아니라
+    //    "판정 불가"라고 스스로 밝힌다.
+    await user.click(screen.getByRole("button", { name: "판정 불가 항목도 보기" }));
+    const revivedA = (await screen.findByText("미확인재건축A")).closest("article") as HTMLElement;
+    expect(within(revivedA).getByText(/재건축 판정 불가/)).toBeTruthy();
+    const revivedB = screen.getByText("미확인재건축B").closest("article") as HTMLElement;
+    expect(within(revivedB).getByText(/재건축 판정 불가/)).toBeTruthy();
+  });
+
   it("예산 내 토글을 켜면 초과 단지가 빠지고 **몇 건 숨겼는지** 말한다", async () => {
     const user = mount();
     render(<Authenticated />);

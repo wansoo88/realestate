@@ -51,3 +51,55 @@ export function plainText(text: string): string {
 export function plainTexts(texts: readonly string[]): string[] {
   return texts.map(plainText);
 }
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * 서버 "사유" → 사람 말 (CR33-3)
+ *
+ * 시점 보정을 **왜 못 했는지**(`price_band.time_adjustment.reason`) 같은 값은
+ * 지금은 완결된 한국어 문장으로 오지만, 서버가 코드(`no_index`)로 바꿔 보낼 수 있다.
+ * 그때 화면이 그대로 뱉으면 사용자는 `no_index` 를 읽게 된다.
+ *
+ * 그래서 사유 해석은 **이 한 곳에만** 둔다(화면마다 매핑을 흩뿌리면 반드시 갈라진다).
+ * 원칙은 plainText 와 같다 — **모르면 지어내지 않고 침묵한다.**
+ * ───────────────────────────────────────────────────────────────────────── */
+
+const HANGUL_RE = /[가-힣]/;
+
+/**
+ * 알려진 사유 코드 → 사용자 문장.
+ * 키는 서버 상수(`timeadjust.py::REASON_*`)에 대응하는 snake_case 코드다.
+ * 여기 없는 코드는 **번역하지 않고 감춘다**(틀린 번역보다 침묵이 낫다).
+ */
+const REASON_TEXT: Record<string, string> = {
+  no_index: "이 지역의 시장지수가 없어 시점 보정을 하지 못했습니다",
+  no_reference: "기준으로 삼을 만큼 자료가 찬 달이 없어 시점 보정을 하지 못했습니다",
+  no_reference_month: "기준으로 삼을 만큼 자료가 찬 달이 없어 시점 보정을 하지 못했습니다",
+  low_coverage: "거래 시점을 덮는 지수가 모자라 시점 보정을 하지 못했습니다",
+  too_few: "보정할 수 있는 거래가 최소 표본에 미달해 시점 보정을 하지 못했습니다",
+  too_few_samples: "보정할 수 있는 거래가 최소 표본에 미달해 시점 보정을 하지 못했습니다",
+  out_of_range: "지수 보정 배율이 비정상 범위라 시점 보정을 하지 않았습니다",
+  ratio_out_of_range: "지수 보정 배율이 비정상 범위라 시점 보정을 하지 않았습니다",
+};
+
+/**
+ * 사유 값을 화면에 낼 문장으로 바꾼다. 낼 수 없으면 **null**(빈 문자열이 아니다).
+ *
+ * 판정 순서
+ *  1. 아는 코드 → 사람 문장으로 번역
+ *  2. 사람이 읽는 문장(한글이 있거나 공백으로 띄운 말) → 내부 식별자만 걷어내고 그대로
+ *  3. 그 외(공백 없는 ASCII 토큰 = 코드 모양) → **null**. 모르는 코드는 노출하지 않는다.
+ */
+export function plainReason(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const key = raw.trim();
+  if (key === "") return null;
+
+  const mapped = REASON_TEXT[key] ?? REASON_TEXT[key.toLowerCase()];
+  if (mapped) return mapped;
+
+  // 한글도 없고 띄어쓰기도 없으면 사람에게 보여줄 문장이 아니다(예: "IDX_ERR_42").
+  if (!HANGUL_RE.test(key) && !/\s/.test(key)) return null;
+
+  const text = plainText(key);
+  return text === "" ? null : text;
+}

@@ -9,7 +9,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.api.routes import router
-from app.core.config import get_settings
+from app.core.config import enforce_runtime_settings, get_settings
 from app.core.masking import install_log_masking
 from app.core.security import HashCapacityError, mask_sensitive
 
@@ -32,7 +32,13 @@ def create_app(*, repo=None) -> FastAPI:
     # 로그로 나가는 문자열에서 비밀을 지운다(SR17-3). 이 프로세스에서 가장 위험한 경로는
     # 아래 `logger.exception` 이다 — SQLAlchemy 예외는 접속 DSN(비밀번호 포함)을,
     # 외부 API 예외는 요청 URL(인증키 포함)을 메시지에 그대로 담는다.
+    # ⚠️ 기동 점검보다 **먼저** 설치한다 — 점검 로그가 나가는 경로도 마스킹을 타야 한다.
     install_log_masking()
+
+    # ⛔ 설정이 잘못됐으면 여기서 멈춘다(SR29-1). 경고만 찍고 뜨면 아무도 안 본다:
+    #    `JWT_SECRET=""` 로도 토큰은 발급·검증되고, 서비스는 **정상으로 보인다.**
+    #    무엇을 막고 무엇을 경고로 둘지의 근거는 `Settings._runtime_checks` 에 있다.
+    enforce_runtime_settings(settings, logger=logger)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):

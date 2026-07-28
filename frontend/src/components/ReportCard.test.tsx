@@ -94,6 +94,122 @@ const TRADE: RecommendationItem = {
   ],
 };
 
+/**
+ * CR33-3 — 밴드 중위가 **시점 환산된 값**일 때 화면이 그 사실을 말하는가.
+ *
+ * 직전 라운드에 서버가 각 거래를 기준월로 환산하기 시작했다(서울 밴드 +8.33% 과소평가 결함).
+ * 그런데 카드는 그 값을 여전히 "국토교통부 실거래가"라고만 불렀다 — 같은 화면의 제외 사유는
+ * "2026-06 시점 환산 중위"라고 말하는데 통과한 후보만 안 말하는 상태였다.
+ *
+ * 여기서 고정하는 것은 세 갈래다: 보정됨 / 보정 안 됨(사유) / **필드 없음(침묵)**.
+ */
+const ADJUSTED_BAND = {
+  p25_krw: 1_380_000_000,
+  median_krw: 1_400_000_000,
+  p75_krw: 1_450_000_000,
+  sample_size: 37,
+  period_months: 6,
+  expanded: false,
+  source: "국토교통부 실거래가",
+  as_of_ym: "2026-06",
+  time_adjusted: true,
+  time_adjustment: {
+    applied: true,
+    reference_ym: "2026-06",
+    scope: "sigungu",
+    region_code: "11680",
+    shift_pct: 4.2,
+    coverage_pct: 96.7,
+    sample_size: 37,
+    basis: "trade_time_adjusted",
+    reason: null,
+  },
+} as const;
+
+const RAW_BAND = {
+  ...ADJUSTED_BAND,
+  as_of_ym: null,
+  time_adjusted: false,
+  time_adjustment: {
+    applied: false,
+    reference_ym: null,
+    scope: "sido",
+    coverage_pct: 41.2,
+    reason: "거래 시점의 지수 확보율이 낮아 시점 보정을 하지 않았습니다",
+  },
+} as const;
+
+describe("적정가 밴드의 시점(CR33-3)", () => {
+  it("★ 보정됐으면 기준월을 밝힌다 — 출처보다 **앞에서**", () => {
+    render(<ReportCard item={{ ...TRADE, price_band: { ...ADJUSTED_BAND } }} />);
+    const line = screen.getByText(/적정가 밴드/).textContent ?? "";
+
+    expect(line).toContain("2026-06 시점 환산");
+    // 순서가 뒤집히면 "국토교통부 실거래가 … 2026-06" 으로 읽혀 원본 체결가처럼 보인다
+    expect(line.indexOf("2026-06 시점 환산")).toBeLessThan(line.indexOf("국토교통부 실거래가"));
+  });
+
+  it("★ 보정된 값을 '국토교통부 실거래가'라고만 부르지 않는다", () => {
+    const { container } = render(<ReportCard item={{ ...TRADE, price_band: { ...ADJUSTED_BAND } }} />);
+    const text = container.textContent ?? "";
+    // 밴드 문장에서 출처 바로 앞에 시점 꼬리표가 붙어 있어야 한다
+    expect(text).not.toMatch(/중위 [^()]*\(국토교통부 실거래가/);
+  });
+
+  it("⛔ '현재 시세'라고 쓰지 않는다(기준월은 오늘이 아니라 완결된 달)", () => {
+    const { container } = render(<ReportCard item={{ ...TRADE, price_band: { ...ADJUSTED_BAND } }} />);
+    expect(container.textContent ?? "").not.toContain("현재 시세");
+  });
+
+  it("보정된 중위가 기준가면 큰 금액의 라벨도 기준월을 말한다", () => {
+    render(<ReportCard item={{ ...TRADE, price_band: { ...ADJUSTED_BAND } }} />);
+    expect(screen.getByText("2026-06 시점 환산 추정가")).toBeTruthy();
+    expect(screen.queryByText("최근 실거래 기준 추정가")).toBeNull();
+  });
+
+  it("보정 안 됐으면 그 사실과 사유를 말한다", () => {
+    render(<ReportCard item={{ ...TRADE, price_band: { ...RAW_BAND } }} />);
+    expect(screen.getByText(/시점 보정 없음/)).toBeTruthy();
+    expect(screen.getByText(/특정 시점의 가격이 아닙니다/)).toBeTruthy();
+    expect(screen.getByText(/지수 확보율이 낮아/)).toBeTruthy();
+    // 보정하지 않은 값에 기준월을 붙이면 그게 거짓말이다
+    expect(screen.queryByText(/시점 환산/)).toBeNull();
+  });
+
+  it("사유가 내부 코드로 와도 화면에는 코드가 나가지 않는다", () => {
+    const { container } = render(
+      <ReportCard
+        item={{
+          ...TRADE,
+          price_band: {
+            ...RAW_BAND,
+            time_adjustment: { applied: false, reason: "IDX_ERR_42" },
+          },
+        }}
+      />,
+    );
+    expect(container.textContent ?? "").not.toContain("IDX_ERR_42");
+    // 그래도 "보정 안 됨"이라는 사실 자체는 남는다
+    expect(screen.getByText(/시점 보정 없음/)).toBeTruthy();
+  });
+
+  it("★ 서버가 시점 필드를 안 주면(구버전) 아무 시점도 주장하지 않는다", () => {
+    const { container } = render(<ReportCard item={TRADE} />);
+    const text = container.textContent ?? "";
+    expect(text).not.toContain("시점 환산");
+    expect(text).not.toContain("시점 보정 없음");
+    // 밴드 자체는 그대로 보인다(정보를 없애는 게 아니라 시점만 말하지 않는 것)
+    expect(screen.getByText(/적정가 밴드/).textContent).toContain("국토교통부 실거래가");
+    expect(screen.getByText("최근 실거래 기준 추정가")).toBeTruthy();
+  });
+
+  it("호가 기준 후보는 밴드가 환산돼도 큰 금액은 '호가'다", () => {
+    render(<ReportCard item={{ ...LISTING, price_band: { ...ADJUSTED_BAND } }} />);
+    expect(screen.getAllByText("호가").length).toBeGreaterThan(0);
+    expect(screen.getByText(/적정가 밴드/).textContent).toContain("2026-06 시점 환산");
+  });
+});
+
 describe("price_basis=listing", () => {
   it("호가와 적정가 갭을 보여준다", () => {
     render(<ReportCard item={LISTING} />);

@@ -1,127 +1,188 @@
 {
  "code_review": {
   "status": "passed",
-  "id": "CR-032",
+  "id": "CR-034",
   "date": "2026-07-28",
-  "at": "2026-07-28T08:40:00+09:00",
+  "at": "2026-07-28T23:56:00+09:00",
   "deploy_ready": true,
-  "deploy_blocker_note": "배포 시 CR32-1(nginx gzip_types application/json) 함께 처리할 것 — 코드 아님, 배포 설정 1줄",
-  "scope": "c70b54c 이후 미커밋 44파일 2라운드 — CR31-1 조치(source_quotes 인용 제외 · _MONEY_RE 자릿수 하한 · CostGuardError 후보 단위 강등) · MAP-2(/map/complexes LATERAL 2개로 nearest_station·redevelopment) · PERF-1(학구 3벌→1벌) · REC-7(후보 단지 상한 50→120) · FE-4(use_saved_conditions 폴백) · FE-5(effectiveWeights) · CR31-2(summary_basis 화면 노출) · UX-5(--material 불투명) · MAP-3(장소검색 조용한 실패 제거) · 조건 레지스트리 redevelopment 축 + 증명",
+  "notes": "PASS - CR-033 차단 2건 모두 해소를 결과로 확인. CR33-1: 운영 DB 조회로 sigungu 기준월 2026-07 = 0곳, 2026-06/07 전 지역 미완결 확인. idx_value 가 CR-033 기록과 소수 6자리까지 동일해 '플래그만 바뀜'이 대조 확인됨. 경계는 부동산거래신고법 제3조(계약일로부터 30일) 근거 + as_of 1,461일 x 대상월 60개 = 87,660조합 전수 대조 불일치 0건으로 검증. 2026-06 동반 폐쇄는 옳은 동작(6/30 계약 신고기한 7/30), 7/31 이후 열리는 것도 옳다(새 정보로 열리는 것). 15개 구 시도->시군구 tie-break 전환은 의도된 동작이며 적재값 대조 결과 정확도가 올라간 방향(41131 중원 +14.3% vs 경기 +4.9% / 11650 서초는 서울 지수로는 과다보정이었다). CR33-3: 카드 밴드줄·헤드라인·evidence·rationale·notes 전 경로에서 보정값을 원본처럼 부르는 경로 소멸 확인, 세 갈래(보정됨/안 됨/모름)와 순서가 테스트로 고정. CR33-2 는 옛 정책을 재구현해 같은 테스트 입력에 태워 판별력 직접 확인(현재 11 vs 옛 11140, 커버리지 동일 1.0). CR33-4/5 CLOSE. '못 고쳤다'고 보고한 건수검사 오탐은 'ym=2026-05 AND sample>=150 AND NOT is_complete' 가 0행이라 영향 0 이 오늘 데이터에서 사실임을 쿼리로 확인. 보안: 치명/경고 구분 기준('값이 틀려도 앱이 정상처럼 도는가')이 항목별로 타당하고, 운영 컨테이너 실측(debug False·jwt 64·fek 32·argon2 19456/2/1/2·validate_runtime()=[])으로 기동 실패하지 않음 확인. 신규 비차단 5건(CR34-1 scope 전환 밴드 진동 · CR34-2 미완결 월을 환산 원천으로 사용 · CR34-3 화면별 가격 불일치 · CR34-4 30일은 신고기한이지 공개지연 아님 · CR34-5 문구 잔여) + CR33-6/7/8 이월.",
+  "scope": "077c2e5 이후 미커밋 - 수정 34파일 + 신규 9. CR-033 차단 2건 조치(timeadjust.open_ym/_complete_flags 달력하한 + build_index(as_of=) 필수화 · 운영 배치 재실행 · FE PriceBand as_of_ym/time_adjusted/time_adjustment + bandTimeView) · CR33-2(_freshest_index -> select_index 이동, 배선 중복 삭제, 테스트 판별력 수정) · CR33-4(지역 단위 트랜잭션 · method 필터 · 문서 수치 정정) · CR33-5(zone_academic 고유 학원 집합) · SR29-1(enforce_runtime_settings + create_app 호출) · SR29-2/9(NEIS_API_KEY 마스킹 + .env.example 대조 테스트) · SR29-3(fetch_academy 키오류 시 0행 파일 미저장)",
   "reviewer": "code-reviewer",
+  "blocking": [],
   "tests": {
-   "backend": "1175 passed / 78 skipped / 0 failed",
-   "frontend": "735 passed / 41 files",
-   "build": "ok (vite build + tsc --noEmit 모두 exit 0)",
-   "note": "junitxml 실측 tests=1253 skipped=78 failures=0 errors=0 → 1175 passed. 주장과 정확히 일치. core.autocrlf=true 라 git diff 가 정규화 — 줄바꿈만 바뀐 파일 0건. tokens.contrast.test.ts 63 passed(주장 45→63 확인)"
+   "backend": "1,290 passed / 78 skipped / 0 failed (junitxml tests=1368 skipped=78 failures=0 errors=0) - 주장과 정확히 일치",
+   "frontend": "764 passed / 41 files - 주장과 정확히 일치",
+   "build": "vite build exit 0 (270.82 kB) · tsc --noEmit exit 0",
+   "line_ending_only_files": 0
   },
-  "file_recovery_incident": {
-   "verdict": "바이트 단위 복구 확인 — 유실 0",
-   "what_happened": "레지스트리 담당(agent-aaf29fdabef1f6e3e)이 07:42:33 KST 변이 M1 적용 후 07:42:39 `git checkout -- backend/app/agents/recommend.py` 로 되돌리면서 REC-7 담당의 미커밋 작업과 자신의 주석 편집까지 함께 삭제",
-   "independent_proof": "REC-7 담당이 07:31:37 직접 작성한 snap_before_mut.json 의 backend\\app\\agents\\recommend.py md5 = 5343a7fe6581406bc53a291c5138a3eb 와, 현재 파일에서 스냅샷 이후 들어온 레지스트리 담당 자신의 주석 편집만 되돌린 바이트열(47,619 B)의 md5 가 완전 일치. 대조군 HEAD 블롭 LF d20c8d21/CRLF 69c55adb 는 불일치",
-   "pyc_argument": "담당자의 pyc source_size 3바이트 논증은 재현 불가(복구 직후 pyc 재생성 · 서버 /tmp/newapp 삭제)이나 트랜스크립트상 변이 M1(redevelopment=redevelopment, → redevelopment=None,  # MUTATION)이 정확히 +3바이트임을 확인 — 논증 자체는 옳았음",
-   "blast_radius": "전 subagent+메인 트랜스크립트 전수 스캔: 2026-07-27T22:00Z 이후 파괴적 git 명령은 07:42:39 단 1건, 대상 recommend.py 하나. scoring.py(HEAD 동일)·orchestrator.py(python 치환으로 정상 원복) 무관 확인. 저장소 MUTATION 잔여 마커 0건",
-   "prevention": "변이 절차서에 `git checkout --` 금지 · 원본 바이트 보관 + write_bytes 원복 + md5 단언(mut_cr031.py 방식) 명시 권고"
-  },
-  "independent_measurements": {
-   "MAP-2": "운영 DB 읽기전용 실측 — 밀집 bbox 500건 중앙값 134.4ms/최대 157.8ms · 수도권 최대 bbox 153.4ms · redevelopment 블록 누락 0 · 응답 128.0→238.2KiB(x1.86)",
-   "PERF-1": "600단지 x 3급 = 1,800 판정, 신규(1벌) vs 옛(3벌) 불일치 0건 · 급 섞임 0건 · 1.37ms vs 2.10ms/단지",
-   "REC-7": "후보 조회 SQL 은 상한과 무관(50/120/200 모두 0.80~0.85s) — 주장 확인. 조립 단지당 ~13ms. 강남 후보수 120→123 / 200→151 (MAX_CANDIDATES 미도달)",
-   "CR31-1": "발화 4케이스(1억원지구·제3원구역·raw_stage 5000만원·700,000,000원구역) 전부 해소, 인용 밖 금액은 여전히 BLOCKED",
-   "FE-5": "effectiveWeights vs scoring.normalize_weights 9케이스 교차검증 — 현실 케이스 전부 일치(sum<=0 만 상이, CR32-7)",
-   "MAP-3": "라이브 재현 성공 — dapi.kakao.com 401 AccessDeniedError 'domain mismatched! caller=...realestate.utilverse.info'. CSP 는 connect-src 에 dapi.kakao.com 허용 → CSP 무관 확인",
-   "CR32-1": "라이브 헤더 확인 — /health(text/html) gzip / /api/v1/health(application/json) Content-Encoding 없음. nginx gzip_types 주석처리"
-  },
+  "independent_measurements": [
+   "운영 DB: market_price_index sido 93행/3지역 + sigungu 2,288행/79지역 = 2,381행, method 1종",
+   "운영 DB: 기준월 분포 sido 2026-05 x3 / sigungu 2026-05 x64 · 2026-04 x2 · 2025-10/2025-06/2025-03/2024-10/2024-08/2024-06 각 1 → 2026-07 은 0곳",
+   "운영 DB: 2026-06 은 78행 전부 is_complete=false, 2026-07 은 63행 전부 false",
+   "운영 DB: 41113/41370/41461/41595 의 idx_value 가 CR-033 기록과 소수 6자리까지 동일 (1.050590 · 1.068485 등) → 플래그만 변경됨",
+   "운영 DB: ym=2026-05 AND sample_size>=150 AND NOT is_complete → 0 rows (건수검사 오탐이 기준월에 미치는 영향 0 확인)",
+   "운영 DB: 기준월 뒤처진 시군구(11140/11170/28155/41591)는 건수검사가 아니라 sample_size 84~141 < 150 이 원인",
+   "운영 DB: 41131 sigungu 2025-05 0.977460 → 2026-05 1.117498 (+14.3%) vs 경기 sido +4.9%; 11650 서초 +7.4% vs 서울 +13.0%",
+   "경계 전수 대조: as_of 2024-01-01~2027-12-31 매일(1,461일) x 대상월 60개 = 87,660조합에서 (코드 완결판정 == as_of > ym말일+30일) 불일치 0건",
+   "변이 검증(소스 미수정, 옛 정책 재구현): select_index 배선/도메인 테스트 입력에서 현재=11(시도) vs 옛=11140(시군구), 양쪽 커버리지 1.0 → 테스트가 두 정책을 실제로 구분함",
+   "변이 검증: _complete_flags 달력 하한 제거 시 reference_ym 이 2026-05 → 2026-07 로 되돌아감 (CR33-1 테스트가 잡는다)",
+   "운영 컨테이너 실측: debug=False · cookie_secure=True · jwt_len=64 · fek_len=32 · argon2 19456/2/1/2 · argon2_parameter_problems()=[] · validate_runtime()=[] → enforce_runtime_settings 가 예외를 던지지 않음(배포 시 기동 가능)"
+  ],
   "new_findings": [
-   "CR32-1",
-   "CR32-2",
-   "CR32-3",
-   "CR32-4",
-   "CR32-5",
-   "CR32-6",
-   "CR32-7"
+   {
+    "id": "CR34-1",
+    "severity": "medium",
+    "blocking": false,
+    "title": "기준월 동률 tie-break 때문에 매월 말 scope 가 시군구<->시도로 뒤집히며 밴드가 −7.7%~+11.9% 진동한다",
+    "note": "CR-033 이 승인한 규칙의 귀결. 히스테리시스는 '한 목록 한 잣대'를 허무는 거래라 권고하지 않는다. select_index docstring 과 DEPLOY §5-3c 에 성질을 기록할 것"
+   },
+   {
+    "id": "CR34-2",
+    "severity": "low",
+    "blocking": false,
+    "title": "미완결 월(2026-06/07)이 환산 원천으로는 계속 쓰여 월중 선택편향(+1.5~1.9%)이 그 달 거래에 들어간다",
+    "note": "고치면 6개월 창 커버리지가 67%<80% 로 떨어져 보정이 통째로 꺼진다 — 현 선택이 맞다. IndexPoint.is_complete 주석에 '원천으로는 쓴다' 한 줄 추가 권고"
+   },
+   {
+    "id": "CR34-3",
+    "severity": "low",
+    "blocking": false,
+    "title": "추천 카드는 환산 밴드 중위, 지도/자금계획은 원본 recent_price_krw — 같은 단지가 화면마다 다른 값",
+    "note": "각 라벨은 정확하나 이번 라운드가 만든 격차"
+   },
+   {
+    "id": "CR34-4",
+    "severity": "low",
+    "blocking": false,
+    "title": "REPORT_LAG_DAYS=30 은 신고기한만 덮고 API 공개 지연·지연신고·해제신고는 덮지 않는다",
+    "note": "가장 이른 방어 가능한 경계이지 보수적 값이 아니다. 여유를 주려면 지각 신고율을 재고 그 값을 적을 것"
+   },
+   {
+    "id": "CR34-5",
+    "severity": "info",
+    "blocking": false,
+    "title": "밴드 줄 source 문자열이 여전히 '국토교통부 실거래가' · TRADE_BASIS_NOTE 에 시점 언급 없음",
+    "note": "시점 꼬리표가 출처보다 앞에 오고 근거 목록이 자체 시장지수를 별도로 실어 통과 조건의 취지는 충족"
+   }
   ],
-  "closed": [
-   "CR31-1",
-   "CR31-2"
+  "closed_this_round": [
+   "CR33-1",
+   "CR33-2",
+   "CR33-3",
+   "CR33-4",
+   "CR33-5"
   ],
-  "notes": "PASS. 차단 사유 4종(정확성 결함·보안 냄새·핵심 테스트 부재·레이어 위반) 모두 없음. 복구 사고는 제3자 스냅샷 md5 대조로 바이트 단위 무결 확인. 신규 7건 전부 비차단이며 CR32-1(medium)만 배포 설정 1줄. 오탐 관점도 통과 — CR31-1 조치가 정상 동작을 막던 방어를 정확히 걷어냈고, 걷어낸 자리를 직접 뚫어 확인함"
+  "carried_over": [
+   "CR33-6",
+   "CR33-7",
+   "CR33-8"
+  ],
+  "pass_conditions": [],
+  "log": "docs/03-build/code-review-log.md#cr-034"
  },
  "security_review": {
   "status": "passed",
-  "id": "SR-027",
-  "at": "2026-07-28T08:20:00+09:00",
-  "date": "2026-07-28",
-  "scope": "커밋 c70b54c 이후 미커밋 델타 - MAP-2 지도 응답에 nearest_station·redevelopment 블록 추가(LEFT JOIN LATERAL 2개) · PERF-1 학구 조회 급 3벌->1벌 통합 · REC-7 후보 단지 상한 50->120 · CR31-1 수정(assert_no_cost_estimate source_quotes / strip_source_quotes / _MONEY_RE 단위없는 '원' 4자리 하한 / redevelopment_pair 강등 / load_redevelopment money_like_records) · CR31-2 summary_basis 화면 노출 · FE-4 use_saved_conditions:false · FE-5 effectiveWeights · UX-5 --material 불투명화 · MAP-3 장소검색(placeSearch/PlaceSearch/MapView) · 조건 레지스트리 redevelopment 축 확장. 변경 39파일 + 신규 5파일",
+  "id": "SR-030",
+  "at": "2026-07-29T00:25:00+09:00",
+  "date": "2026-07-29",
+  "scope": "SR-029 이후 델타 — SR29-1(기동 점검 미호출)·SR29-2/9(NEIS 키 마스킹 + .env.example 대조 테스트)·SR29-3(fetch_academy fail-closed) 조치 재검증 + 신규 변경(timeadjust open_ym/_complete_flags(as_of)/build_index(as_of) · select_index 정책 이동 · orchestrator._freshest_index 삭제 · build_market_index 지역단위 트랜잭션 85개 + method · postgis._MARKET_INDEX_SQL 의 method 파라미터 · 프론트 bandTimeView/plainReason · DEPLOY.md §5-3c/§5-4)",
   "reviewer": "security-reviewer (herdr re-review 대행)",
   "blocking": [],
   "deploy_approved": true,
+  "deploy_approved_note": "★ '보안 사유로는 막지 않는다'는 뜻이다. 리뷰 시작 시점의 지시는 code_review = CR-033 failed 였으나, 작업 도중 code-reviewer 가 같은 델타에 CR-034(2026-07-28 23:56 · passed · deploy_ready=true · blocking=[])를 기록했다. 따라서 지금은 두 게이트가 모두 passed 이고 3단계 리뷰 게이트는 열려 있다 — 단 아래 14건 실행 조건부다. 특히 #1(커밋·푸시 선행)과 #12ⓑ(배포 직후 /api/v1/health 기동 확인)는 생략할 수 없다.",
   "deploy_approved_conditional_on": [
-   "1. 커밋·푸시 먼저 - DEPLOY.md 5-1b 가 git reset --hard origin/main 이다. 신규 5파일 중 frontend/src/lib/recommendConditions.ts 를 App.tsx 가 import 하므로 빠지면 npm run build 가 실패한다. 이번 라운드에 미커밋 작업이 실제로 한 번 날아갔다(파일 복구 사고)",
-   "2. 이미지 재빌드 후 docker diff realestate-api 로 컨테이너 레이어 수정 0 확인",
-   "3. statement_timeout 이 붙었는지 DEPLOY.md 5-2 의 컨테이너 내 명령으로 확인(기대 10s). MAP-2 LATERAL 2개 + REC-7 2.4배로 더 중요해졌다. .env 의 DB_STATEMENT_TIMEOUT_MS 를 0·음수로 두지 말 것(SR26-1: 음수는 조용히 off)",
-   "4. 마이그레이션 013·014 적용 + 확인 쿼리. 추가 - 지도 경로가 이번에 redev_project_complex JOIN redev_project 를 새로 타므로 두 테이블과 pc.complex_id 인덱스 존재를 함께 확인",
-   "5. 승인제 생존 확인(POST /auth/register -> 201 + status:pending). 코드 레벨은 SR-027 에서 실측 확인(승인 전 403 PENDING_APPROVAL · 승인 취소 시 유효 access 도 즉시 403 ACCOUNT_REJECTED)",
-   "6. /tmp 덤프 정리(/tmp/re013a~c 삭제 · 백업은 /root/realestate-backup + chmod 600)",
-   "7. DB 무손상 확인(trade 611,518 · complex 16,462 · users/user_profile + db 로그 corrupt 부재)",
-   "8. 수집 스모크 1회(MOLIT 1개 시군구·1개월 + 카카오 지오코딩 1건)",
-   "9. (신규·필수) redev_project 금액표기 0행 확인 SQL 1줄. CR31-1 이 낸 항목이나 뜻이 바뀌었다 - 예전엔 0행이 아니면 job 이 죽었고, 지금은 0행이 아니면 그 문자열이 카드에 그대로 표시된다(SR27-3). 0행이 아니어도 배포를 멈추지 말고 값을 눈으로 보고 판단할 것",
-   "10. (신규) 신규 SQL 3종 실DB 스모크 - ① /map/complexes 1회(밀집 bbox, 응답시간·건수) ② 추천 1건 완주(120 상한, 소요시간) ③ 그 카드의 학구 급(초/중/고)이 서로 다른 학교인지 눈으로 1건. 로컬 needs_db 78건 skip 이라 이 SQL 들은 저장소 테스트로 실 PostgreSQL 을 한 번도 안 탔다(SR27-5)",
-   "11. (신규) gzip 을 켠다면 5조건 그대로 - realestate 443 서버블록 안에만(http 블록·동거 서비스 금지) · gzip_proxied 동반(기본 off 라 프록시 응답은 압축 안 됨) · location ~ ^/api/v1/auth/ 는 gzip off · gzip_min_length 1024 · gzip_comp_level 기본 유지"
+   "1. 커밋·푸시를 먼저 한다 — DEPLOY.md §5-1b 가 git reset --hard origin/main 이다. 미추적 신규 9파일 중 timeadjust.py 를 stats.py/postgis.py/orchestrator.py/recommend.py 가, school_quality.py 를 location/__init__.py 가 하드 import 한다. 안 올라가면 api 가 ImportError 로 기동조차 못 한다",
+   "2. 이미지 재빌드 + docker diff realestate-api 로 레이어 수정 0 확인",
+   "3. statement_timeout 확인(기대 10s). DB_STATEMENT_TIMEOUT_MS 를 0·음수로 두지 말 것(SR26-1)",
+   "4. 마이그레이션 013·014·015 적용 확인. 015 는 운영 적용 완료(2026-07-28)이고 배포된 스키마가 파일과 완전히 일치함을 psql \\d 로 확인했다(컬럼 8·PK·인덱스·CHECK 3 — 드리프트 0). 재실행 no-op — 목록에서 빼지 말 것",
+   "5. 승인제 생존 확인(register → 201 + pending)",
+   "6. /tmp 덤프 정리(/tmp/re013a~c 삭제 · 백업은 chmod 600)",
+   "7. DB 무손상 확인 + market_price_index 2,381행 · sigungu 79 · sido 3 · method 1종 · ref_ym 2026-05",
+   "8. 수집 스모크 1회(MOLIT 1시군구·1개월 + 카카오 지오코딩 1건)",
+   "9. redev_project 금액표기 0행 확인(SR27-3). 0행이 아니면 그 문자열이 카드에 그대로 표시된다 — 배포를 멈추지 말고 값을 눈으로 보고 판단할 것",
+   "10. 신규 SQL 실DB 스모크 — ①/map/complexes ②추천 1건 완주 ③학구 급별 확인 ④추천 카드의 price_band.time_adjustment.applied=true 이고 reference_ym=2026-05 (7/31 이후 재실행 전까지는 06 이 아니라 05 가 정상이다)",
+   "11. gzip 5조건(커밋 077c2e5 이행 확인됨). 배포 시 curl -H 'Accept-Encoding: gzip' -sI 로 /api/ 압축 · /auth 미압축 각 1회",
+   "12. ★성격이 바뀐 조건 — JWT_SECRET. 이제 앱이 스스로 막으므로 목적이 '위조 가능 상태 발견'에서 '기동 실패로 서비스가 죽는 것 방지'로 바뀌었다. ⓐ배포 전 deploy/preflight.sh 실행 + 길이를 직접 잴 것(preflight 는 JWT_SECRET 비어 있음만 본다. 32자 미만이면 preflight 는 ok 를 주고 컨테이너가 무한 재시작 루프에 빠진다 — restart: unless-stopped 이고 api 에 healthcheck 가 없다). ⓑ배포 직후 필수: up -d api 다음 curl -fsS http://127.0.0.1:8013/api/v1/health 로 기동 확인(DEPLOY §5-4). 실패면 logs api | tail -50 의 '기동 점검 실패:' 줄을 읽는다 — 항목 이름만 나오고 값은 안 나온다. ⓒ현재 운영 .env 는 새 게이트를 전부 통과한다(jwt 64자/64바이트 · fek 32자/32바이트 ASCII · argon2 코드 기본값 19456/2/1 · DEBUG=false — 서버 실측). 이 배포에서 기동이 막힐 이유는 없다",
+   "13. db 메모리 관찰 — docker inspect realestate-db 의 State.OOMKilled. 시장지수 배치는 수집·지오코딩과 겹치지 말 것. 2차 OOM 시 mem_limit 이 아니라 max_connections 20→12 를 먼저 검토. mem_limit 192m 은 올리지 않는다",
+   "14. (신규) 시장지수 배치 재실행 일정 — 2026-07-31 이후 1회 재실행(기준월 2026-05 → 2026-06), 이후 실거래 수집 배치 뒤 월 1회. 재실행 후 10-④ 로 reference_ym 육안 확인. 안 돌려도 기능은 살고 낡은 시점이 응답에 명시되므로 배포를 막지 않는다",
+   "15. (키 투입 시에만) ①Anthropic 콘솔 사용량 한도·알림(SR22-5) ②첫 추천 3~5건 카드 문장 육안 확인 ③★G(SR26-5) 인지"
   ],
   "key_insertion_approved": true,
+  "key_insertion_note": "허용 유지. SR-027 이 걸었던 조건(분담금 뒷문 SR27-1/SR27-2 해소)은 SR-029 §1·§2 에서 충족됐고 이번 델타로 되돌아가지 않았다(전수 확인). 남는 조건은 SR-026 §9-9 의 3건 그대로다.",
   "key_insertion_conditional_on": [
-   "① SR22-5 - Anthropic 콘솔에서 사용량 한도·알림 설정 (SR-026 조건 그대로 유지)",
-   "② 키 투입 후 첫 추천 3~5건의 카드 문장을 사람이 육안 확인 - AnthropicLLM 실호출 미검증 (유지)",
-   "③ SR26-5(★G) 인지 - 주제어 없이 금액만 쓰는 문장은 여전히 통과. 다만 CR31-2 로 카드 단위 summary_basis 표기가 화면에 닿아 완화가 하나 늘었다"
-  ],
-  "post_deploy_actions": [
-   "카카오 JS 키 도메인 등록은 반드시 4단계 순서로 - ① 콘솔에 웹 도메인 등록 ② 실브라우저 확인(지도 + 장소검색) ③ Referrer-Policy 를 no-referrer -> strict-origin-when-cross-origin 완화 ④ 재확인. 순서를 뒤집으면 지도가 죽는다. ③의 보안 손실은 사실상 0(교차출처에 스킴+호스트만 전달, 이미 DNS/SNI/CT 로그에 공개된 값이며 URL 경로에 비밀이 실리는 곳 없음). 깨지면 ③만 되돌린다",
-   "실브라우저 1회 - 지도 배지(역세권·재건축)·장소검색·보안헤더/CSP 4경로",
-   "첫 추천 1건의 DB 부하 관찰(REC-7 120 상한)"
+   "① SR22-5 — Anthropic 콘솔에서 사용량 한도·알림 설정",
+   "② 키 투입 후 첫 추천 3~5건의 카드 문장을 사람이 육안 확인",
+   "③ SR26-5(★G — 주제어 없이 금액만 쓰는 문장) 인지"
   ],
   "tests": {
-   "backend": "1175 passed / 78 skipped / 0 failed (junitxml tests=1253 - skipped=78, failures=0, errors=0)",
-   "frontend": "735 passed / 41 files",
-   "note": "주장 숫자(백엔드 1,175 · 프론트 735/41)와 정확히 일치. needs_db 78건 skip - 신규 SQL 3종은 실 PostgreSQL 미검증(SR27-5 -> 배포조건 10)"
+   "backend": "1,290 passed / 78 skipped / 0 failed (junitxml tests=1368 − skipped=78, failures=0/errors=0) — 주장과 정확히 일치",
+   "frontend": "764 passed / 41 files — 주장과 정확히 일치",
+   "frontend_build": "npm run build (tsc -b + vite build) 성공 — index 270.82 kB / gzip 85.78 kB",
+   "note": "기동 게이트가 들어왔는데도 테스트가 안 깨지는 이유 확인 — create_app 을 쓰는 테스트는 전부 monkeypatch.setenv 로 JWT_SECRET 40자 + FIELD_ENCRYPTION_KEY 32자를 먼저 넣는다"
   },
   "probes_run": {
-   "map_auth": "GET /map/complexes 헤더없음 -> 401 · Bearer garbage -> 401 · 승인취소된 계정의 유효 access -> 403 ACCOUNT_REJECTED(추천 POST 도 동일). 승인 상태를 매 요청 DB 에서 재확인하므로 회수가 즉시 먹는다. CORS 미들웨어 저장소 전체 0건",
-   "map_surface": "500단지 주입 후 실응답 키 전수 - redevelopment 4키(available·stage·raw_stage·zone_name) · nearest_station 5키(name·distance_m·line_count·lines·basis). 감사필드 match_basis·match_method·source_ref·source·source_url·source_key·verdict·score·detail 전부 0건. 추천 카드(_redev_dict)는 detail 안에 match_method·source·source_label·as_of·base_score·final_score·cost_disclosure 를 담으므로 지도는 엄격한 부분집합이다",
-   "map_amplification": "500단지 매칭 224,092B(218.8KiB) · 전부 미매칭 153,647B(150.0KiB). bbox 2.5도 -> 400 '조회 범위가 너무 넓습니다' · 1.99도 통과. bbox 3,000자 쓰레기 -> 400 · 응답 110B · 반사 0. 증폭비 약 1,100배이나 인증+승인+nginx limit_req 10r/s 뒤라 반사형 증폭 불가(출발지 위조 불가)",
-   "rec7_saturation": "SQLAlchemy pool_size=5 + max_overflow=5 = 동시 실행 문장 10개 하드 상한 · statement_timeout 10s · nginx re_api 10r/s burst 20 · 승인제 모집단 1(실측 확인). 상한 없는 층은 BackgroundTasks in-flight job 수뿐(SR27-4)",
-   "source_quotes_bypass": "strip_source_quotes 6종 - quotes=[] / ['구역'] / ['원'](1자 하한미달) / ['추가분담금은 조합'] 은 차단 유지. ★quotes=['분담'] · ['분담금'] 은 COST_DISCLOSURE 의 주제어를 갈라 lint 를 no-op 으로 만듦(통과). 실측 재현",
-   "money_re_relaxation": "20종 실측 - 탐지 유지: 1억 2천만 원·1.2억·1억원·5000만원·3억원·700,000,000원·120000000원·12,000,000원·3.5억 원·1 억 원·120,000,000 원·1000원·1200원. 새로 미탐: 3원·50원·999원(단위없는 4자리 미만). 부동산 금액 표기 손실 0 - 탐지 약화 없음",
-   "external_money_reach": "assess_redevelopment 실측 - 제3원구역·장위4구역 정상(CR31-1 해소 확인). 1억원지구 / '추가분담금 1억 2천만 원 예상구역' / raw_stage='조합설립(추정 5000만원)' 은 통과해 카드 rationale 에 금액 노출. 완화 2겹 동작 확인: 런타임 logger.warning 캡처 + 적재 리포트 '[금액처럼 읽히는 수집 원문]' 절 + 같은 문장에 고정 고지 동반",
-   "cost_guard_payload": "_cost_guard_degraded -> _redev_dict 실측 - detail.cost_guard_error 에 str(exc) 가 실리고 그 문자열이 차단한 금액 토큰('1억 2천만 원')을 그대로 인용한다. _item_to_dict 가 payload 를 원본 그대로 돌려주므로 사용자 응답까지 도달(SR27-1)",
-   "frontend_xss": "PlaceSearch.tsx·MapView.tsx·placeSearch.ts·recommendConditions.ts·recommendation.ts·ReportCard.tsx·RecommendPanel.tsx·preferences.ts·client.ts·App.tsx 에 dangerouslySetInnerHTML·innerHTML·outerHTML·insertAdjacentHTML·eval·new Function·document.write·window.open·localStorage·sessionStorage 전부 0건. 프론트 전체 스캔 히트는 mapMarkers.ts 의 '쓰지 않는다' 주석과 그것을 고정하는 테스트뿐",
-   "kakao_key_leak": "loadSdk 의 두 reject 와 placeErrorText 반환값은 전부 고정 문자열. 앱키가 들어가는 유일한 문자열 script.src 는 어떤 예외 메시지에도 실리지 않는다. MapView.tsx:187 setError(e.message) 로 흘러들 수 있는 것은 SDK 내부 TypeError(키 미포함)뿐. JS 앱키는 설계상 공개 값이라 노출 자체가 새 위험이 아니다",
-   "idor_fe4": "use_saved_conditions 는 bool 스칼라(schemas.py:174)로 사용자 식별자를 담지 않는다. 저장 조건은 _analyze 가 repo.get_preferences(user_id) 로만 읽고 그 user_id 는 토큰에서 나온 user.id 가 run_recommendation_job 으로 흘러간 값. 결과 조회는 repo.get_job(job_id, user.id) 소유자 스코프이고 남의 job 은 404 통일. 다른 사용자 조건 접근 경로 0건",
-   "recovery_integrity": "복구 사고 검증 - .pyc 는 주석을 되살리지 못하므로 변경 34파일의 주석 밀도를 HEAD 와 대조: 8%p 초과 급감 0건, 대부분 상승(placeSearch.ts 31.5->42.9% · MapView.tsx 17.1->21.9% · MapView.test.tsx 10.1->16.9%). compileall exit 0 · 변경 파이썬 9파일 중복 정의 0건 · git diff --stat 2,221+/125-(대량 삭제 없음) · git status -uall 변경39+신규5, 예상 밖 파일 0건",
-   "commit_hygiene": "델타 전수 위험패턴 스캔 - eval(·exec(·subprocess·os.system·__import__·base64.·pickle·marshal·socket.·urllib·평문 http://·개인키 헤더·AKIA·sk-ant·serviceKey=·appkey=<값>·하드코딩 비밀번호 전부 0건(유일 http:// 히트는 테스트 하네스 http://testserver). 추적 위험파일 0건, .env 2개·deploy-target.local.md 는 .gitignore 적중 확인, .env.example 의 MOLIT_API_KEY·DATA_GO_KR_API_KEY 는 빈 칸",
-   "sql_injection": "신규·변경 SQL 전량 :name 바인딩(station_category·station_deg·station_radius·levels). 변경 diff 에 f-string·.format(·%s·문자열 결합 0건. :levels 는 CAST(:levels AS text[]) 로 바운드 파라미터",
-   "css_csp": "변경 CSS 4파일(tokens·BottomSheet·RecommendPanel·ReportCard)에 url(·@import·src:·expression(·외부 호스트 0건 -> CSP·외부 리소스 신규 없음"
+   "boot_gate": "enforce_runtime_settings 실측 10케이스. 차단: JWT_SECRET ''·31자, FEK 12·33바이트, ARGON2_MEMORY_KIB 1024, ARGON2_TIME_COST 1. 통과+경고: POSTGRES_PASSWORD 빈값, COOKIE_SECURE=false, DEBUG=true+빈 JWT. 로그·예외 전수에서 JWT_SECRET/FEK/POSTGRES_PASSWORD 값 0건('항목 이름만' 주장 사실 확인). 거짓 차단 탐색: CRLF .env · 인라인 주석 둘 다 정상 파싱(기동 통과)",
+   "server_env_lengths": "115.68.230.40 실측(값이 아니라 길이만) — JWT_SECRET 64자/64바이트, FIELD_ENCRYPTION_KEY 32자/32바이트, 둘 다 비ASCII 0, POSTGRES_PASSWORD 있음, DEBUG=false, COOKIE_SECURE=true, ARGON2_CONCURRENCY=2 이고 나머지 ARGON2_* 는 .env 에 없어 코드 기본값 19456/2/1, 구 이미지 validate_runtime()==[]. 신 게이트 모의판정 전부 통과 → 이 배포에서 기동이 막힐 항목 0. 컨테이너: realestate-api Up 15h healthy restarts=0 · realestate-db Up 2d healthy restarts=0",
+   "masking_contexts": "가짜 32자 NEIS 키로 13문맥. SR-029 가 누출로 표시한 4문맥(경로형 URL·dict repr·JSON 표기·값 단독) 전부 마스킹. 추가로 헤더 dict·URL 인코딩 값도 마스킹. 싱크 축에서는 logging 만 안전하고 print/stdout · SystemExit/stderr · 미포착 traceback 은 그물 밖(→SR30-6)",
+   "env_example_mutation": "SR29-9 대조 테스트 변이 9/9 검출 — 새 비밀 칸 5종(NAVER_API_KEY/SOME_SECRET/DB_PASSWORD/SLACK_TOKEN/X_PASSWD) 전부 FAIL 유발, SECRET_ENV_VARS 에서 키 제거 4종 전부 FAIL 유발. 다만 접미사 앵커 밖 이름 7종은 미검출(→SR30-4)",
+   "neis_fail_closed": "result_fault 12케이스 — INFO-300/INFO-200/ERROR-290/ERROR-337(쿼터 초과)/ERROR-500/빈 dict/RESULT 문자열 전부 FetchError 로 멈춤·파일 없음. 잔여 2갈래: 비-dict payload, 블록은 있고 head RESULT 가 오류인 경우(→SR30-5). 키를 되비친 MESSAGE 는 mask_secrets·logging 에서는 지워지나 SystemExit/stderr 에서는 그대로 남음(→SR30-6)",
+   "frontend_xss_redos": "dangerouslySetInnerHTML/innerHTML 대입/eval/new Function/document.write 0건. XSS 페이로드 3종이 plainReason 을 문자열 그대로 통과하지만 JSX 텍스트 노드라 실행 안 됨. ReDoS: /\\s+([.,·])/g 가 2차 폭발(개행 1천 1.7ms → 5만 4.6초 → 20만 83.8초) — 입력이 서버 생성이고 LLM 은 max_tokens 900 에 묶여 비차단(→SR30-8). plainReason 이 프로토타입 키에서 함수 반환(→SR30-7)",
+   "market_index_operational": "서버 DB 실측 — 2,381행(sido 3지역 93행 · sigungu 79지역 2,288행), method 1종, ym 2024-01~2026-07, ref_ym 둘 다 2026-05, 'is_complete AND 진행 중인 달' = 0행(CR33-1 회귀 0), computed_at 스팬 42초 = 살아 있는 행이 전부 마지막 1회 실행분(2회 실행됐으나 1회차 고아 0). 배포 스키마가 파일과 완전 일치",
+   "select_index_operational": "지역별 기준월 분포 실측 — sigungu 64곳 2026-05, 2곳 2026-04, 7곳 없음, 8곳이 2024-06~2025-10 로 낡음. select_index 의 '기준월 최신 우선' 규칙으로 낡은/없는 15곳이 전부 sido 2026-05 로 수렴 → 한 목록 안에서 환산 시점 통일 확인",
+   "secret_scan": "코드 델타(git diff + 미추적 신규 9파일) 495KB 전수 — sk-ant 0 · AKIA 0 · PRIVATE KEY 헤더 0 · JWT 리터럴 0 · serviceKey=<값> 0 · ?KEY=<값> 0 · base64 40자↑ 0 · 비밀번호 실린 postgres DSN 0 · 평문 http:// 0. 32자 hex 히트 1건은 code-review-log.md 의 md5 해시(키 아님). 추적 위험파일은 .env.example 2개뿐이고 값 0(비밀 칸 9개 전부 빈 칸). data/ 추적 0. .gitignore 적중 실측(.env:2 · deploy-target.local.md:10 · data/raw/:36)",
+   "dependencies": "신규 의존성 0(requirements.txt·package.json 무변경). npm audit --omit=dev → 0 vulnerabilities. dev 5건(vite path traversal · esbuild dev-server · vitest UI RCE)은 전부 개발 서버 전용이라 프로덕션 번들 무관 — 공인 IP 에 vite dev/vitest --ui 를 띄우지 말 것"
   },
-  "gzip_verdict": {
-   "breach_applicable": false,
-   "reason": "BREACH 요건 4개 중 ③(공격자가 고른 문자열의 반사)과 ④(교차사이트 반복 유발)가 둘 다 없다. 비밀(access_token)이 든 응답은 /auth/login·/auth/refresh 둘뿐인데 login 응답은 {access_token, token_type, expires_in} 만이고 refresh 는 요청 본문 자체를 받지 않는다. 반대로 반사 가능성이 있는 응답(지도 400·422)에는 비밀이 없고 SR25-2 로 값 반사도 0이다. 게다가 우리 API 는 Authorization: Bearer(JS 메모리) 인증이라 브라우저가 자동 첨부하지 않고, refresh 는 SameSite=Strict + Path=/api/v1/auth + X-Requested-With 요구 + CORS 미들웨어 0건이라 교차사이트 유발이 불가능하다",
-   "approved_with_conditions": [
-    "http 블록 금지 - 동거 서비스(autobtc·itsmine)의 응답까지 바뀐다. realestate 443 서버블록(또는 location /api/) 안에만 둘 것",
-    "gzip_proxied 를 함께 켤 것 - nginx 기본값 off 라 프록시 응답은 압축되지 않는다",
-    "location ~ ^/api/v1/auth/ 는 gzip off - 비밀을 담는 유일한 응답이고 수백 바이트라 압축 이득이 0이다. 지금 위험해서가 아니라 이득이 없는 자리에서는 켜지 않는다",
-    "gzip_min_length 1024",
-    "gzip_comp_level 기본(1) 유지 - api 컨테이너 192MB, 압축 CPU 는 동시성 압력과 같은 축"
+  "injection_surface_verdict": {
+   "increased": false,
+   "postgis_market_index_method": "표면 증가 0. :method 의 값은 모듈 상수 timeadjust.INDEX_METHOD 이고 market_index(region_code, scope) 시그니처에 method 인자가 아예 없다 — 호출부가 값을 고를 수 없다. 설사 닿아도 바인딩이다",
+   "build_market_index": "_INDEX_SQL·_UPSERT_SQL·_REGIONS_SQL 전량 :name 바인딩. CLI --region 도 바인딩. 문자열 조립 0건. 외부 네트워크 호출 0건"
+  },
+  "batch_partial_apply_verdict": {
+   "risk_increased": false,
+   "evidence": "computed_at 스팬 42초 = 전 행이 마지막 1회 실행분(1회차 고아 0). ON CONFLICT (region_code, scope, ym) DO UPDATE 로 중복 불가(PK 가 그 셋). 지역 하나가 한 트랜잭션이라 지역 안은 항상 일관되고, 지역 사이가 어긋나면 낡은 지역은 낡은 기준월을 갖고 select_index 가 시도 지수를 고른다 — 조용히 틀리는 대신 덜 정밀해지는 안전한 실패 방향. 롤백은 DROP TABLE market_price_index 한 줄(FK 참조 0)"
+  },
+  "batch_reschedule_verdict": {
+   "manageable": true,
+   "reason": "① 안 돌려도 기능이 죽지 않고 낡은 기준월이 응답에 명시된다(reference_ym · '2026-05 시점으로 환산한 추정치입니다') ② UPSERT 멱등 ③ 확인 쿼리가 DEPLOY §5-3c 에 있고 'is_complete AND 진행 중인 달 = 0' 회귀 검사가 실측 0",
+   "conditions": [
+    "자동화 없음 — 사람이 기억하는 월 1회 작업이라 배포 후에도 reference_ym 육안 확인을 월 1회 되풀이할 것",
+    "수집·지오코딩과 겹치지 말 것(db mem_limit 192m · 스왑 없음. 실측 42초 · db anon +13MB)"
    ],
-   "side_effect": "지도 응답 219KiB -> 약 13KiB 로 증폭 표면이 1/17. DB·CPU 비용은 그대로"
+   "note": "2026-06 이 기준월 후보가 되는 것은 2026-07-31 부터다(6/30 계약의 신고기한이 7/30). 현재 ref_ym 2026-05 는 정상이다"
   },
-  "kakao_js_key_verdict": {
-   "blocking": false,
-   "confidentiality_risk": "none - JS 앱키는 설계상 공개 값이고(스크립트 URL 에 박혀 개발자도구에서 그대로 보인다) 우리 데이터 접근권이 없다. 우리 API 는 별도 Bearer 인증이고 서버 전용 REST 키는 이 경로에 올라간 적이 없다",
-   "actual_risk": "쿼터 도용(가용성·비용). 등록 도메인 0개 + Referrer-Policy: no-referrer 조합이라 카카오가 호출자를 판별하지 못한다 - 우리 지도가 도는 조건이 곧 남이 우리 키를 쓰는 조건이다(Referer 억제는 meta 태그 한 줄이면 누구나 한다). 피해 상한은 무료 쿼터 소진 -> 지도 정지. SR19-1 그대로이며 이번 델타로 악화·해소 모두 없음",
-   "coupling_risk": "보안 헤더가 강하게 걸려 있는 덕분에 기능이 도는 상태다. 누가 헤더를 정상화하는 날 원인 모를 장애가 난다. 지금은 코드 주석(lib/placeSearch.ts 머리말)이 그 사실을 적어 둔 것이 방어",
-   "resolution": "도메인 등록만으로는 절반이다 - no-referrer 를 유지하면 SDK 로드는 여전히 '판별 불가'로 통과해 도용이 열려 있다. 등록 -> 확인 -> Referrer-Policy 완화 -> 재확인 4단계가 필요하며 순서를 뒤집으면 지도가 죽는다"
-  },
-  "closed": [],
+  "closed": [
+   "SR29-1",
+   "SR29-2",
+   "SR29-3",
+   "SR29-6",
+   "SR29-9"
+  ],
+  "resolved": [
+   "SR29-7"
+  ],
+  "new_findings": [
+   "SR30-1",
+   "SR30-2",
+   "SR30-3",
+   "SR30-4",
+   "SR30-5",
+   "SR30-6",
+   "SR30-7",
+   "SR30-8"
+  ],
   "carryover": [
+   "SR29-4",
+   "SR29-5",
+   "SR29-8",
+   "SR27-3",
+   "SR27-4",
+   "SR27-5",
+   "SR27-6",
+   "SR27-7",
+   "SR28-1",
+   "SR28-2",
+   "SR28-3",
+   "SR28-4",
    "SR26-1",
    "SR26-2",
    "SR26-3",
@@ -131,72 +192,494 @@
    "SR25-6",
    "SR24-7",
    "SR23-2",
-   "SR23-3(school_zone 부분)",
-   "SR22-1",
-   "SR22-5",
-   "SR21-1",
-   "SR19-1"
-  ],
-  "new_findings": [
-   "SR27-1",
-   "SR27-2",
-   "SR27-3",
-   "SR27-4",
-   "SR27-5",
-   "SR27-6",
-   "SR27-7"
+   "SR23-3",
+   "SR22-1"
   ],
   "key_reissue_required": false,
   "log": "docs/03-build/security-review-log.md",
-  "notes": "PASS · 차단 0건 · 배포 승인(11건 조건부) · ANTHROPIC_API_KEY 투입 허용 유지(3건 조건부). 재현 - backend 1,175 passed / 78 skipped / 0 failed(junitxml tests=1253-78), frontend 735 passed / 41 files. 주장 숫자와 정확히 일치. fail 조건 5개 전부 미해당: 인증/인가 결함 없음(지도·추천 401/403 실측, IDOR 0건, 승인 취소 즉시 반영) · 인젝션 없음(신규 SQL 전량 바인딩, 프론트 위험 싱크 0건) · 비밀 하드코딩 없음(전수 스캔 0건) · 민감정보 로그노출 없음(새 로그에 실리는 것은 공개 정비사업 문자열과 complex_id 뿐) · 미암호화 전송 없음. [MAP-2] 표면이 1.98배로 넓어졌지만 새는 것은 없다 - 인증 필수, 감사필드 0건, verdict·score·detail 을 의도적으로 뺀 판단이 옳다(지도는 추천의 엄격한 부분집합). bbox 2.0도 상한과 500 상한이 이중으로 걸리고 반사형 증폭은 인증 헤더 때문에 성립하지 않는다. [REC-7] 모집단 1 전제가 승인제로 유지됨을 실측 확인. 포화는 커넥션풀 10에서 먼저 잘리고 statement_timeout 이 받친다. 상한 없는 층은 BackgroundTasks in-flight job 수뿐(SR27-4, low). [CR31-1] 이번 델타의 진짜 위험은 여기다. ① strip_source_quotes 는 외부값이 우리 검사어를 삼켜 lint 를 통째로 no-op 으로 만들 수 있다(raw_stage='분담' 두 글자, 실측) - SR27-2. ② 가드가 발화했을 때 detail.cost_guard_error 가 차단한 금액을 그대로 카드에 실어 보낸다(실측) - SR27-1. SR-025 가 422 input 을 지우며 닫은 것과 같은 패턴의 재발이며 str(exc) 를 payload 에서 빼면 닫힌다. ③ _MONEY_RE 완화는 20종 실측 결과 탐지 약화가 없다(잃은 것은 3원·50원·999원뿐). ④ 외부 원문의 금액이 이제 카드까지 도달하나(예전엔 job 사망) 완화 2겹이 실제로 동작함을 로그 캡처로 확인. [MAP-3] 기밀성 위험 없음(JS 앱키는 공개 값) · 실제 위험은 쿼터 도용 · 등록만으로는 절반이고 Referrer-Policy 완화가 따라와야 닫힌다. 순서를 뒤집으면 지도가 죽는다(4단계 지정). [gzip] BREACH 비해당(요건 ③④ 둘 다 없음) - 5조건부 승인, /auth/* 는 켜지 않는다. [복구 사고] 복구본에 의도치 않은 코드 없음 - 주석 밀도 급감 0건(.pyc 복구였다면 주석이 사라진다), compileall exit 0, 중복 정의 0건, 예상 밖 파일 0건, 대량 삭제 없음. 교훈: 검사 범위 조정에서 위험한 것은 범위의 크기가 아니라 범위를 누가 정하는가다 - MAP-2 는 무엇을 뺄지 우리가 골라 안전했고, CR31-1 은 외부 데이터가 정하게 해 뒷문이 났다."
+  "notes": "PASS · 차단 0건. SR-029 가 낸 세 지적(SR29-1 기동 점검 미호출 · SR29-2/9 NEIS 키 마스킹 · SR29-3 fetch_academy 옆문)이 모두 실제로 닫혔고 코드가 아니라 실행으로 확인했다 — 기동 10케이스 실측 차단, 마스킹 4문맥 전부 해소, NEIS 오류코드 5종 전부 fail-closed. 새 변경은 인젝션 표면을 늘리지 않았다(method 는 사용자가 고를 수 없는 모듈 상수이고 시그니처에 인자가 없다). 프론트는 XSS 위험 싱크 0(JSX 텍스트 노드). 가장 중요한 확인: 운영 서버 .env 를 직접 재어 새 게이트로 기동이 막힐 항목이 하나도 없음을 확인했다(jwt 64/64B · fek 32/32B ASCII · argon2 기본값 · DEBUG=false). 신규 8건은 전부 low/info 이고 그중 둘(SR30-1 · SR30-6)은 피해가 아니라 '주석·메시지가 코드와 어긋난다'는 같은 결함이다 — 방어를 설명하는 문장은 그 자체가 검증 대상이다.",
+  "previous_round": "SR-029 (SR27-1/2 뒷문 해소 재검증 · 마이그레이션 015 · 시점 보정 배선 · NEIS 수집기) — PASS",
+  "gate_note": "두 게이트 모두 passed — code_review: CR-034 passed(deploy_ready=true) · security_review: SR-030 passed. 두 리뷰가 독립적으로 같은 숫자에 도달했다(backend 1,290 passed / 78 skipped / 0 failed · frontend 764 passed / 41 files · 빌드 exit 0). CR-033 의 차단 2건에 대한 사실 인식도 일치한다 — CR33-1 은 이 라운드의 운영 DB 실측에서도 'is_complete AND 진행 중인 달' = 0행이고, CR33-3 은 카드 경로에 '2026-05 시점 환산'이 도달함을 양쪽이 각자 확인했다(SR29-7 → RESOLVED). 다만 이번 델타가 기동 게이트를 새로 넣었으므로 설정이 틀리면 '뜨지 않는 것이 정상 동작'이고, 사람이 기동을 확인하지 않으면 컨테이너가 조용히 재시작 루프에 들어간다.",
+  "gate_open": true
  },
  "open_findings": [
   {
-   "id": "SR27-1",
+   "id": "SR30-1",
    "verdict": "OPEN",
-   "severity": "medium",
-   "blocks": "없음 - 비차단(다음 라운드 권고)",
-   "found_by": "SR-027 (security-reviewer, herdr re-review 대행)",
-   "date_found": "2026-07-28",
-   "owner": "re-arch",
-   "title": "분담금 가드의 진단문이 차단 대상 금액을 사용자 카드로 되돌린다 (detail.cost_guard_error 에 str(exc) 노출, CWE-209)",
+   "severity": "low",
+   "blocks": "없음 — 비차단",
+   "found_by": "SR-030 (security-reviewer)",
+   "date_found": "2026-07-29",
+   "owner": "backend",
+   "cwe": "CWE-1188 (안전하지 않은 기본 설정) 계열",
+   "title": "기동 게이트가 문자 수를 재면서 'FIELD_ENCRYPTION_KEY 는 정확히 32바이트여야 합니다'라고 말한다",
    "evidence": [
-    "_cost_guard_degraded 가 detail={cost_guard_blocked: True, cost_guard_error: str(exc)} 를 만든다 (orchestrator.py, CR31-1 수정분)",
-    "CostEstimateError 메시지는 '(주제어 '분담' + 금액 '1억 2천만 원')' 처럼 가드가 막은 금액 토큰을 그대로 인용한다(analysis.py assert_no_cost_estimate)",
-    "_redev_dict 가 'detail': dict(assessment.detail) 을 그대로 싣고, postgis._item_to_dict 는 payload 를 원본 그대로 돌려준다 -> 사용자 응답까지 도달",
-    "실측 재현: _cost_guard_degraded(CostEstimateError(...)) -> _redev_dict 결과 JSON 에 '금액 '1억 2천만 원'' 문자열이 그대로 포함됨",
-    "이 가드의 존재 이유가 '지어낸 금액 한 줄을 사용자에게 보이지 않는 것'인데, 실패 경로가 정확히 그 금액을 보여 준다 - 방어가 자기 목적과 반대로 동작하는 유일한 자리",
-    "패턴 재발: SR-025 가 422 응답에서 input 을 제거하며 닫은 것과 같은 종류('방어의 오류 메시지가 방어 대상을 되비친다')"
+    "Settings._runtime_checks:113 = len(self.field_encryption_key) != 32  (문자 수)",
+    "security.load_key:93 = len(raw.encode()) != 32  (바이트 수)",
+    "실측 — '가'*32(문자 32/바이트 96) · 'e´'*32(32/64) · 'x'*31+'가'(32/34) 전부 기동 통과 후 load_key 실패(503)",
+    "이 조치가 내건 목적이 config.py:111-112 에 적혀 있다: '사용자가 자산 정보를 저장하려는 순간 500 이 되는 것이라 기동 시점에 아는 편이 낫다' — 이 경우 그 목적이 달성되지 않는다",
+    "현 운영 키는 순수 ASCII 32자라 둘이 같다(서버 실측) → 실해 0",
+    "JWT_SECRET 은 반대 방향이라 안전하다 — 32자 멀티바이트는 32바이트 이상이다"
    ],
    "pass_conditions": [
-    "detail 에는 cost_guard_blocked: true 만 남기고 cost_guard_error 키를 삭제할 것",
-    "원인 추적은 이미 logger.exception 이 스택까지 남긴다(실측 확인) - 운영자는 로그를, 사용자는 사유 문장을 본다. 둘을 한 곳에 합칠 이유가 없다"
+    "len(self.field_encryption_key.encode()) != 32 로 바꿀 것(1줄)"
    ],
-   "mitigation": "현재 담기는 값은 공개 정비사업 문자열이라 민감정보 노출이 아니다. 발화 조건도 좁다 - 우리 문장에 금액이 생기거나 _source_quotes 갱신을 잊는 회귀. 그래서 차단하지 않는다. 고쳐야 하는 이유는 피해 크기가 아니라 패턴이 반복됐다는 사실이다."
+   "mitigation": "사용 지점(load_key)이 fail-closed 라 약한 키로 암호문이 생성되지는 않는다. 그 503 이 바이트 길이를 본문에 싣는 것은 SR29-4(OPEN, low)."
   },
   {
-   "id": "SR27-2",
+   "id": "SR30-2",
    "verdict": "OPEN",
-   "severity": "medium",
-   "blocks": "없음 - 비차단",
-   "found_by": "SR-027 (security-reviewer, herdr re-review 대행)",
-   "date_found": "2026-07-28",
-   "owner": "re-arch",
-   "title": "외부 수집값이 분담금 lint 를 끌 수 있다 - strip_source_quotes 가 우리 검사어를 삼킨다",
+   "severity": "info",
+   "blocks": "없음 — 비차단",
+   "found_by": "SR-030 (security-reviewer)",
+   "date_found": "2026-07-29",
+   "owner": "backend",
+   "title": "JWT 서명키 하한이 발급(create_token)에만 있고 검증(decode_token)에는 없다",
    "evidence": [
-    "strip_source_quotes 는 인용문을 문자열 어디서든 str.replace 로 지운다(2자 미만만 건너뜀)",
-    "실측 6종 - quotes=[] / ['구역'] / ['원'](1자 하한미달) / ['추가분담금은 조합'] 은 차단 유지",
-    "실측 ★ quotes=['분담'] -> 남은 문장 '추가 <수집원문> 금은 ... 예상 <수집원문> 금 1억 2천만 원.' -> _COST_TOPIC_RE 미매칭 -> assert_no_cost_estimate 통과(무력화)",
-    "실측 ★ quotes=['분담금'] 도 동일하게 통과",
-    "즉 raw_stage(또는 zone_name·sigungu·raw_biz_type)가 '분담' 두 글자면 COST_DISCLOSURE 의 주제어가 갈라져 그 필드에 대한 lint 가 통째로 no-op 이 된다",
-    "'검사 대상 축소'가 아니라 '외부 데이터가 검사를 끌 수 있다' 이고 성질이 다르다"
+    "security.create_token:339 이 len(secret) < MIN_JWT_SECRET_BYTES 를 거부(값 미포함 메시지)",
+    "security.decode_token:359 는 길이 검사 없이 jwt.decode(token, secret, …)",
+    "2차 방어의 논리가 'create_app() 을 안 타는 경로가 생겨도'인데, 위조 토큰을 받아들이는 것은 발급이 아니라 검증이다",
+    "현재 도달 경로 0 — create_app() 게이트가 프로세스 전체를 막는다"
    ],
    "pass_conditions": [
-    "우리 상수 문자열(COST_DISCLOSURE 등)과 겹치는 인용은 치환하지 않을 것",
-    "또는 최소 길이를 2자가 아니라 주제어 최대 길이 초과로 올릴 것",
-    "치환 결과가 _COST_TOPIC_RE 매칭을 없앤 경우에는 치환 전 문장으로 한 번 더 검사할 것(= 외부값이 검사를 끄지 못하게)"
+    "decode_token 에도 같은 하한을 걸 것"
+   ]
+  },
+  {
+   "id": "SR30-3",
+   "verdict": "OPEN",
+   "severity": "info",
+   "blocks": "없음 — 비차단",
+   "found_by": "SR-030 (security-reviewer)",
+   "date_found": "2026-07-29",
+   "owner": "backend",
+   "title": "DEBUG=true 한 줄이 기동 게이트 전체를 끈다 (DEBUG 자신은 경고 항목)",
+   "evidence": [
+    "enforce_runtime_settings:177 = if fatal and not settings.debug → raise. 그 외에는 warning",
+    "_runtime_checks 에서 DEBUG 는 fatal=False (경고)",
+    "실측 — DEBUG=true + JWT_SECRET='' → 기동 성공(경고 2줄)",
+    "구조적 방어 둘: docker-compose.deploy.yml:75 이 environment 로 DEBUG:'false' 강제(env_file 우선) · deploy/preflight.sh:112 가 ^DEBUG=true 를 bad 로 잡음"
    ],
-   "mitigation": "도달성이 낮다 - redev_project 는 정부 공개 CSV 이고 적재는 운영자가 손으로 돌린다(scripts/load_redevelopment.py). 원격 공격자가 직접 밀어 넣는 값이 아니며, 현실적 경로는 파서의 칸 어긋남이다. 그래서 fail 조건이 아니다."
+   "pass_conditions": [
+    "(선택) DEBUG 를 fatal 로 올리거나, 최소한 preflight 의 DEBUG 검사를 배포 절차 필수로 유지할 것"
+   ]
+  },
+  {
+   "id": "SR30-4",
+   "verdict": "OPEN",
+   "severity": "info",
+   "blocks": "없음 — 비차단",
+   "found_by": "SR-030 (security-reviewer)",
+   "date_found": "2026-07-29",
+   "owner": "backend",
+   "title": ".env.example ↔ SECRET_ENV_VARS 대조 규칙이 접미사 앵커라 흔한 비밀 이름 다수를 못 잡는다",
+   "evidence": [
+    "test_script_hygiene._SECRET_ENV_SLOT_RE = (_KEY|_SECRET|_PASSWORD|_PASSWD|_TOKEN)$",
+    "실측 미검출 7종 — AWS_ACCESS_KEY_ID · KAKAO_SERVICEKEY · SMTP_PW · SENTRY_DSN · GOOGLE_CREDENTIALS · API_KEY_ID · PRIVATE_KEY_PEM (칸을 만들어도 테스트가 통과한다)",
+    "반대로 규칙 안 이름 5종은 전부 검출된다(NAVER_API_KEY/SOME_SECRET/DB_PASSWORD/SLACK_TOKEN/X_PASSWD)",
+    "지금 .env.example 에 그런 이름 0개 → 실해 0"
+   ],
+   "pass_conditions": [
+    "앵커를 떼고 부분일치(KEY|SECRET|PASS|TOKEN|CRED|DSN|PEM)로 넓힐 것 — 과하게 잡는 쪽이 안전하다"
+   ]
+  },
+  {
+   "id": "SR30-5",
+   "verdict": "OPEN",
+   "severity": "info",
+   "blocks": "없음 — 비차단",
+   "found_by": "SR-030 (security-reviewer)",
+   "date_found": "2026-07-29",
+   "owner": "data-engineer",
+   "title": "fetch_academy.result_fault 의 잔여 두 갈래 — 비-dict 응답과 '블록만 있는' 오류 응답",
+   "evidence": [
+    "result_fault:155 = if not isinstance(payload, dict) or payload.get('acaInsTiInfo'): return None → 비-dict 응답(JSON 배열 등)을 정상으로 본다(실측: 0행 저장 · failures=[])",
+    "블록이 있기만 하면 head[].RESULT.CODE 는 보지 않는다 — head list_total_count=0 + RESULT INFO-200 조합에서 0행이 조용히 저장된다(실측)",
+    "블록 + head(total 71,597) + row:[] 조합은 pagination_fault 가 잡는다(실측 멈춤)",
+    "HTML 오류 페이지는 json.loads 가 던져 failures 에 남는다 — 이 갈래는 이미 덮여 있다",
+    "관측된 NEIS 동작이 아니고 소비 로더도 아직 없다"
+   ],
+   "pass_conditions": [
+    "not isinstance(payload, dict) 도 fault 로 볼 것",
+    "head[].RESULT.CODE 가 INFO-000 이 아니면 fault 로 볼 것"
+   ]
+  },
+  {
+   "id": "SR30-6",
+   "verdict": "OPEN",
+   "severity": "low",
+   "blocks": "없음 — 비차단",
+   "found_by": "SR-030 (security-reviewer)",
+   "date_found": "2026-07-29",
+   "owner": "data-engineer",
+   "cwe": "CWE-532 (로그/출력으로의 민감정보 노출) 계열",
+   "title": "fetch_academy 의 실패가 나가는 길은 로그가 아니라 stderr 다 — 마스킹을 타지 않는다",
+   "evidence": [
+    "fetch_academy.main():363 = raise SystemExit(f'[FAIL] {exc}') from None",
+    "SystemExit 메시지는 인터프리터가 stderr 로 직접 찍고 logging 을 타지 않는다 — install_log_masking() 은 logging 계층에만 건다",
+    "실측 — 키를 되비친 RESULT.MESSAGE 로 만든 FetchError: mask_secrets() 통과 시 키 없음 · logger.error 출력에 키 없음 · SystemExit 문자열에는 키 그대로 남음",
+    "같은 실측을 print()/stdout 과 미포착 예외 traceback 에서도 재현(둘 다 그물 밖)",
+    "그래서 fetch_academy.py:152-153 의 '그래도 마스킹 계층이 한 번 더 훑는다'는 이 코드가 실제로 쓰는 경로에서는 사실이 아니다",
+    "NEIS 의 MESSAGE 는 고정 문구이고 인증키를 되비치지 않는다(관측·문서) → 실누출 0"
+   ],
+   "pass_conditions": [
+    "raise SystemExit(f'[FAIL] {mask_secrets(str(exc))}') — mask_secrets 는 이미 _common.__all__ 에 있고 verify_migration.py:144 가 같은 자리에서 이미 그 형태다",
+    "또는 주석에서 '마스킹 계층이 한 번 더 훑는다'를 삭제할 것(방어인 척하지 않게)"
+   ]
+  },
+  {
+   "id": "SR30-7",
+   "verdict": "OPEN",
+   "severity": "info",
+   "blocks": "없음 — 비차단",
+   "found_by": "SR-030 (security-reviewer)",
+   "date_found": "2026-07-29",
+   "owner": "frontend",
+   "title": "plainReason 이 프로토타입 키를 조회한다 — 선언 타입 string|null 인데 함수가 나온다",
+   "evidence": [
+    "plainTerms.ts:97 = REASON_TEXT[key] ?? REASON_TEXT[key.toLowerCase()] · REASON_TEXT 는 평범한 객체 리터럴",
+    "실측 — plainReason('constructor'|'toString'|'valueOf'|'hasOwnProperty') → function, plainReason('__proto__') → object",
+    "현 소비처가 템플릿 리터럴(recommendation.ts:100)이라 화면에 'function toString() { [native code] }' 같은 잡문자열이 뜰 뿐 실행되지 않는다 — XSS 도 프로토타입 오염(쓰기)도 아니다",
+    "서버 reason 은 timeadjust.REASON_* 상수(한국어 문장)라 도달 경로도 사실상 없다",
+    "plainReason 은 export 라 다음 소비처가 {reason} 를 직접 렌더하면 React 가 'Functions are not valid as a React child' 로 죽는다"
+   ],
+   "pass_conditions": [
+    "Object.hasOwn(REASON_TEXT, key) 로 감싸거나 Map / Object.create(null) 로 바꿀 것"
+   ]
+  },
+  {
+   "id": "SR30-8",
+   "verdict": "OPEN",
+   "severity": "info",
+   "blocks": "없음 — 비차단",
+   "found_by": "SR-030 (security-reviewer)",
+   "date_found": "2026-07-29",
+   "owner": "frontend",
+   "cwe": "CWE-1333 (비효율적 정규식 복잡도) — 2차(quadratic), 지수 아님",
+   "title": "plainText 의 /\\s+([.,·])/g 가 공백류 반복에서 2차 폭발한다",
+   "evidence": [
+    "실측(node) — 개행 1,000 → 1.7ms · 10,000 → 175.3ms · 50,000 → 4,580.6ms · 200,000 → 83,786.8ms",
+    "같은 파일의 다른 두 정규식은 선형 — /\\s*\\(([^()]+)\\)/g 는 '(' 20만 개에 0.9ms, /[ \\t]{2,}/g 도 선형",
+    "입력은 전부 서버 생성 문자열(scoreCoverage 의 missing·coverageGap·score_notes, 그리고 새로 plainReason)",
+    "LLM 유래분도 agents/llm.py:31 DEFAULT_MAX_TOKENS=900 에 묶여 ≈3~4천 자 → 실측 수 ms",
+    "이번 델타가 만든 것이 아니다 — plainText 는 기존 코드이고 plainReason 이 진입점을 하나 늘렸다"
+   ],
+   "pass_conditions": [
+    "/[ \\t]+([.,·])/g 로 좁히거나 입력 길이를 잘라 넣을 것(권고)"
+   ]
+  },
+  {
+   "id": "SR29-4",
+   "verdict": "OPEN",
+   "severity": "low",
+   "blocks": "없음",
+   "found_by": "SR-029 (security-reviewer, herdr re-review 대행)",
+   "date_found": "2026-07-28",
+   "owner": "backend",
+   "title": "deps.py:37 이 503 본문에 FIELD_ENCRYPTION_KEY 의 길이를 싣는다 (CWE-209)",
+   "evidence": [
+    "실측 - GET /me/profile (키 12바이트) -> 503 {\"code\":\"MISCONFIGURED\",\"message\":\"FIELD_ENCRYPTION_KEY 는 32바이트여야 합니다 (현재 12바이트). 약한 키로 조용히 돌아가느니 시작을 막습니다.\"}",
+    "load_key 의 ValueError 를 str(exc) 로 그대로 옮긴다(deps.py:30-38)",
+    "흘리는 것은 키가 아니라 길이이고, 길이가 32가 아니면 load_key 가 먼저 막아 암호문이 하나도 생성되지 않는다(fail-closed). 그 키로 만들어진 데이터가 존재하지 않으므로 정보 가치가 사실상 0",
+    "인증 + 승인 필요(CurrentUser). 모집단 1명",
+    "이번 델타가 만든 것이 아니다(기존 코드)"
+   ],
+   "pass_condition": "본문은 고정 문구로 두고 str(exc) 는 logger.error 로 옮길 것. 사용자 응답에 str(exc) 를 옮기는 습관이 SR-025(422 input)와 SR27-1 을 낳았다."
+  },
+  {
+   "id": "SR29-5",
+   "verdict": "OPEN",
+   "severity": "low",
+   "blocks": "없음",
+   "found_by": "SR-029 (security-reviewer, herdr re-review 대행)",
+   "date_found": "2026-07-28",
+   "owner": "backend",
+   "title": "deps.py:56 이 503 본문 problems 에 서버 절대경로와 YAML 값을 싣는다 (CWE-209)",
+   "evidence": [
+    "실측 - POST /affordability (세율파일 없음) -> 503 detail.problems = [\"설정 파일이 없습니다: \\\\srv\\\\config\\\\tax_rules.yaml\"]",
+    "RuleValidationError.problems 에는 경로 외에 YAML 값 반사도 들어간다 - 예 \"acquisition_tax (id): rate_pct 가 숫자가 아닙니다 ('abc')\"",
+    "그 경로는 docker-compose.deploy.yml 의 TAX_RULES_PATH 값이고 config/tax_rules.yaml 은 저장소에 커밋돼 있다(비밀 관련 문자열 0건 확인)",
+    "인증 + 승인 필요(CurrentUser). 모집단 1명",
+    "이번 델타가 만든 것이 아니다(기존 코드)"
+   ],
+   "pass_condition": "본문은 고정 문구로 두고 exc.problems 는 logger.error 로 옮길 것(운영자는 로그를 본다)."
+  },
+  {
+   "id": "SR29-8",
+   "verdict": "OPEN",
+   "severity": "info",
+   "blocks": "없음",
+   "found_by": "SR-029 (security-reviewer, herdr re-review 대행)",
+   "date_found": "2026-07-28",
+   "owner": "data-engineer",
+   "title": "pagination_fault 는 행 순서를 뒤집거나 1행만 바꾼 반복 페이지를 잡지 못한다",
+   "evidence": [
+    "실측 - 같은 5행을 reversed() 로 준 p2, 5행 중 1행만 교체한 p2 -> 둘 다 '고장 아님' 판정",
+    "page_signature 가 행 순서를 포함한 튜플이라 순서가 바뀌면 다른 페이지로 읽힌다",
+    "관측된 NEIS 무키 동작(같은 5행 같은 순서)은 정확히 잡히므로 지금은 문제가 아니다"
+   ],
+   "pass_condition": "필요해지면 signature 를 정렬된 집합으로 비교하거나 누적 ACA_ASNUM 집합의 증가량을 볼 것. 지금은 기록만."
+  },
+  {
+   "id": "CR33-1",
+   "verdict": "OPEN",
+   "severity": "medium",
+   "blocks": "★ 차단 - 커밋 전 수정",
+   "found_by": "CR-033 (code-reviewer)",
+   "date_found": "2026-07-28",
+   "owner": "backend",
+   "title": "기준월이 '아직 진행 중인 달'인 지역이 운영에 4곳 있다 - 재실행마다 예산 판정이 바뀐다",
+   "evidence": [
+    "운영 market_price_index 실측 - sigungu 79곳 중 4곳의 reference_ym 이 2026-07(오늘 기준 진행 중인 달): 41113 수원 권선(n=417) · 41370 오산(291) · 41461 용인 처인(181) · 41595 화성 병점(308), 전부 is_complete=t",
+    "해당 지역 단지 합 581 / 전체 16,462 = 3.5%",
+    "_complete_flags 가 달력을 보지 않고 '직전 6개 보존월 중위의 80%' 만 본다 - 7월은 끝나지도 않았고 신고 지연 30일도 안 지났는데 78~98% 라 통과한다",
+    "_freshest_index 가 max(reference_ym) 로 고르므로 2026-07 > 시도 2026-06 -> 이 4곳은 시도 지수를 제치고 진행 중인 달로 환산된다. 낡은 기준월을 피하려는 새 규칙이 반대편 함정을 밟는다",
+    "idx(2026-07)/idx(2026-06) = +1.70% / +1.50% / +1.90% / +1.62% - 담당자 본인이 미등기 가설을 기각하며 측정한 선택편향(+0.5~2.2%)과 같은 크기·같은 방향이다",
+    "timeadjust 규칙 3 이 '덜 찬 달을 기준으로 삼으면 추정치가 며칠 뒤 이유 없이 바뀐다'고 선언한 바로 그 자리",
+    "비교 불능 재발 - 이 4곳은 '2026-07 시점 환산', 나머지는 '2026-06 시점 환산' 으로 갈린 채 같은 예산으로 재진다",
+    "반대 방향 오탐도 적재값에 있다 - 서울 sido 2025-07·08·11·12 가 1년 뒤에도 is_complete=false. 이 판정은 '신고가 정착했는가'가 아니라 '거래량이 최근 대비 많은가'를 재고 있다",
+    "테스트 공백 - test_표본이_급감한_달은_미완결로_표시된다(감소 케이스)만 있고 '진행 중인 달' 케이스가 없어 운영에서 4곳이 통과했는데 스위트는 전부 초록이었다"
+   ],
+   "pass_conditions": [
+    "_complete_flags 에 달력 하한을 AND 로 추가 - ym < ym_of(as_of - 30일) 인 달만 완결 후보",
+    "건수 검사는 그대로 둘 것(수집 누락 탐지 역할은 유효하다)",
+    "순수 함수 유지를 위해 build_index(..., as_of=) 로 날짜 주입",
+    "테스트 '진행 중인 달은 표본이 많아도 완결이 아니다' 추가",
+    "배치 재실행 후 sigungu 기준월에 2026-07 이 0곳임을 확인"
+   ],
+   "note": "값이 크게 틀리는 결함은 아니다(±2%). 차단하는 이유는 셋이다 - 재현 불가능성(같은 입력, 다른 날 다른 결과), 모듈이 막겠다고 선언한 현상이 선언한 자리에서 일어나 있다는 것, 이번 라운드의 새 배선이 노출을 키운다는 것. 고치는 비용은 가드 한 줄 + 테스트 1건 + 배치 48초 재실행이라 차단이 비례한다."
+  },
+  {
+   "id": "CR33-2",
+   "verdict": "OPEN",
+   "severity": "medium",
+   "blocks": "없음 - 비차단(다음 라운드 필수)",
+   "found_by": "CR-033 (code-reviewer)",
+   "date_found": "2026-07-28",
+   "owner": "backend",
+   "title": "_freshest_index 가 배선 계층에 있어 select_index 가 폐기된 정책을 계속 공개 API 로 선언한다",
+   "evidence": [
+    "_freshest_index 는 MarketIndex/TradeRow 만 받아 MarketIndex 를 돌려주는 순수 도메인 함수 - 배선 고유 요소 0",
+    "timeadjust.select_index docstring 은 지금도 '시군구 지수를 우선하되…' 라고 적는다. 그런데 그대로 쓰면 버그가 난다",
+    "fair_price_band(index=select_index(...)) 는 timeadjust 가 안내하는 정식 사용법이고, 그 경로가 중구 남산타운 15.00억->13.16억(-12.3%) 를 낸다. 다음 사람은 orchestrator 를 읽을 이유가 없다",
+    "test_valuation_timeadjust.py:337-360 이 도메인 계층에서 옛 정책을 못박고 있어 두 파일이 다른 정책을 각각 고정한다",
+    "규칙 자체(기준월 최신 우선)는 옳다 - 운영 실측으로 확인했고 tie-break(같으면 시군구)도 옳다"
+   ],
+   "pass_conditions": [
+    "기준월 우선 규칙을 select_index 안으로 이동(또는 prefer_freshest=True 를 기본값으로)",
+    "candidate_index 는 키 조회 + 사유 남기기 폴백만 남길 것 - 그건 진짜 배선이다",
+    "test_valuation_timeadjust.py 의 선택 테스트도 함께 이동"
+   ],
+   "note": "레이어 '위반'으로 부르지 않는다 - orchestrator 가 도메인 함수를 조합하는 것은 제 일이다. 실제 결함은 select_index 가 거짓을 말하게 된 것이고, 그래서 medium·비차단이다."
+  },
+  {
+   "id": "CR33-3",
+   "verdict": "OPEN",
+   "severity": "medium",
+   "blocks": "★ 차단 - 커밋 전 수정",
+   "found_by": "CR-033 (code-reviewer)",
+   "date_found": "2026-07-28",
+   "owner": "frontend",
+   "title": "카드가 시점 보정된 값을 여전히 '국토교통부 실거래가'라고 부른다 - 배선이 API 경계에서 끊겼다",
+   "evidence": [
+    "백엔드는 이름을 정확히 부르려 공을 들였다 - to_evidence 가 claim 을 '2026-06 시점 환산 중위'로 바꾸고, _price_band_dict 가 as_of_ym·time_adjusted 를 실으며 주석에 '표시 문구가 여기서 갈린다'고 적는다",
+    "frontend/src/api/client.ts:282-290 PriceBand 인터페이스에 as_of_ym·time_adjusted 가 없다",
+    "frontend/src/components/ReportCard.tsx:126-133 -> '적정가 밴드 … 중위 X (국토교통부 실거래가 · 최근 N개월 M건)'",
+    "frontend/src/lib/recommendation.ts:55 헤드라인 라벨 = '최근 실거래 기준 추정가', orchestrator.py:1500 price_note = TRADE_BASIS_NOTE(기준월 언급 없음)",
+    "결과: 예산 초과로 제외된 후보는 '2026-06 시점 환산 중위 20.73억원(추정)'이라 정직하게 말하고, 추천에 남은 후보는 같은 값을 '중위 20.73억원(국토교통부 실거래가)'이라 부른다 - 같은 숫자에 두 이름",
+    "운영 listing 0행이라 사실상 전 후보에서 이 값이 곧 예산 판정 기준가다 - 시점은 부가정보가 아니라 값의 정의다",
+    "프론트 736건 중 이 문구를 보는 테스트 0건"
+   ],
+   "pass_conditions": [
+    "FE PriceBand 에 as_of_ym?: string|null · time_adjusted?: boolean 추가",
+    "ReportCard 밴드 줄과 priceView 라벨에 기준월 표기",
+    "보정된 값의 출처를 '국토교통부 실거래가'만으로 적지 말 것 - 우리 계산(자체 시장지수)이 섞여 있다",
+    "테스트 1건 - 보정된 밴드는 카드에서도 환산 시점을 말하고, 보정 안 된 밴드는 말하지 않는다"
+   ],
+   "mitigation": "job 단위 notes 는 렌더된다(RecommendPanel.tsx:306) - 목록 상단에 '적정가 밴드는 2026-06 시점으로 환산했습니다(N건)'가 한 번 나온다. 조용하지는 않다. 그래서 medium 이고 high 가 아니다."
+  },
+  {
+   "id": "CR33-4",
+   "verdict": "OPEN",
+   "severity": "low",
+   "blocks": "없음 - 비차단",
+   "found_by": "CR-033 (code-reviewer)",
+   "date_found": "2026-07-28",
+   "owner": "backend",
+   "title": "지수 배치 - 전체 실행이 단일 트랜잭션이고 조회가 method 를 안 거른다 / 문서 수치가 적재값과 다르다",
+   "evidence": [
+    "멱등성은 확인됨 - ON CONFLICT(region_code, scope, ym) DO UPDATE. 재실행 안전. 적재 2,381행 실측 일치",
+    "build_market_index.run() 의 with engine.begin() 이 85지역·48.7초 전체를 하나로 감싼다 - 마지막 지역이 실패하면 앞의 84곳이 전부 롤백되고, 48초짜리 트랜잭션이 vacuum 스냅샷을 잡는다(192MB 컨테이너)",
+    "migration 015 는 '방법을 바꾸면 값이 달라지므로 섞이지 않게 기록한다'고 적었는데 postgis._MARKET_INDEX_SQL 은 (region_code, scope) 로만 읽는다 - v2 로 부분 재계산하는 날 두 방법의 비율을 계산하게 된다. 현재 method 1종(운영 실측)이라 무해",
+    "창 밖으로 나간 ym 행을 지우는 경로가 없다(--months 를 줄이면 잔존)",
+    "migration 015 / timeadjust docstring 의 지수 수치(서울 0.8981->1.1371 +26.6%)가 적재값(0.954294->1.144827 = +20.0%)과 다르다. 결론은 유효하지만 이 저장소는 주석을 근거로 취급한다(CR32-2 선례)"
+   ],
+   "pass_conditions": [
+    "scope 또는 지역 단위 커밋으로 트랜잭션 경계 축소",
+    "market_index 조회에 method 필터를 넣거나 '한 방법만 존재한다'를 표에 강제하고 근거를 남길 것",
+    "docstring/migration 의 지수 수치를 실제 적재값으로 정정"
+   ]
+  },
+  {
+   "id": "CR33-5",
+   "verdict": "OPEN",
+   "severity": "low",
+   "blocks": "없음 - 비차단",
+   "found_by": "CR-033 (code-reviewer)",
+   "date_found": "2026-07-28",
+   "owner": "data-engineer",
+   "title": "fetch_academy.stats 의 zone_academic 이 행을 센다 - 모듈 docstring 이 금지한 바로 그 형태",
+   "evidence": [
+    "backend/scripts/fetch_academy.py:268 zone_academic[...] += 1 이 행 단위로 올라간다",
+    "모듈 docstring: '행 수를 세면 종합학원이 있는 동네가 부풀어 보인다 - 이 통계가 태그 임계값의 모집단이 되므로 여기서 틀리면 전부 틀린다'",
+    "지금은 len(zone_academic) 만 쓰여 무해 - 값이 쓰이는 날 정확히 그 오류가 난다"
+   ],
+   "pass_conditions": [
+    "Counter 대신 defaultdict(set) 으로 ACA_ASNUM 고유 수를 셀 것"
+   ]
+  },
+  {
+   "id": "CR33-6",
+   "verdict": "OPEN",
+   "severity": "low",
+   "blocks": "없음 - 비차단",
+   "found_by": "CR-033 (code-reviewer)",
+   "date_found": "2026-07-28",
+   "owner": "data-engineer",
+   "title": "fetch_academy - 부분 수집인데 exit code 0 / page1 오탐 시 3개 교육청이 통째로 중단된다",
+   "evidence": [
+    "감지 자체는 확실하다 - page1 검사(total > len(rows) and pSize > len(rows))가 무키 5행 상한을 첫 요청에서 잡고, 연속 페이지 서명 일치가 pIndex 무시를 잡는다. 둘 다 FetchError 로 파일을 쓰지 않는다(fail-closed)",
+    "우회는 관측된 고장에는 없다 - 1,2,1,2 교대나 total 파싱 실패 시 한쪽이 꺼지지만 page1 검사 하나로 충분하다",
+    "failures 가 비지 않아도(예: '총 70,000행 중 3,000행만 수신') main() 은 0 을 돌려준다 - 로그 warning 과 파일 안 failures 로 남으니 조용하지는 않으나 cron 은 성공으로 읽는다",
+    "FetchError 가 office 루프 밖으로 나가 3개 교육청이 통째로 중단된다 - NEIS 가 pSize 를 정확히 채우므로 확률은 낮으나 fail-closed 범위가 필요보다 넓다"
+   ],
+   "pass_conditions": [
+    "failures 가 비지 않으면 non-zero exit 로 끝낼 것",
+    "page1 오탐 여지를 줄이려면 해당 office 만 실패로 기록하고 나머지는 계속하는 선택지 검토"
+   ]
+  },
+  {
+   "id": "CR33-7",
+   "verdict": "OPEN",
+   "severity": "low",
+   "blocks": "없음 - 비차단",
+   "found_by": "CR-033 (code-reviewer)",
+   "date_found": "2026-07-28",
+   "owner": "backend",
+   "title": "school_quality - '서명에 거리 인자가 없는 것이 가장 강한 방어선'은 과장이다 / 판정 로직 도달 불가(info)",
+   "evidence": [
+    "게이트는 실제로 잠겨 있다 - COMPARABLE_ACHIEVEMENT_SOURCES 가 빈 집합이라 _screen 의 허용목록 검사에서 모든 근거가 탈락하고, assess_school_district_tag 는 어떤 입력에도 unavailable 을 낸다(코드 확인)",
+    "판정(학군지 태그 불가) 자체는 옳고, 사유 순서(근거 검사 -> 임계값 검사)도 옳다",
+    "그러나 서명은 이 함수만 지킨다 - 다른 곳에서 거리로 배지를 만드는 것은 못 막는다. 실제로 잠그고 있는 것은 빈 허용목록 · 어디에도 배선되지 않음 · TOP_PERCENTILE_THRESHOLD=None 셋이다",
+    "school_quality.py:220-251(임계값 이후 판정·evidence 생성)은 운영에서 도달 불가능하고 318줄 테스트가 monkeypatch 로만 태운다(info)",
+    "인용한 원천 설명의 실재 여부는 이 리뷰가 재검증하지 않았다(학교알리미가 세션·캡차 기반이라 범위 밖). 확인한 것은 인용문이 school_quality.py docstring 과 config/sources.yaml 두 곳에 원문 보존돼 서로 일치하고, '공시기관: 중, 고'라는 진술이 근거 ①(초등 원천 부재)과 ②(교내 평가라 비교 불가)를 동시에 설명해 내부 정합이 맞다는 것까지다"
+   ],
+   "pass_conditions": [
+    "docstring 의 '가장 강한 방어선' 문구를 실제 잠금장치(빈 허용목록 · 미배선 · 임계값 None) 기준으로 낮출 것"
+   ],
+   "note": "서명 고정 테스트 자체는 유지 가치가 있다 - 다음 사람이 '거리도 같이 받자'고 할 때 정직하게 실패한다."
+  },
+  {
+   "id": "CR33-8",
+   "verdict": "OPEN",
+   "severity": "low",
+   "blocks": "없음 - 비차단",
+   "found_by": "CR-033 (code-reviewer)",
+   "date_found": "2026-07-28",
+   "owner": "backend",
+   "title": "assert_no_cost_estimate 에 '완전하지 않다'가 없다 - 우회 3종은 원래 한계이고 A8 은 값싸게 좁힐 수 있다",
+   "evidence": [
+    "직접 뚫음(전부 새 구현 산물 아님) - '분담금은 약 일억 이천만 원' PASS(한글 수사) · '조합원 추가 납부액은 약 1.2억원' PASS(주제어 회피, '추가\\s*비용' 불일치) · '약 ￦120,000,000' PASS('원' 없음)",
+    "새 구현 고유의 것은 A8 계열 둘뿐이고 비현실적 - 두 인용문이 금액을 나눠 덮기, 2글자 인용 '1억' 이 2글자 금액 '1억' 을 덮기(수집값이 정확히 '1억' 이어야 한다)",
+    "assert_no_cost_topic 에는 '완전하지 않다'가 적혀 있는데 assert_no_cost_estimate 에는 없다",
+    "D1(필드 분리) 유지 판단은 타당하다 - 이어 붙여 검사하면 rationale 의 COST_DISCLOSURE 주제어가 모든 필드에 전이돼 CR31-1 이 더 큰 규모로 재현된다"
+   ],
+   "pass_conditions": [
+    "docstring 에 한계(한글 수사 · 주제어 회피 · 비원화 표기)를 한 줄 명시",
+    "(선택) 인용문 전체가 금액 토큰 하나로 소진되면 인용으로 인정하지 않기 - '1억원지구'는 계속 통과하고 '1.2억원'만 막힌다"
+   ]
+  },
+  {
+   "id": "SR28-1",
+   "verdict": "OPEN",
+   "severity": "low",
+   "blocks": "없음 - 비차단",
+   "found_by": "SR-028 (security-reviewer, herdr re-review 대행)",
+   "date_found": "2026-07-28",
+   "owner": "PM / 사용자",
+   "title": "허용목록의 http://localhost:5173 은 누구나 가질 수 있는 출처다 - KA 위조 없이도 쿼터를 쓸 수 있다",
+   "evidence": [
+    "JS 앱키는 배포 번들에서 그대로 추출된다(SR-028 §1 실측)",
+    "http%3A%2F%2Flocalhost%3A5173 → 200 실측. 즉 아무나 자기 PC 에서 5173 으로 개발 서버를 띄우면 우리 키가 동작한다",
+    "5173 은 Vite 기본값이라 가장 흔한 출처다 — frontend/vite.config.ts 에 port 지정이 없음을 확인",
+    "대조: localhost:5174 · 127.0.0.1:5173 은 401 → 포트·호스트 정확 일치라 '흔한 출처 하나'만 열린 것"
+   ],
+   "pass_conditions": [
+    "개발이 끝나면 콘솔 목록에서 http://localhost:5173 을 뺄 것",
+    "상시 필요하면 추측 불가능한 개발 출처로 바꿀 것(127.0.0.1 로 해석되는 호스트명 + 비표준 포트 — 카카오가 그 형식을 받는지는 미검증)"
+   ],
+   "mitigation": "피해 상한은 DEC-001 이 이미 수용한 쿼터 소진(→ 지도 정지)이며 우리 데이터·세션과 무관하다. 공격자가 얻는 것은 무료 API 호출뿐이다."
+  },
+  {
+   "id": "SR28-2",
+   "verdict": "OPEN",
+   "severity": "low",
+   "blocks": "없음 - 비차단",
+   "found_by": "SR-028 (security-reviewer, herdr re-review 대행)",
+   "date_found": "2026-07-28",
+   "owner": "PM / 사용자",
+   "title": "브라우저 밖에서는 KA 헤더가 위조된다 - 도메인 등록은 '브라우저 임베드 도용'만 막는다",
+   "evidence": [
+    "이 리뷰의 200 응답 전부가 감사자 PC 에서 KA 의 origin 을 손으로 적어 받은 것이다(재현 그 자체가 증거)",
+    "KA 헤더가 아예 없으면 401 'KA Header is required' — 즉 JS 앱키를 평범한 REST 키로는 못 쓴다. 그러나 헤더 한 줄을 적으면 그만이다",
+    "services.js 는 브라우저에서 location.origin 으로 KA 를 만들므로 브라우저 안에서는 위조 불가 — 등록이 실효하는 범위가 정확히 여기까지다",
+    "카카오가 sdk.js 요청·타일 로드를 과금·집계에 넣는지는 외부에서 측정 불가(잔여 불확실성)"
+   ],
+   "pass_conditions": [
+    "카카오 콘솔에서 일일 사용량 알림·한도를 설정할 것 — 차단이 아니라 관측이 유일한 실효 방어다(SR22-5 가 Anthropic 에 요구한 것과 같은 종류)"
+   ],
+   "mitigation": "공개 JS 키의 구조적 한계라 콘솔 설정으로 더 좁힐 수 없다. DEC-001 의 revisit_if(한도 소진·비정상 호출 관측 시 즉시 재발급)가 이 항목의 사후 방어다."
+  },
+  {
+   "id": "SR28-3",
+   "verdict": "OPEN",
+   "severity": "info",
+   "blocks": "없음 - 비차단",
+   "found_by": "SR-028 (security-reviewer, herdr re-review 대행)",
+   "date_found": "2026-07-28",
+   "owner": "re-arch",
+   "title": "Referrer-Policy 의 '값'을 지키는 테스트가 없다 - 완화를 부분만 해도 전부 초록이다",
+   "evidence": [
+    "backend/tests/test_deploy_config.py:32-38 REQUIRED_HEADERS 는 헤더 이름만 블록별로 단언한다 — 값이 no-referrer 든 unsafe-url 이든 통과",
+    "no-referrer 는 4곳에 있다: deploy/nginx-realestate.conf:153(서버 블록) · :233(정적 자산) · :251(= /index.html) · deploy/nginx.conf:34",
+    "nginx add_header 는 하위 블록에 하나라도 있으면 상위를 통째로 끊는다 → :153 만 고치면 바뀐 것처럼 보이고 실제로는 안 바뀐다",
+    "SDK 요청을 일으키는 문서가 = /index.html 응답이므로 :251 이 결정적이다",
+    "SR19-2('넓히는 변경을 못 잡는다')와 같은 종류의 여백"
+   ],
+   "pass_conditions": [
+    "Referrer-Policy 완화를 실행할 때 값 일치 단언을 함께 넣을 것(4곳 전부 같은 값인지 포함)"
+   ],
+   "note": "완화 자체는 SR-028 §6 에서 안전하다고 판단했다. 이 항목은 그 변경을 지키는 그물에 관한 것이다."
+  },
+  {
+   "id": "SR28-4",
+   "verdict": "OPEN",
+   "severity": "info",
+   "blocks": "없음 - 비차단",
+   "found_by": "SR-028 (security-reviewer, herdr re-review 대행)",
+   "date_found": "2026-07-28",
+   "owner": "re-fe",
+   "title": "코드 주석·사용자 오류 문구가 해소 이전 상태를 말한다 - 다음 장애 때 엉뚱한 곳을 보게 만든다",
+   "evidence": [
+    "frontend/src/lib/placeSearch.ts 머리말: '콘솔에 도메인을 등록하기 전까지 이 기능은 절대 동작하지 않는다' — 등록이 끝났으므로 더 이상 사실이 아니다",
+    "placeErrorText('failed') 반환값: '카카오 개발자 콘솔에 이 사이트 도메인이 등록됐는지 확인해 주세요' — 이미 등록된 상태라 다음 401 의 원인은 다른 것이다",
+    "이 라운드는 코드를 수정하지 않으므로 기록만 남긴다"
+   ],
+   "pass_conditions": [
+    "주석을 '2026-07-28 등록 완료(운영 도메인·localhost:5173). 401 이면 목록에서 빠진 출처인지 볼 것'으로 갱신",
+    "오류 문구는 원인을 단정하지 않는 쪽으로"
+   ],
+   "note": "낡은 진단 안내는 침묵보다 나쁠 수 있다 — 사람을 이미 해결된 곳으로 보낸다."
   },
   {
    "id": "SR27-3",
@@ -1073,31 +1556,6 @@
    "note": "표준적인 트레이드오프다. 기록으로 남겨 다음 사람이 '놓쳤다'고 오해하지 않게 한다."
   },
   {
-   "id": "SR19-1",
-   "verdict": "OPEN",
-   "severity": "medium",
-   "blocks": "없음 - 배포 차단 아님. DEC-001 기록 정정 + 콘솔 재확인 필요(사용자 결정 근거였음)",
-   "found_by": "SR-019 (security-reviewer, herdr re-review 대행)",
-   "date_found": "2026-07-26",
-   "owner": "PM / 사용자",
-   "title": "카카오 JS 키 허용 도메인 제한이 실효가 없다 - 운영 도메인이 목록에 없고, no-referrer 요청은 그대로 통과",
-   "evidence": [
-    "실측 2회(12:44 · 12:51, 결과 동일). Referer 없음 -> HTTP 200 으로 SDK 본문 정상 수신(감사자 PC 에서)",
-    "Referer: https://realestate.utilverse.info/ -> HTTP 401 {\"errorType\":\"AccessDeniedError\",\"message\":\"domain mismatched! caller=https://realestate.utilverse.info. check out registered web domains.\"}",
-    "http:// 변형 · https://utilverse.info · http://localhost:5173 도 전부 401 -> 등록 허용목록에 운영 도메인이 없다",
-    "그런데도 지도는 뜬다: 우리 nginx 가 Referrer-Policy: no-referrer 를 주므로 브라우저가 SDK 요청에 Referer 를 싣지 않고, 카카오는 Referer 가 없으면 통과시킨다",
-    "결과(a): DEC-001 이 보완책으로 기록한 '카카오 JS 키 허용 도메인 제한 등록 완료'는 실제로 아무도 막지 않는다 - 누구나 no-referrer 로 우리 키를 쓸 수 있다(감사자가 실제로 200 수신)",
-    "결과(b): 숨은 결합 - 나중에 Referrer-Policy 를 strict-origin-when-cross-origin 등으로 '개선'하면 그 순간 지도가 죽는다. 인과를 아는 사람이 없으면 원인 추적이 매우 어렵다",
-    "피해 상한은 DEC-001 이 이미 수용한 '일일 호출 한도 소진'과 동일하며 우리 데이터·세션과 무관하다 -> 배포 차단은 아니다"
-   ],
-   "pass_conditions": [
-    "카카오 개발자 콘솔 웹 플랫폼 도메인에 https://realestate.utilverse.info 가 실제 등록됐는지 재확인(오타·다른 앱 등록 가능성)",
-    "등록 후에도 no-referrer 우회는 남으므로 DEC-001 의 보완책 목록에서 이 항목의 실효성을 하향 기재",
-    "Referrer-Policy 와 카카오맵 동작의 결합을 deploy/nginx-realestate.conf 주석에 1줄 남길 것"
-   ],
-   "note": "사용자가 이 보완책을 위험 수용의 근거 하나로 삼았으므로 사실관계를 정정해 알려야 한다. 결정 자체(재발급 안 함)는 여전히 합리적이다."
-  },
-  {
    "id": "SR19-2",
    "verdict": "OPEN",
    "severity": "low",
@@ -1706,89 +2164,6 @@
    "pass_condition": "deploy/nginx-realestate.conf 에 gzip on; gzip_types application/json; gzip_min_length 1024; 추가 후 배포하여 Content-Encoding: gzip 실측 확인"
   },
   {
-   "id": "CR32-2",
-   "verdict": "OPEN",
-   "severity": "low",
-   "blocks": "없음",
-   "found_by": "CR-032 (code-reviewer)",
-   "date_found": "2026-07-28",
-   "owner": "re-backend",
-   "title": "CANDIDATE_COMPLEX_LIMIT=120 의 주석 근거 한 줄이 실측과 다르다",
-   "evidence": [
-    "recommend.py:85-88 이 'MAX_CANDIDATES(200)가 먼저 걸려 상한을 더 올려도 사용자가 보는 결과는 같아진다'고 적음",
-    "운영 실측: 강남(조건없음) 상한120->후보123 / 상한200->후보151. 강남 59~85m2 상한120->83 / 상한200->195. 광진 140->167",
-    "MAX_CANDIDATES 에 실제로 닿는 것은 송파뿐 — 주석이 인용한 그 지역에서만 참",
-    "즉 상한을 올리면 사용자가 보는 후보가 실제로 늘어난다. 120 의 정당화는 시간 예산(+0.9~1.0초)이지 결과 불변이 아님"
-   ],
-   "pass_condition": "해당 3줄을 실측대로 정정 — 지역별로 MAX_CANDIDATES 도달 여부가 다르며 120 은 시간 예산으로 고른 값임을 명시"
-  },
-  {
-   "id": "CR32-3",
-   "verdict": "OPEN",
-   "severity": "low",
-   "blocks": "없음",
-   "found_by": "CR-032 (code-reviewer)",
-   "date_found": "2026-07-28",
-   "owner": "re-domain",
-   "title": "금액 가드 우회가 인정된 것보다 넓다 — 인용문이 주제어를 포함하면 뚫린다",
-   "evidence": [
-    "strip_source_quotes 가 인용문의 모든 출현을 지우는데 검사가 topic AND money 라 주제어가 지워지면 그것만으로 통과",
-    "실측 우회: quotes=('분담',) PASS · ('분담금',) PASS · ('억원',) PASS · ('1.2억',) PASS (금액 토큰 일부만으로도)",
-    "정상 동작 확인: quotes=() BLOCKED · ('강남구',) BLOCKED · 인용 밖 별개 금액 BLOCKED",
-    "성립하려면 개발자가 없는 금액을 지어내고 동시에 같은 요청 수집값이 그 토큰/주제어를 정확히 품어야 함 — 결합 확률 무시할 만함"
-   ],
-   "pass_condition": "검사를 갈라라 — 주제어는 원문 전체에서, 금액만 인용 제거본에서 찾는다. CR31-1 은 그대로 고쳐지면서 주제어 우회가 닫힌다"
-  },
-  {
-   "id": "CR32-4",
-   "verdict": "OPEN",
-   "severity": "low",
-   "blocks": "없음",
-   "found_by": "CR-032 (code-reviewer)",
-   "date_found": "2026-07-28",
-   "owner": "re-backend",
-   "title": "detail.cost_guard_error(내부 lint 메시지)가 API 응답에 실린다 — 같은 판단 기준이 두 필드에 다르게 적용됨",
-   "evidence": [
-    "orchestrator.py:561 이 str(exc) 를 detail 에 넣고 _redev_dict(:668) 가 dict(assessment.detail) 을 통째로 payload 에 실음",
-    "실물: detail.cost_guard_error = 추가분담금 금액은 공개 데이터에 없습니다 — ...(주제어 '분담' + 금액 '1.2억원')...",
-    "민감정보 아님(매치 토큰 2개뿐, 사용자 자산·내부 ID 없음)이고 프론트도 렌더링하지 않음",
-    "다만 RedevAssessment.source_quotes 에는 '응답 payload 에는 싣지 않는다'고 주석까지 달아 놓고 내부 lint 메시지는 실음"
-   ],
-   "pass_condition": "cost_guard_error 를 logger.exception 에만 남기고 payload 에서 빼거나, 싣는다면 왜 괜찮은지 한 줄 근거를 남길 것"
-  },
-  {
-   "id": "CR32-5",
-   "verdict": "OPEN",
-   "severity": "low",
-   "blocks": "없음",
-   "found_by": "CR-032 (code-reviewer)",
-   "date_found": "2026-07-28",
-   "owner": "re-fe",
-   "title": "client.ts 주석이 이번 라운드에 거짓이 됐다 — '지도 응답에는 아직 오지 않는다'",
-   "evidence": [
-    "frontend/src/api/client.ts:110-111 이 nearest_station·redevelopment 를 '지도 응답에는 아직 오지 않는다 ... 서버가 실어 주는 날 자동으로 붙는다'로 서술",
-    "MAP-2 가 바로 그 '실어 주는 날'이며 routes.py:_map_tag_facts 가 두 필드를 지도 응답에 싣는다",
-    "같은 파일을 이번 라운드에 46줄 고치면서 놓침"
-   ],
-   "pass_condition": "주석 한 줄 정정"
-  },
-  {
-   "id": "CR32-6",
-   "verdict": "OPEN",
-   "severity": "low",
-   "blocks": "없음",
-   "found_by": "CR-032 (code-reviewer)",
-   "date_found": "2026-07-28",
-   "owner": "re-fe",
-   "title": "죽은 backdrop-filter 가 남아 시각 효과 없이 합성 비용만 낸다 (UX-5 잔여)",
-   "evidence": [
-    "--material 이 불투명이 된 뒤 MapLegend.css:7-8 · MapView.css:72-73 의 backdrop-filter 는 효과 없음",
-    "@supports not (backdrop-filter…) 폴백 블록(MapLegend.css:14 · MapView.css:78)도 죽음 — 폴백이 넣는 --bg 가 --material 과 같은 값",
-    "순수 잉여가 아님: backdrop-filter 는 합성 레이어 승격을 강제하고 일부 엔진은 블러 계산 후 폐기 — 지도 위 오버레이라 모바일에서 손해"
-   ],
-   "pass_condition": "6줄 + @supports 블록 2개 삭제"
-  },
-  {
    "id": "CR32-7",
    "verdict": "OPEN",
    "severity": "info",
@@ -1806,6 +2181,359 @@
   }
  ],
  "resolved_findings": [
+  {
+   "id": "SR29-1",
+   "verdict": "RESOLVED",
+   "severity": "medium",
+   "blocks": "없음 - 비차단. 단 배포 전 확인 12번으로 승격",
+   "found_by": "SR-029 (security-reviewer, herdr re-review 대행)",
+   "date_found": "2026-07-28",
+   "owner": "backend",
+   "title": "Settings.validate_runtime() 이 어디서도 호출되지 않는다 - 빈 JWT_SECRET 으로도 앱이 뜨고 토큰이 발급·검증된다",
+   "evidence": [
+    "저장소 전체 검색 - validate_runtime 의 호출자는 tests/test_security.py 두 줄뿐. main.create_app()·lifespan·배포 스크립트 어디에도 없다",
+    "config.py 모듈 docstring 첫 문단이 '설정이 잘못되면 조용히 약한 상태로 돌아가는 대신 시작을 막는다' 인데 막지 않는다",
+    "jwt_secret 기본값이 '' (빈 문자열)",
+    "실측 - create_token/decode_token 이 secret='' · 'short'(5자) · 31자 전부에서 성공(uid 왕복). PyJWT 는 InsecureKeyLengthWarning 만 낸다",
+    "빈 문자열 서명키는 누구나 아는 값이라 임의 user_id 로 access 토큰을 위조할 수 있다. current_user 는 토큰이 가리키는 사용자를 DB 에서 찾을 뿐이라 승인제도 함께 우회된다",
+    "★ SR-015 원장(security-review-log.md 1348행)이 이 함수를 방어 근거로 인용했다 - '기동점검 validate_runtime() 이 … 를 드러낸다 - 조용히 넘어가지 않는다'. 그 문장은 사실이 아니다",
+    "FIELD_ENCRYPTION_KEY 는 load_key 가 사용 지점에서 fail-closed 로 막으므로 조용히 약해지는 것은 JWT 뿐이다",
+    "deploy/preflight.sh:104 는 JWT_SECRET 이 비어 있는지만 본다(길이 미검사). FIELD_ENCRYPTION_KEY 만 32자를 잰다. 그리고 preflight 는 권고 스크립트이지 기동을 막는 게이트가 아니다"
+   ],
+   "pass_conditions": [
+    "create_app() 에서 settings.validate_runtime() 을 부르고, debug=False 이면 문제가 있을 때 기동을 중단할 것(로그에 항목 이름만 남기고 값은 남기지 않는다)",
+    "최소안 - create_token 이 len(secret) < 32 를 거부할 것. hash_password 가 하는 일(사용 지점에서 하한 강제)을 JWT 만 안 하고 있다",
+    "preflight.sh 의 JWT_SECRET 검사에 길이 조건 추가"
+   ],
+   "mitigation": "현 운영 .env 에는 값이 있고(서비스 정상 동작 중) preflight.sh 가 빈 값을 bad 로 잡는다. 이번 델타가 만든 결함도 아니다. 그래서 차단하지 않고 배포 전 확인 1건(값이 아니라 길이만 출력)으로 닫는다.",
+   "cwe": "CWE-1188(안전하지 않은 기본 초기화) · CWE-1391(약한 자격증명) 계열",
+   "resolved_by": "SR-030 (security-reviewer)",
+   "date_resolved": "2026-07-29",
+   "resolution": "enforce_runtime_settings 가 create_app():41 에서 실제로 불리고, app=create_app() 이 import 시점이라 uvicorn 이 임포트 단계에서 죽는다. 실측 10케이스 — 빈/31자 JWT_SECRET · 12/33바이트 FEK · ARGON2 하한 미만이 전부 기동 중단, POSTGRES_PASSWORD 빈값·COOKIE_SECURE=false 는 경고만. 로그·예외에 비밀값 0건. 2차 방어(create_token 의 32자 하한)도 확인. 치명/경고 구분 근거가 _runtime_checks docstring 에 명시돼 있고 항목마다 실제로 성립한다. 운영 서버 .env 실측으로 이 게이트에 막힐 항목이 0임도 확인. 잔여는 SR30-1·SR30-2·SR30-3."
+  },
+  {
+   "id": "SR29-2",
+   "verdict": "RESOLVED",
+   "severity": "low",
+   "blocks": "없음 - 단 NEIS 키를 발급받기 전에 처리할 것",
+   "found_by": "SR-029 (security-reviewer, herdr re-review 대행)",
+   "date_found": "2026-07-28",
+   "owner": "backend",
+   "title": "NEIS_API_KEY 가 app/core/masking.SECRET_ENV_VARS 에 미등록 - 리터럴 값 마스킹(주 방어)이 이 키를 모른다",
+   "evidence": [
+    "SECRET_ENV_VARS = (MOLIT_API_KEY, DATA_GO_KR_API_KEY, KAKAO_REST_API_KEY, KAKAO_JS_APP_KEY, ANTHROPIC_API_KEY, JWT_SECRET, FIELD_ENCRYPTION_KEY, POSTGRES_PASSWORD) - NEIS_API_KEY 없음. env_secrets() 가 값을 모른다(실측 False)",
+    "실측 7문맥(가짜 32자 키) 중 마스킹됨 - 실제 요청 URL(&KEY=…) · ?KEY= 가 첫 파라미터 · HTTPStatusError 문구. _BARE_KEY_RE 가 쿼리스트링의 key= 를 잡기 때문",
+    "실측 ★누출 - URL 경로형(…:8088/<키>/json/…) · dict repr({'KEY': '<키>'}) · JSON 표기 · 값 단독(오류 본문이 키를 되비침)",
+    "대조 - 같은 4문맥에서 MOLIT_API_KEY 는 전부 마스킹된다(등록돼 있으므로)",
+    "현재 코드에는 누출 4문맥에 해당하는 경로가 없다 - fetch_academy._get 은 쿼리스트링만 쓰고 URL·params 를 로깅하지 않으며 예외 메시지에도 싣지 않는다(주석에 명시). 실누출 0",
+    "다운로드 상한은 _common.capped_urlopen_read(96MB, 수집 스크립트 계열)를 쓴다 - app/core/http.py 의 16MB 는 런타임 API 용이고 그 파일 주석이 둘의 성격 차이를 명시한다. 규약대로다",
+    "SR-025 에서 서울 OpenAPI 의 경로형 인증키를 삭제하며 배운 것이 정확히 이 위험이고, .env.example 에 칸이 생긴 지금이 그물을 거는 시점이다"
+   ],
+   "pass_conditions": [
+    "SECRET_ENV_VARS 에 'NEIS_API_KEY' 추가 - 키를 발급받기 전에",
+    ".env.example 의 키 칸이 SECRET_ENV_VARS 에 전부 등록됐는지 대조하는 회귀 테스트 추가(SR29-9)"
+   ],
+   "mitigation": "현재 코드 경로는 안전하다. 비어 있는 것은 마지막 그물뿐이다.",
+   "cwe": "CWE-532(로그를 통한 정보 노출)",
+   "resolved_by": "SR-030 (security-reviewer)",
+   "date_resolved": "2026-07-29",
+   "resolution": "SECRET_ENV_VARS 에 NEIS_API_KEY 등록. SR-029 가 누출로 표시한 4문맥(경로형 URL · dict repr · JSON 표기 · 값 단독)이 전부 마스킹되고, 추가로 헤더 dict·URL 인코딩 변형도 지워진다(실측)."
+  },
+  {
+   "id": "SR29-3",
+   "verdict": "RESOLVED",
+   "severity": "low",
+   "blocks": "없음 - 단 fetch_academy.py 를 실행하기 전에 처리할 것",
+   "found_by": "SR-029 (security-reviewer, herdr re-review 대행)",
+   "date_found": "2026-07-28",
+   "owner": "data-engineer",
+   "title": "fetch_academy 의 fail-closed 에 옆문 - acaInsTiInfo 블록이 없는 오류 응답에서 0행 파일을 성공으로 저장한다",
+   "evidence": [
+    "문서화된 무키 동작은 정확히 막힌다(실측) - ① 같은 5행 + total 71,597 -> FetchError, 파일 없음. ④ 매 페이지 다른 5행 -> FetchError(p1 검사), 파일 없음",
+    "실측 ★ ② {\"RESULT\":{\"CODE\":\"INFO-300\",\"MESSAGE\":\"인증키가 유효하지 않습니다.\"}} -> 저장됨 · 행 0 · failures=[] · 로그 '학원 저장 (실패 0)'",
+    "실측 ★ ③ 빈 row + total 없음 -> 저장됨 · 행 0 · failures=[]",
+    "원인 - _block_rows 가 [] 를, _total_count 가 None 을 돌려주면 pagination_fault 의 두 검사(p1 크기 · 페이지 동일성)가 모두 통과한다",
+    "이 경로가 현실적이다 - NEIS 는 인증 실패·결과 없음을 RESULT 블록으로 돌려주는 API 이고, 지금 발급할 키가 오타이거나 승인 전이면 정확히 ②가 난다",
+    "모듈 docstring 이 '그런 파일은 밀도 통계를 조용히 0에 가깝게 만든다 - 이 저장소가 가장 경계하는 실패다' 라고 적은 바로 그 모양"
+   ],
+   "pass_conditions": [
+    "payload 에 acaInsTiInfo 블록이 없으면 RESULT.CODE/MESSAGE 를 담아 FetchError 로 멈출 것(0행 파일을 쓰지 않는다)",
+    "총건수 미달(collected < total)도 지금은 failures 에만 적고 파일을 쓴다 - 소비 로더를 만들 때 failures 가 비어 있음을 성공의 전제로 삼지 말 것"
+   ],
+   "mitigation": "기밀·인가와 무관한 데이터 무결성 문제다. 소비 로더가 아직 없고, 스크립트는 사람이 손으로 돌리며 통계 출력이 0을 보여 준다. 아직 실행하지 않았다.",
+   "resolved_by": "SR-030 (security-reviewer)",
+   "date_resolved": "2026-07-29",
+   "resolution": "result_fault() 신설 — acaInsTiInfo 블록이 없으면 코드를 보지 않고 무조건 FetchError. 실측 — INFO-300 · INFO-200 · ERROR-290 · ERROR-337(쿼터) · ERROR-500 · 빈 dict · RESULT 문자열 전부 멈춤·파일 없음. fetch() 안에서 pagination_fault 보다 먼저 호출된다. 잔여는 SR30-5·SR30-6."
+  },
+  {
+   "id": "SR29-6",
+   "verdict": "RESOLVED",
+   "severity": "info",
+   "blocks": "없음",
+   "found_by": "SR-029 (security-reviewer, herdr re-review 대행)",
+   "date_found": "2026-07-28",
+   "owner": "data-engineer",
+   "title": "시장지수 배치의 멱등이 '덮어쓰기'뿐 - METHOD 를 바꿔 재실행하면 한 지역에 두 방법의 행이 섞인다",
+   "evidence": [
+    "build_market_index._UPSERT_SQL 은 ON CONFLICT (region_code, scope, ym) DO UPDATE - 같은 키는 덮지만 지우지 않는다",
+    "--months 36 창 밖으로 밀려난 옛 행은 남는다",
+    "조회 SQL(postgis._MARKET_INDEX_SQL)이 method 를 보지 않는다 - 지수는 두 월의 비(ratio)로만 쓰이므로 방법이 섞이면 비가 깨진다",
+    "지금은 method 가 fe_median_log_ppm_v1 하나뿐이라 실해 없음(운영 실측 2,381행 · method 1종)",
+    "CR33-4 가 같은 지점을 다른 각도(트랜잭션 경계·문서 수치)로 지적했다 - 함께 처리 가능"
+   ],
+   "pass_condition": "METHOD 를 바꿀 때 재실행 전에 DELETE FROM market_price_index WHERE method <> :method 를 함께 돌리거나, 조회에 AND method = :method 를 넣을 것.",
+   "resolved_by": "SR-030 (security-reviewer)",
+   "date_resolved": "2026-07-29",
+   "resolution": "postgis._MARKET_INDEX_SQL 에 method 필터 추가 — '두 방법이 한 지역에 섞여 idx(A)/idx(B) 가 방법 차이를 잰다'가 사라졌다. 잔여는 안전한 방향이다: 방법을 바꾸고 일부 지역만 재계산하면 나머지 지역은 0행 조회 → REASON_NO_INDEX(보정 안 함 + 사유). 운영 실측 method 1종."
+  },
+  {
+   "id": "SR29-7",
+   "verdict": "RESOLVED",
+   "severity": "info",
+   "blocks": "없음",
+   "found_by": "SR-029 (security-reviewer, herdr re-review 대행)",
+   "date_found": "2026-07-28",
+   "owner": "frontend",
+   "title": "프론트 PriceBand 타입에 as_of_ym·time_adjusted·time_adjustment 가 없어 밴드 숫자 옆에서 '환산값'이라고 말하지 않는다",
+   "evidence": [
+    "client.ts:282-290 PriceBand = {p25_krw, median_krw, p75_krw, sample_size, period_months, expanded, source} - 새 3필드 없음",
+    "고지 자체는 두 곳에 도달함을 실측 확인 - job notes(RecommendPanel.tsx:306 이 렌더) 와 valuation finding 의 rationale(ReportCard.tsx:226 이 렌더, '2026-06 시점 환산 중위 …원')",
+    "SR27-7(서버가 프론트가 안 쓰는 zone_name 을 싣는다)과 같은 계열의 불일치이나 방향이 반대다",
+    "code-review 가 같은 사실을 CR33-3 으로 차단 등급을 매겼다 - 보안 축에서는 고지가 두 곳에 도달하므로 info 다. 판정 차이는 축의 차이이지 사실의 차이가 아니다"
+   ],
+   "pass_condition": "CR33-3 의 통과 조건을 따르면 함께 닫힌다(FE PriceBand 에 as_of_ym·time_adjusted 추가 + 카드 표기 + 테스트 1건).",
+   "resolved_by": "SR-030 (security-reviewer)",
+   "date_resolved": "2026-07-29",
+   "resolution": "client.ts PriceBand 에 as_of_ym · time_adjusted · time_adjustment 추가 + recommendation.bandTimeView 가 판단을 한 곳에 모으고 ReportCard 가 밴드 줄에 '2026-05 시점 환산' 꼬리표를 붙인다. '모름(서버가 시점을 말하지 않음)'을 '보정 안 됨'과 구분해 침묵하는 것도 옳다."
+  },
+  {
+   "id": "SR29-9",
+   "verdict": "RESOLVED",
+   "severity": "info",
+   "blocks": "없음",
+   "found_by": "SR-029 (security-reviewer, herdr re-review 대행)",
+   "date_found": "2026-07-28",
+   "owner": "backend",
+   "title": ".env.example 의 키 칸과 SECRET_ENV_VARS 를 대조하는 테스트가 없다 - SR29-2 가 그물 없이 들어온 경로",
+   "evidence": [
+    "test_script_hygiene.py 는 하드코딩 리터럴 · _common 경유 · 다운로드 상한 · SEOUL_OPENAPI_KEY 부재는 강제한다",
+    "그러나 '.env.example 에 새로 생긴 키 칸이 마스킹 목록에 등록됐는가' 는 아무도 보지 않는다",
+    "그래서 NEIS_API_KEY 칸이 마스킹 등록 없이 들어왔다(SR29-2)"
+   ],
+   "pass_condition": ".env.example 에서 (?i)(KEY|SECRET|TOKEN|PASSWORD)= 로 끝나는 칸 이름을 뽑아 SECRET_ENV_VARS 와 대조하는 테스트를 추가할 것(예외는 목록에 명시적으로 적는다).",
+   "resolved_by": "SR-030 (security-reviewer)",
+   "date_resolved": "2026-07-29",
+   "resolution": ".env.example 의 비밀 칸과 SECRET_ENV_VARS 를 대조하는 테스트 + 목록의 각 키가 4문맥에서 지워지는지 확인하는 테스트 추가. 변이 9/9 검출(새 칸 5종 · 목록 제거 4종). 잔여는 SR30-4(접미사 앵커)."
+  },
+  {
+   "id": "SR27-1",
+   "verdict": "RESOLVED",
+   "severity": "medium",
+   "blocks": "없음",
+   "found_by": "SR-027 (security-reviewer, herdr re-review 대행)",
+   "date_found": "2026-07-28",
+   "owner": "re-arch",
+   "title": "분담금 가드의 진단문이 차단 대상 금액을 사용자 카드로 되돌린다 (detail.cost_guard_error 에 str(exc) 노출, CWE-209)",
+   "evidence": [
+    "_cost_guard_degraded 가 detail={cost_guard_blocked: True, cost_guard_error: str(exc)} 를 만든다 (orchestrator.py, CR31-1 수정분)",
+    "CostEstimateError 메시지는 '(주제어 '분담' + 금액 '1억 2천만 원')' 처럼 가드가 막은 금액 토큰을 그대로 인용한다(analysis.py assert_no_cost_estimate)",
+    "_redev_dict 가 'detail': dict(assessment.detail) 을 그대로 싣고, postgis._item_to_dict 는 payload 를 원본 그대로 돌려준다 -> 사용자 응답까지 도달",
+    "실측 재현: _cost_guard_degraded(CostEstimateError(...)) -> _redev_dict 결과 JSON 에 '금액 '1억 2천만 원'' 문자열이 그대로 포함됨",
+    "이 가드의 존재 이유가 '지어낸 금액 한 줄을 사용자에게 보이지 않는 것'인데, 실패 경로가 정확히 그 금액을 보여 준다 - 방어가 자기 목적과 반대로 동작하는 유일한 자리",
+    "패턴 재발: SR-025 가 422 응답에서 input 을 제거하며 닫은 것과 같은 종류('방어의 오류 메시지가 방어 대상을 되비친다')"
+   ],
+   "pass_conditions": [
+    "detail 에는 cost_guard_blocked: true 만 남기고 cost_guard_error 키를 삭제할 것",
+    "원인 추적은 이미 logger.exception 이 스택까지 남긴다(실측 확인) - 운영자는 로그를, 사용자는 사유 문장을 본다. 둘을 한 곳에 합칠 이유가 없다"
+   ],
+   "mitigation": "현재 담기는 값은 공개 정비사업 문자열이라 민감정보 노출이 아니다. 발화 조건도 좁다 - 우리 문장에 금액이 생기거나 _source_quotes 갱신을 잊는 회귀. 그래서 차단하지 않는다. 고쳐야 하는 이유는 피해 크기가 아니라 패턴이 반복됐다는 사실이다.",
+   "resolved_by": "SR-029 (security-reviewer, herdr re-review 대행)",
+   "date_resolved": "2026-07-28",
+   "resolution": "CLOSE (SR-029, 2026-07-28). _cost_guard_degraded() 가 인자 없이 바뀌고 detail 이 {'cost_guard_blocked': True} 하나만 남았다. 검증은 키 확인이 아니라 전수다 - 발화 경로 3종(① _source_quotes 미갱신 회귀 ② assess_redevelopment 예외 주입 ③ redevelopment_finding 변환 실패)을 각각 재현해 카드 JSON 전수 7,511B 를 훑었고 금지 토큰('1억 2천만 원'·'1억'·'2천만'·'cost_guard_error'·'주제어'·'지어낸 숫자'·발화용 구역명) 세 경로 모두 0건. 남는 금액꼴 토큰은 정상 가격 3종뿐. 조용해지지도 않았다 - logger.exception 이 예외 메시지+스택을, 결과 notes 가 건수를, 카드가 verdict='정비사업 판정 보류'·missing 을 내는 것을 로그 캡처로 확인했다."
+  },
+  {
+   "id": "SR27-2",
+   "verdict": "RESOLVED",
+   "severity": "medium",
+   "blocks": "없음",
+   "found_by": "SR-027 (security-reviewer, herdr re-review 대행)",
+   "date_found": "2026-07-28",
+   "owner": "re-arch",
+   "title": "외부 수집값이 분담금 lint 를 끌 수 있다 - strip_source_quotes 가 우리 검사어를 삼킨다",
+   "evidence": [
+    "strip_source_quotes 는 인용문을 문자열 어디서든 str.replace 로 지운다(2자 미만만 건너뜀)",
+    "실측 6종 - quotes=[] / ['구역'] / ['원'](1자 하한미달) / ['추가분담금은 조합'] 은 차단 유지",
+    "실측 ★ quotes=['분담'] -> 남은 문장 '추가 <수집원문> 금은 ... 예상 <수집원문> 금 1억 2천만 원.' -> _COST_TOPIC_RE 미매칭 -> assert_no_cost_estimate 통과(무력화)",
+    "실측 ★ quotes=['분담금'] 도 동일하게 통과",
+    "즉 raw_stage(또는 zone_name·sigungu·raw_biz_type)가 '분담' 두 글자면 COST_DISCLOSURE 의 주제어가 갈라져 그 필드에 대한 lint 가 통째로 no-op 이 된다",
+    "'검사 대상 축소'가 아니라 '외부 데이터가 검사를 끌 수 있다' 이고 성질이 다르다"
+   ],
+   "pass_conditions": [
+    "우리 상수 문자열(COST_DISCLOSURE 등)과 겹치는 인용은 치환하지 않을 것",
+    "또는 최소 길이를 2자가 아니라 주제어 최대 길이 초과로 올릴 것",
+    "치환 결과가 _COST_TOPIC_RE 매칭을 없앤 경우에는 치환 전 문장으로 한 번 더 검사할 것(= 외부값이 검사를 끄지 못하게)"
+   ],
+   "mitigation": "도달성이 낮다 - redev_project 는 정부 공개 CSV 이고 적재는 운영자가 손으로 돌린다(scripts/load_redevelopment.py). 원격 공격자가 직접 밀어 넣는 값이 아니며, 현실적 경로는 파서의 칸 어긋남이다. 그래서 fail 조건이 아니다.",
+   "resolved_by": "SR-029 (security-reviewer, herdr re-review 대행)",
+   "date_resolved": "2026-07-28",
+   "resolution": "CLOSE (SR-029, 2026-07-28). strip_source_quotes(치환) 제거 -> quoted_spans + money_outside_quotes(위치 판정)로 재설계. 원문을 바꾸지 않으므로 검사어가 갈라지지 않는다. 검증: SR-027 과 같은 문장에 raw_stage='분담'·'분담금' 재시도 -> 둘 다 차단. 새 우회로 탐색은 전수로 했다 - 우리 문장의 모든 부분문자열 491종 + 짧은 조각 2개 조합 13,861종을 인용문으로 주입한 결과 통과 13종/11종이 나왔고 전부 금액 토큰을 통째로 덮은 경우(설계된 의미론)였다. 다른 rationale 형태 4종에서도 '금액과 무관한 인용문으로 통과' 0건. 부수 효과로 인용문이 금액의 일부만 덮는 경우('억원'만 인용)가 이제 막힌다 - 치환 방식보다 탐지력이 올랐다. 성능도 확인: 1만자×2자 인용에서 9,999 spans / 2.8ms."
+  },
+  {
+   "id": "CR32-2",
+   "verdict": "RESOLVED",
+   "severity": "low",
+   "blocks": "없음",
+   "found_by": "CR-032 (code-reviewer)",
+   "date_found": "2026-07-28",
+   "owner": "re-backend",
+   "title": "CANDIDATE_COMPLEX_LIMIT=120 의 주석 근거 한 줄이 실측과 다르다",
+   "evidence": [
+    "recommend.py:85-88 이 'MAX_CANDIDATES(200)가 먼저 걸려 상한을 더 올려도 사용자가 보는 결과는 같아진다'고 적음",
+    "운영 실측: 강남(조건없음) 상한120->후보123 / 상한200->후보151. 강남 59~85m2 상한120->83 / 상한200->195. 광진 140->167",
+    "MAX_CANDIDATES 에 실제로 닿는 것은 송파뿐 — 주석이 인용한 그 지역에서만 참",
+    "즉 상한을 올리면 사용자가 보는 후보가 실제로 늘어난다. 120 의 정당화는 시간 예산(+0.9~1.0초)이지 결과 불변이 아님"
+   ],
+   "pass_condition": "해당 3줄을 실측대로 정정 — 지역별로 MAX_CANDIDATES 도달 여부가 다르며 120 은 시간 예산으로 고른 값임을 명시",
+   "resolved_by": "CR-033 (code-reviewer)",
+   "date_resolved": "2026-07-28",
+   "resolution": "recommend.py:84-96 주석이 리뷰어 실측(강남 123->151 · 광진 140->167)을 그대로 반영해 '결과 불변'에서 '시간 예산(조립 단지당 ~13ms · 50->120 이 +1.0초)'으로 정정됨. 요구한 것보다 정확하다."
+  },
+  {
+   "id": "CR32-3",
+   "verdict": "RESOLVED",
+   "severity": "low",
+   "blocks": "없음",
+   "found_by": "CR-032 (code-reviewer)",
+   "date_found": "2026-07-28",
+   "owner": "re-domain",
+   "title": "금액 가드 우회가 인정된 것보다 넓다 — 인용문이 주제어를 포함하면 뚫린다",
+   "evidence": [
+    "strip_source_quotes 가 인용문의 모든 출현을 지우는데 검사가 topic AND money 라 주제어가 지워지면 그것만으로 통과",
+    "실측 우회: quotes=('분담',) PASS · ('분담금',) PASS · ('억원',) PASS · ('1.2억',) PASS (금액 토큰 일부만으로도)",
+    "정상 동작 확인: quotes=() BLOCKED · ('강남구',) BLOCKED · 인용 밖 별개 금액 BLOCKED",
+    "성립하려면 개발자가 없는 금액을 지어내고 동시에 같은 요청 수집값이 그 토큰/주제어를 정확히 품어야 함 — 결합 확률 무시할 만함"
+   ],
+   "pass_condition": "검사를 갈라라 — 주제어는 원문 전체에서, 금액만 인용 제거본에서 찾는다. CR31-1 은 그대로 고쳐지면서 주제어 우회가 닫힌다",
+   "resolved_by": "CR-033 (code-reviewer)",
+   "date_resolved": "2026-07-28",
+   "resolution": "치환(strip_source_quotes) 폐기 -> 위치 판정(quoted_spans + money_outside_quotes). CR-032 에서 뚫었던 5종 중 4종(('분담')('분담금')('억원')('1.2억'))이 BLOCK 으로 닫혔다(직접 재현). 인용문이 금액을 일부만 덮는 경우도 닫혔고 CR31-1 회귀 없음(현실 경로 11종 예외 0).",
+   "residual": "A8 - 수집값이 금액 토큰과 정확히 같으면(quotes=('1.2억원',)) 통과한다. 값싼 강화 여지는 CR33-8 로 이월."
+  },
+  {
+   "id": "CR32-4",
+   "verdict": "RESOLVED",
+   "severity": "low",
+   "blocks": "없음",
+   "found_by": "CR-032 (code-reviewer)",
+   "date_found": "2026-07-28",
+   "owner": "re-backend",
+   "title": "detail.cost_guard_error(내부 lint 메시지)가 API 응답에 실린다 — 같은 판단 기준이 두 필드에 다르게 적용됨",
+   "evidence": [
+    "orchestrator.py:561 이 str(exc) 를 detail 에 넣고 _redev_dict(:668) 가 dict(assessment.detail) 을 통째로 payload 에 실음",
+    "실물: detail.cost_guard_error = 추가분담금 금액은 공개 데이터에 없습니다 — ...(주제어 '분담' + 금액 '1.2억원')...",
+    "민감정보 아님(매치 토큰 2개뿐, 사용자 자산·내부 ID 없음)이고 프론트도 렌더링하지 않음",
+    "다만 RedevAssessment.source_quotes 에는 '응답 payload 에는 싣지 않는다'고 주석까지 달아 놓고 내부 lint 메시지는 실음"
+   ],
+   "pass_condition": "cost_guard_error 를 logger.exception 에만 남기고 payload 에서 빼거나, 싣는다면 왜 괜찮은지 한 줄 근거를 남길 것",
+   "resolved_by": "CR-033 (code-reviewer)",
+   "date_resolved": "2026-07-28",
+   "resolution": "detail['cost_guard_error'] 제거. 저장소 전체 0건(남은 것은 '예전에는 이랬다' docstring). 테스트가 카드 JSON 전체를 훑어 금액 토큰 5종 부재를 단언하고, 조용해지지 않도록 verdict · missing · 결과 notes · 운영 로그 네 곳을 함께 고정한다."
+  },
+  {
+   "id": "CR32-5",
+   "verdict": "RESOLVED",
+   "severity": "low",
+   "blocks": "없음",
+   "found_by": "CR-032 (code-reviewer)",
+   "date_found": "2026-07-28",
+   "owner": "re-fe",
+   "title": "client.ts 주석이 이번 라운드에 거짓이 됐다 — '지도 응답에는 아직 오지 않는다'",
+   "evidence": [
+    "frontend/src/api/client.ts:110-111 이 nearest_station·redevelopment 를 '지도 응답에는 아직 오지 않는다 ... 서버가 실어 주는 날 자동으로 붙는다'로 서술",
+    "MAP-2 가 바로 그 '실어 주는 날'이며 routes.py:_map_tag_facts 가 두 필드를 지도 응답에 싣는다",
+    "같은 파일을 이번 라운드에 46줄 고치면서 놓침"
+   ],
+   "pass_condition": "주석 한 줄 정정",
+   "resolved_by": "CR-033 (code-reviewer)",
+   "date_resolved": "2026-07-28",
+   "resolution": "client.ts:106-116 주석 정정 + available:false 를 no 로 접지 않는 회귀 테스트(App.test.tsx +59줄) 추가. 요구 이상."
+  },
+  {
+   "id": "CR32-6",
+   "verdict": "RESOLVED",
+   "severity": "low",
+   "blocks": "없음",
+   "found_by": "CR-032 (code-reviewer)",
+   "date_found": "2026-07-28",
+   "owner": "re-fe",
+   "title": "죽은 backdrop-filter 가 남아 시각 효과 없이 합성 비용만 낸다 (UX-5 잔여)",
+   "evidence": [
+    "--material 이 불투명이 된 뒤 MapLegend.css:7-8 · MapView.css:72-73 의 backdrop-filter 는 효과 없음",
+    "@supports not (backdrop-filter…) 폴백 블록(MapLegend.css:14 · MapView.css:78)도 죽음 — 폴백이 넣는 --bg 가 --material 과 같은 값",
+    "순수 잉여가 아님: backdrop-filter 는 합성 레이어 승격을 강제하고 일부 엔진은 블러 계산 후 폐기 — 지도 위 오버레이라 모바일에서 손해"
+   ],
+   "pass_condition": "6줄 + @supports 블록 2개 삭제",
+   "resolved_by": "CR-033 (code-reviewer)",
+   "date_resolved": "2026-07-28",
+   "resolution": "MapLegend.css:7-8 · MapView.css:72-73 의 backdrop-filter 6줄과 @supports 폴백 블록 2개 삭제 확인."
+  },
+  {
+   "id": "SR19-1",
+   "verdict": "RESOLVED",
+   "severity": "medium",
+   "blocks": "없음 - 배포 차단 아님. DEC-001 기록 정정 + 콘솔 재확인 필요(사용자 결정 근거였음)",
+   "found_by": "SR-019 (security-reviewer, herdr re-review 대행)",
+   "date_found": "2026-07-26",
+   "owner": "PM / 사용자",
+   "title": "카카오 JS 키 허용 도메인 제한이 실효가 없다 - 운영 도메인이 목록에 없고, no-referrer 요청은 그대로 통과",
+   "evidence": [
+    "실측 2회(12:44 · 12:51, 결과 동일). Referer 없음 -> HTTP 200 으로 SDK 본문 정상 수신(감사자 PC 에서)",
+    "Referer: https://realestate.utilverse.info/ -> HTTP 401 {\"errorType\":\"AccessDeniedError\",\"message\":\"domain mismatched! caller=https://realestate.utilverse.info. check out registered web domains.\"}",
+    "http:// 변형 · https://utilverse.info · http://localhost:5173 도 전부 401 -> 등록 허용목록에 운영 도메인이 없다",
+    "그런데도 지도는 뜬다: 우리 nginx 가 Referrer-Policy: no-referrer 를 주므로 브라우저가 SDK 요청에 Referer 를 싣지 않고, 카카오는 Referer 가 없으면 통과시킨다",
+    "결과(a): DEC-001 이 보완책으로 기록한 '카카오 JS 키 허용 도메인 제한 등록 완료'는 실제로 아무도 막지 않는다 - 누구나 no-referrer 로 우리 키를 쓸 수 있다(감사자가 실제로 200 수신)",
+    "결과(b): 숨은 결합 - 나중에 Referrer-Policy 를 strict-origin-when-cross-origin 등으로 '개선'하면 그 순간 지도가 죽는다. 인과를 아는 사람이 없으면 원인 추적이 매우 어렵다",
+    "피해 상한은 DEC-001 이 이미 수용한 '일일 호출 한도 소진'과 동일하며 우리 데이터·세션과 무관하다 -> 배포 차단은 아니다"
+   ],
+   "pass_conditions": [
+    "카카오 개발자 콘솔 웹 플랫폼 도메인에 https://realestate.utilverse.info 가 실제 등록됐는지 재확인(오타·다른 앱 등록 가능성)",
+    "등록 후에도 no-referrer 우회는 남으므로 DEC-001 의 보완책 목록에서 이 항목의 실효성을 하향 기재",
+    "Referrer-Policy 와 카카오맵 동작의 결합을 deploy/nginx-realestate.conf 주석에 1줄 남길 것"
+   ],
+   "note": "사용자가 이 보완책을 위험 수용의 근거 하나로 삼았으므로 사실관계를 정정해 알려야 한다. 결정 자체(재발급 안 함)는 여전히 합리적이다.",
+   "resolved_by": "SR-028 (security-reviewer, herdr re-review 대행)",
+   "date_resolved": "2026-07-28",
+   "resolution": "2026-07-28 사용자가 카카오 개발자 콘솔 → JavaScript SDK 도메인에 https://realestate.utilverse.info 와 http://localhost:5173 을 등록했다. 코드 변경 없음 — 원인은 처음부터 콘솔 설정이었고 SR-019 이래의 진단이 옳았다.",
+   "close_evidence": [
+    "키 동일성 먼저 확인(‘다른 앱에 등록됐다’는 원래 의심 해소) — 로컬 frontend/.env 의 VITE_KAKAO_JS_APP_KEY 와 배포 번들 /assets/index-CCsgZLK6.js 에서 추출한 앱키가 바이트 일치(sha256 앞 12자리 4386ba299da6). 값은 기록하지 않는다",
+    "양성 대조 — KA origin/https%3A%2F%2Frealestate.utilverse.info → 200 · origin/http%3A%2F%2Flocalhost%3A5173 → 200 (둘 다 '강남역 2호선 / 서울 강남구 역삼동 858')",
+    "음성 대조 7종 전부 401 domain mismatched — evil.example.com · utilverse.info(상위 도메인) · realestate.utilverse.info.evil.com(접미사 위조) · evil.com/realestate.utilverse.info(경로 위조) · xrealestate.utilverse.info(부분문자열) · sub.realestate.utilverse.info(하위 도메인) · realestate.utilverse.info:8443(포트) · localhost:5174 · 127.0.0.1:5173. → 호스트+포트 정확 일치이고 우회 없음. 스킴만 무시된다",
+    "브라우저 실경로 재현 — OPTIONS 프리플라이트 204(ACAO:*) → GET(Origin+Referer+KA) 200 '송파나루' 3건, 좌표 [경도,위도] 규약 일치. 라이브 CSP connect-src 에 dapi.kakao.com 있음",
+    "SDK 로더 축 분리 확인 — sdk.js 는 KA 가 없어 Referer 를 본다. Referer=운영도메인 200(등록 전 401 이던 자리) · Referer=localhost:5173 200 · Referer=evil 401 · Referer 없음 200(등록 전과 동일)",
+    "services.js 1.1.1 원본 확인 — KA 의 origin 은 location.protocol+'//'+location.hostname(+port) 에서 만들어진다. 브라우저 페이지가 위조할 수 없고 Referrer-Policy 로 지울 수도 없다"
+   ],
+   "ledger_correction": "SR-027 §4·§10 의 '등록만으로는 절반이고 Referrer-Policy 완화가 따라와야 도용이 닫힌다'는 옳지 않다. Referrer-Policy 는 우리 문서가 내보내는 요청만 지배하므로 공격자 페이지의 no-referrer 를 막지 못한다. 실제로 도용을 막는 것은 KA 헤더의 origin 이고, 그것은 도메인 등록만으로 이미 동작한다. 측정값은 옳고 인과가 틀렸던 경우다.",
+   "residual": "성격이 다른 잔여는 새 번호로 분리했다 — SR28-1(누구나 가질 수 있는 localhost:5173 을 허용목록에 넣었다) · SR28-2(브라우저 밖에서는 KA 헤더가 위조된다). 둘 다 공개 JS 키의 구조적 한계이며 콘솔 설정으로 더 좁힐 수 없다. 피해 상한은 DEC-001 이 이미 수용한 쿼터 소진."
+  },
+  {
+   "id": "MAP-3",
+   "verdict": "RESOLVED",
+   "severity": "medium",
+   "blocks": "없음 - 비차단이었음",
+   "found_by": "CR-032 (code-reviewer, herdr re-review 대행) · 라이브 재현",
+   "date_found": "2026-07-28",
+   "owner": "PM / 사용자 (콘솔 설정)",
+   "title": "장소 검색이 401 AccessDeniedError 로 거부된다 - 카카오 JS 앱키에 웹 도메인 미등록",
+   "evidence": [
+    "CR-032 라이브 재현 — dapi.kakao.com 401 'domain mismatched! caller=...realestate.utilverse.info'",
+    "CSP 는 범인이 아님이 이미 확인됐다(connect-src 에 dapi.kakao.com 있음) — SR-027 §4"
+   ],
+   "resolved_by": "SR-028 (security-reviewer, herdr re-review 대행)",
+   "date_resolved": "2026-07-28",
+   "resolution": "콘솔 도메인 등록으로 해소. 원인은 코드가 아니라 설정이었고 placeSearch.ts·PlaceSearch.tsx·MapView.tsx 는 한 줄도 고치지 않았다 — CR-032·SR-027 의 '코드로 못 고친다' 판정이 맞았다.",
+   "close_evidence": "SR-028 §2 실측 — keyword.json 이 200 으로 '송파나루공원'·'송파나루공원 삼전도비'·'송파나루역 9호선' 3건을 돌려주고 좌표가 [경도,위도] 규약과 일치. 프리플라이트 204 · 라이브 CSP 차단 없음.",
+   "note": "코드가 남긴 값어치는 실패를 조용히 삼키지 않고 고칠 곳을 가리킨 것이다. 다만 그 문구·주석이 이제 낡았다 → SR28-4."
+  },
   {
    "id": "SR21-4",
    "verdict": "RESOLVED",
@@ -2813,10 +3541,10 @@
     "app/core/masking.py — 예외·로그·생성 문서 전 경로에서 키 마스킹(SR17-1, 실동작 확인)",
     ".env gitignore + 서버 파일 권한 600(실동작 확인)",
     "tests/test_script_hygiene.py — 커밋 대상에 비밀값이 들어가면 테스트 실패(실동작 확인: 리뷰어 문서 2줄을 실제로 반려)",
-    "⚠️ [정정 2026-07-26 · SR19-1] 카카오 JS 키 도메인 제한은 **현재 실효가 없다**. 실측: Referer 없음 → HTTP 200(누구나 사용 가능) / Referer=https://realestate.utilverse.info/ → 401 'domain mismatched'. 즉 허용목록에 운영 도메인이 반영되지 않았고, 우리 지도가 뜨는 이유는 nginx 의 Referrer-Policy: no-referrer 때문이다. → 사용자 콘솔 재확인 필요(키가 속한 앱에 등록됐는지). 숨은 결합: Referrer-Policy 를 나중에 '개선'하면 그 순간 지도가 죽는다."
+    "✅ [재정정 2026-07-28 · SR-028] 카카오 JS 키 도메인 제한은 이제 **실효한다**. 콘솔에 https://realestate.utilverse.info · http://localhost:5173 이 등록됐고, 미등록 출처 7종(상위 도메인·접미사/경로 위조·하위 도메인·포트 불일치 포함)이 전부 401 domain mismatched 로 걸리는 것을 실측했다. 2026-07-26 의 '미작동' 정정은 무효다. 다만 범위를 정확히 적는다 — 이 통제가 막는 것은 **브라우저 임베드 도용**까지이고, 브라우저 밖에서는 KA 헤더를 위조하면 우회된다(SR28-2). 허용목록의 localhost:5173 도 누구나 가질 수 있는 출처다(SR28-1). 그래서 이 보완책은 '충분'이 아니라 '유효'다."
    ],
-   "revisit_if": "한도 소진·비정상 호출이 관측되거나, 키에 조회 외 권한이 추가되면 즉시 재발급한다.",
-   "status": "유효 — 단, 보완책 4번(도메인 제한)은 미작동 상태로 정정됨(SR19-1)"
+   "revisit_if": "한도 소진·비정상 호출이 관측되거나, 키에 조회 외 권한이 추가되면 즉시 재발급한다. [SR-028] SR28-2 때문에 이 조건이 더 중요해졌다 — 차단이 불가능한 잔여이므로 카카오 콘솔의 사용량 알림이 사실상 유일한 탐지 수단이다.",
+   "status": "유효 — 보완책 4번(도메인 제한)은 2026-07-28 실효 확인(SR-028). 잔여 위험은 스크립트 도용(SR28-2)·localhost 출처(SR28-1)로 좁혀졌고 성격은 그대로 쿼터 소진이다."
   }
  ]
 }

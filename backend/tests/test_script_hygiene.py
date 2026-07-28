@@ -486,3 +486,70 @@ def test_redevelopment_loader_rejects_html_error_pages():
     assert mod.check_payload(
         incheon.encode("cp949"), required_columns=mod.INCHEON_REQUIRED_COLUMNS,
         what="인천 정비사업 CSV", page="x")
+
+
+# ---------------------------------------------------------------------------
+# SR29-9 — `.env.example` 의 비밀 칸은 전부 마스킹 목록에 등록돼 있다
+#
+# 왜 필요한가: `NEIS_API_KEY` 는 `.env.example` 에 칸이 생겼는데
+# `masking.SECRET_ENV_VARS` 에는 없었다(SR29-2). 이름 기반 규칙(`serviceKey=` 등)은
+# 파라미터 이름이 아는 형태일 때만 듣고, **경로형 URL·dict repr·오류 본문의 되비침**은
+# 값 리터럴 치환으로만 잡힌다. 그 층이 그 키를 모르면 그물이 비어 있는 것이다.
+# 새 키가 생길 때마다 사람이 기억해야 하는 구조라 정적 검사로 못박는다.
+# ---------------------------------------------------------------------------
+
+#: `.env.example` 에서 **값이 비밀인** 칸을 알아보는 이름 규칙.
+_SECRET_ENV_SLOT_RE = re.compile(r"(_KEY|_SECRET|_PASSWORD|_PASSWD|_TOKEN)$")
+
+
+def _env_example_names() -> list[str]:
+    """`.env.example` 이 정의하는 환경변수 이름들(주석·빈 줄 제외)."""
+    text = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+    names = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        names.append(stripped.split("=", 1)[0].strip())
+    return names
+
+
+def test_env_example_의_비밀칸이_전부_마스킹_목록에_있다():
+    """★ 변이: `SECRET_ENV_VARS` 에서 키를 하나 빼면 여기서 잡힌다.
+
+    반대 방향(목록에만 있고 `.env.example` 에 칸이 없는 것)은 **검사하지 않는다** —
+    지운 칸(`SEOUL_OPENAPI_KEY`)의 값이 아직 누군가의 `.env` 에 남아 있을 수 있고,
+    마스킹 목록은 과할수록 안전한 쪽이다.
+    """
+    from app.core.masking import SECRET_ENV_VARS
+
+    slots = [n for n in _env_example_names() if _SECRET_ENV_SLOT_RE.search(n)]
+    assert slots, ".env.example 에서 비밀 칸을 하나도 못 찾았습니다 — 규칙이 깨졌습니다"
+    missing = [n for n in slots if n not in SECRET_ENV_VARS]
+    assert not missing, (
+        f"`.env.example` 에 칸만 있고 masking.SECRET_ENV_VARS 에 없는 비밀: {missing}. "
+        "값 리터럴 마스킹이 이 키를 모르면 경로형 URL·dict repr 로 그대로 샙니다(SR29-2).")
+
+
+def test_마스킹_목록에_있는_키는_실제로_값이_지워진다():
+    """목록에 이름만 올리고 끝나지 않게 — 실제 문자열에서 사라지는지 확인한다."""
+    import os
+
+    from app.core.masking import SECRET_ENV_VARS, mask_secrets
+
+    fake = "N" * 40
+    for name in SECRET_ENV_VARS:
+        old = os.environ.get(name)
+        os.environ[name] = fake
+        try:
+            # 마스킹이 못 잡던 4가지 문맥(SR29-2 실측표)을 그대로 태운다.
+            for text_ in (f"https://open.neis.go.kr/hub/{fake}/json/x",
+                          f"{{'KEY': '{fake}'}}",
+                          f'{{"KEY": "{fake}"}}',
+                          fake):
+                assert fake not in mask_secrets(text_), (name, text_)
+        finally:
+            if old is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = old

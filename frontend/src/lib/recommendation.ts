@@ -14,10 +14,98 @@ import type {
   DongValuation,
   Evidence,
   Finding,
+  PriceBand,
   RecommendationItem,
 } from "../api/client";
 import { agentLabel } from "./agentLabels";
 import type { Confidence } from "./format";
+import { plainReason } from "./plainTerms";
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * 적정가 밴드의 **시점** — 이 숫자는 언제의 가격인가 (CR33-3)
+ *
+ * 서버는 6~36개월 창의 거래를 각각 기준월로 환산한 뒤 밴드를 낸다. 환산된 중위를
+ * 그냥 "국토교통부 실거래가"라고 부르면 **원본 체결가로 읽힌다** — 다른 숫자다.
+ * (실제로 같은 화면에서 제외 사유는 "2026-06 시점 환산 중위"라고 말하고 있었다.)
+ *
+ * 반대 방향의 거짓말도 막아야 한다: 필드가 아예 없는 응답(구버전 서버·다른
+ * 엔드포인트)에서 "보정됨"이라고 말하면 **없는 걸 있다고 하는 것**이다.
+ * 그래서 상태는 셋이다 — 보정됨 / 보정 안 됨(사유 있음) / **모름(침묵)**.
+ *
+ * ⛔ "현재 시세"라고 쓰지 않는다. 기준월은 오늘이 아니라 **완결된 가장 최근 달**이다.
+ * ───────────────────────────────────────────────────────────────────────── */
+
+/** "2026-06" 형태만 시점으로 인정한다. 서버가 이상한 값을 줘도 화면에 옮기지 않는다. */
+const YM_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
+
+function asYm(value: string | null | undefined): string | null {
+  const v = (value ?? "").trim();
+  return YM_RE.test(v) ? v : null;
+}
+
+export interface BandTimeView {
+  /** 이 밴드가 기준월로 환산된 값인가. **필드가 없으면 false** — 모르면 주장하지 않는다. */
+  adjusted: boolean;
+  /** 서버가 시점에 대해 아무 말도 하지 않았는가(구버전 응답). true 면 화면도 침묵한다. */
+  unknown: boolean;
+  /** 환산 기준월("2026-06"). 환산됐고 서버가 월을 밝힐 때만. */
+  asOfYm: string | null;
+  /** 출처 표기 맨 앞에 붙일 짧은 꼬리표. 말할 게 없으면 null. */
+  label: string | null;
+  /** 한 줄 설명(보정 못 한 이유 등). 없으면 null — 지어내지 않는다. */
+  detail: string | null;
+}
+
+const UNKNOWN_TIME: BandTimeView = {
+  adjusted: false,
+  unknown: true,
+  asOfYm: null,
+  label: null,
+  detail: null,
+};
+
+/** 보정하지 않은 밴드가 무엇인지. 사유와 무관하게 **항상 참인** 사실만 적는다. */
+const RAW_MIX_NOTE = "기간 내 거래를 시점 구분 없이 섞은 값이라 특정 시점의 가격이 아닙니다.";
+
+/**
+ * 밴드의 시점 상태를 정한다. **화면은 이 결과만 그린다.**
+ *
+ * ⚠️ `time_adjusted` 와 `time_adjustment.applied` 는 서로를 검증한다.
+ *    둘이 어긋나면(서버 결함) **보정을 주장하지 않는 쪽**으로 넘어간다 —
+ *    보정 사실을 놓치는 손해보다, 안 한 보정을 했다고 말하는 손해가 크다.
+ */
+export function bandTimeView(band: PriceBand | null | undefined): BandTimeView {
+  if (!band) return UNKNOWN_TIME;
+
+  const adj = band.time_adjustment ?? null;
+  const claims = [band.time_adjusted, adj?.applied].filter(
+    (v): v is boolean => typeof v === "boolean",
+  );
+  // 아무 주장도 없다 = 모른다. 예전 화면 그대로 두고 시점 이야기를 꺼내지 않는다.
+  if (claims.length === 0) return UNKNOWN_TIME;
+
+  if (claims.every((v) => v)) {
+    const ym = asYm(band.as_of_ym) ?? asYm(adj?.reference_ym);
+    return {
+      adjusted: true,
+      unknown: false,
+      asOfYm: ym,
+      // 월을 모르면 "언제로 환산했는지"를 지어내지 않는다 — 환산 사실만 밝힌다.
+      label: ym ? `${ym} 시점 환산` : "시점 환산(기준월 미상)",
+      detail: null,
+    };
+  }
+
+  // 사유는 **서버 문장을 그대로** 잇는다(마침표까지 손대면 그게 재조립의 시작이다).
+  const reason = plainReason(adj?.reason ?? adj?.note);
+  return {
+    adjusted: false,
+    unknown: false,
+    asOfYm: null,
+    label: "시점 보정 없음",
+    detail: reason ? `${RAW_MIX_NOTE} ${reason}` : RAW_MIX_NOTE,
+  };
+}
 
 /* ─────────────────────────────────────────────────────────────────────────
  * 가격 — 호가와 실거래는 같은 숫자가 아니다
@@ -49,10 +137,23 @@ export function priceView(item: RecommendationItem): PriceView {
   const isListing = item.price_basis === "listing";
   const askKrw = isListing ? (item.ask_price_krw ?? null) : null;
   const gapPct = isListing ? (item.ask_gap_pct ?? null) : null;
+  const krw = item.est_price_krw ?? askKrw;
+
+  /* 실거래 기준 후보의 기준가는 **밴드 중위 그 자체**다(서버 `reference_price_krw`).
+     그 중위가 시점 환산된 값이면 큰 숫자의 라벨도 그렇게 불러야 한다 —
+     "최근 실거래 기준"이라고만 쓰면 원본 체결가로 읽힌다.
+     ⚠️ 라벨은 **화면에 뜬 그 숫자**에 대한 주장이다. 그래서 중위와 같을 때만 붙인다:
+        서버가 다른 값을 기준가로 쓰기 시작하면 이 주장은 근거를 잃는다. */
+  const time = bandTimeView(item.price_band);
+  const isBandMedian = krw !== null && krw === item.price_band?.median_krw;
+  const tradeLabel =
+    time.adjusted && time.asOfYm && isBandMedian
+      ? `${time.asOfYm} 시점 환산 추정가`
+      : "최근 실거래 기준 추정가";
 
   return {
-    krw: item.est_price_krw ?? askKrw,
-    label: isListing ? "호가" : "최근 실거래 기준 추정가",
+    krw,
+    label: isListing ? "호가" : tradeLabel,
     // 호가는 "지금 이 값에 살 수 있다"는 사실, 실거래 중위는 추정 — 농도를 다르게 준다.
     confidence: isListing ? "confirmed" : "estimated",
     estimated: !isListing || item.price_estimated === true,

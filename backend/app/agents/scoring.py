@@ -74,7 +74,17 @@ AXIS_SPECS: dict[str, AxisSpec] = {
         label="가격",
         agent_ids=("valuation-trader",),
         signal="호가 − 적정가 밴드 중위 갭(ask_gap_pct)을 0~100 으로 환산",
-        coverage=COVERAGE_FULL,
+        # ⚠️ 예전에는 여기가 `COVERAGE_FULL` 이었다. 사실이 아니다 — 이 축은 운영에서
+        #    **모든 후보에 대해 점수가 나오지 않는다**(2026-07-28 실측: listing 0행).
+        #    "설계한 신호를 다 본다"고 적어 두면 값이 하나도 없는 이유가 후보별
+        #    `missing` 에만 묻히고, 축 설명만 읽는 사람은 가격을 따졌다고 믿는다.
+        coverage=COVERAGE_PARTIAL,
+        coverage_gap=(
+            "이 축은 **호가(매도 희망가)와 적정가의 차이**를 재는데, 호가 데이터가 "
+            "없어 현재 모든 후보에서 점수가 나오지 않습니다. 공공 오픈API 에는 호가가 "
+            "없고, 포털 매물 수집은 약관·판례상 하지 않습니다. 대신 호가 없는 후보에는 "
+            "실거래 기반 적정가 밴드를 '추정가'로 제시하지만, 그건 '이 매물이 싼가'를 "
+            "판정한 값이 아니라 '이 단지가 얼마쯤인가'라서 후보 간 순위로 쓰지 않습니다."),
     ),
     AXIS_LOCATION: AxisSpec(
         axis=AXIS_LOCATION,

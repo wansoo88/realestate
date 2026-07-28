@@ -250,11 +250,17 @@ docker exec realestate-db pg_dump -U realestate -d realestate --schema-only \
 #        UndefinedColumn 으로 **모든 입지 조회가 죽는다**(중·고 학구도 포함).
 #     014 는 정비사업(재건축) 구역·매칭 테이블을 만든다. 없으면 추천의 '재건축' 축이
 #     전 후보에서 '미확보'로 나가고, 001 의 추가분담금 칸(사용 금지)도 잠기지 않는다.
+#     015 는 시장 가격지수(market_price_index) 표를 만든다 — 적정가 밴드의 시점 보정용.
+#     ⚠️ 표만 만들 뿐 값은 배치가 채운다: `python scripts/build_market_index.py` (§5-3c).
+#        비어 있어도 기능은 죽지 않고 **보정을 하지 않은 채** 동작한다(사유가 응답에 남는다).
+#        다만 보정 없이는 서울 단지의 적정가 밴드가 평균 ~8% 낮게 나온다(§5-3c 실측).
+#     ※ 운영 DB 에는 **2026-07-28 적용 완료**(추가만 하는 마이그레이션 · 스키마 백업 후 실행).
 for f in backend/migrations/009_user_approval.sql backend/migrations/010_job_result_meta.sql \
          backend/migrations/011_poi_natural_key.sql \
          backend/migrations/012_school_district_natural_key.sql \
          backend/migrations/013_school_level_and_zone_member.sql \
-         backend/migrations/014_redevelopment_project.sql; do
+         backend/migrations/014_redevelopment_project.sql \
+         backend/migrations/015_market_price_index.sql; do
   echo "--- $f ---"
   docker exec -i realestate-db psql -U realestate -d realestate -v ON_ERROR_STOP=1 < "$f"
 done
@@ -264,6 +270,76 @@ done
 
 > ⚠️ `psql` 에 `-v ON_ERROR_STOP=1` 을 반드시 준다. 없으면 **중간에 실패해도 0 으로 끝나** 실패가
 > 성공으로 보인다.
+
+### 5-3c. 시장지수 배치 — **적정가 밴드의 시점 보정** (015 적용 후)
+
+015 는 빈 표만 만든다. 값을 채우는 것은 배치다. **외부 수집 없이 우리 `trade` 표만 읽어
+계산**한다(네트워크·API 키 불필요).
+
+```bash
+cd /opt/realestate/backend
+. .venv/bin/activate
+export DATABASE_URL="postgresql+psycopg://realestate:<PW>@<DBIP>:5432/realestate"   # §5-5b 와 동일
+
+python scripts/build_market_index.py --dry-run --scope sido --region 41   # 가장 무거운 한 곳만 확인
+python scripts/build_market_index.py                                      # 전체(시군구+시도)
+```
+
+**2026-07-28 운영 실행 실측** (trade 611,518행 기준 · 같은 날 CR33-1 수정 후 재실행분)
+
+| 항목 | 값 |
+|---|---|
+| 소요 | **47초** (시군구 82곳 + 시도 3곳, 지역 사이 0.4초 휴식 포함) |
+| 적재 | **2,381행** (시군구 79곳 · 시도 3곳 × 최대 31개월) |
+| 지수 없음 | 시군구 3곳(28710·41800·41820) — 월 표본 50건 미만. **시도 지수로 폴백** |
+| db 메모리 | anon 64MB → **최대 77MB** (+13MB) · 한계 192MB |
+| 가장 무거운 쿼리 | 경기 시도(339,470행) **4.6초** |
+| postgres 재기동 | **없음** (`pg_postmaster_start_time` 불변) |
+| 트랜잭션 | **지역 단위**(85개). 중간에 죽어도 앞선 지역은 남고, UPSERT 가 멱등이라 재실행하면 된다 |
+
+> ⚠️ **메모리** — db 컨테이너는 `mem_limit 192MB` 이고 평상시 이미 ~137MB(anon 64 +
+> shared_buffers 64)를 쓴다. 그래서 배치는 ① 지역 하나씩 돌고 ② 세션 `work_mem` 을
+> **4MB** 로 낮춘다(서버 기본 2MB · 예전 값 12MB). 정렬이 디스크로 흘러 조금 느려지는
+> 대신 컨테이너가 죽지 않는다. 실행 중 `docker stats` 의 `MEM USAGE` 가 192MB 에 닿는
+> 것은 **page cache** 라 정상이다 — 위험 신호는 `memory.stat` 의 `anon` 이다.
+>
+> 실행 중 다른 무거운 작업(수집·지오코딩)을 겹치지 말 것.
+
+**언제 다시 돌리나 — 한 번 돌리고 끝나는 배치가 아니다.**
+지수의 **기준월**(환산 시점)은 이 표의 내용으로 정해진다. 재실행하지 않으면 새 실거래가
+쌓여도 밴드는 계속 옛 기준월로 말한다. 틀린 값은 아니지만 점점 낡는다.
+**실거래 수집 배치 뒤 월 1회** 재실행을 권장한다(멱등 UPSERT — 여러 번 돌려도 안전하다).
+
+⚠️ **기준월이 언제 한 달 앞으로 가는지** — 완결 판정은 달력과 건수를 **둘 다** 본다
+(`timeadjust._complete_flags`). 달력 조건은 *"그 달이 끝나고 신고 지연 30일까지 지났는가"*
+이므로, **M월이 기준월 후보가 되는 것은 M말+30일 이후**다. 예: 2026-06 은 **2026-07-31**
+부터 열린다. 그전에 돌리면 기준월이 2026-05 로 나오는데 그것이 정상이다.
+(예전 판은 달력을 안 보고 건수만 봐서, 거래가 많은 4개 지역이 **진행 중인 달**(2026-07)을
+기준월로 썼다 — 며칠 뒤 새 정보 없이 밴드가 바뀌는 상태였다. CR33-1.)
+
+확인:
+```bash
+docker exec realestate-db psql -U realestate -d realestate -c "
+  SELECT scope, count(DISTINCT region_code) AS regions, count(*) AS rows,
+         max(ym) FILTER (WHERE is_complete AND sample_size>=150) AS ref_ym
+    FROM market_price_index GROUP BY scope;"
+# 기대: sido 3곳 · sigungu 79곳 · ref_ym 이 '오늘에서 30일 뺀 달'의 **직전 달**
+# ⛔ ref_ym 에 진행 중인 달이 보이면 안 된다(그게 CR33-1 이다):
+docker exec realestate-db psql -U realestate -d realestate -c "
+  SELECT count(*) FROM market_price_index
+   WHERE is_complete AND ym >= to_char(now() - interval '30 days', 'YYYY-MM');"
+# 기대: 0
+```
+
+**적용 효과(운영 데이터 실측, 무작위 후보 360건)**: 밴드 중위가
+**서울 +7.3% · 경기 +1.8% · 인천 +0.7%**(중위) 이동했다. 밴드 창이 넓을수록 크다
+(6개월 +1.2% · 24개월 +5.3%). 고정 예산(서울 15억·경기 8억·인천 5억)에서
+**'예산 안'이던 후보 259건 중 7건이 예산 초과로 바뀌었다** — 표시 오차가 아니라
+**판정이 바뀌는 값**이다.
+※ 위 수치는 CR33-1 수정 **전**(기준월 2026-06/07) 측정이다. 수정 후 재실행으로 기준월이
+2026-05 로 내려가면서 밴드는 단지수 가중 평균 **−1.9%** 재조정됐다(지역별 −5.5% ~ +3.1%,
+양방향). 방향이 갈리는 이유는 ① 한 달치 시점 차이 ② 시도 기준월도 2026-05 가 되면서
+동률 tie-break 로 **시군구 지수를 쓰게 된 15개 구**(더 정밀한 지수로 바뀐 것)다.
 
 ### 5-4. API 기동
 ```bash
@@ -275,7 +351,16 @@ curl -fsS http://127.0.0.1:8013/api/v1/health            # {"status":"ok","role"
 기동에 실패하면 `.env` 문제일 가능성이 높다(JWT_SECRET 32자↑, FIELD_ENCRYPTION_KEY 정확히 32).
 ```bash
 docker compose -f docker-compose.deploy.yml logs api | tail -50
+# 예: "기동 점검 실패: JWT_SECRET 이 없거나 32자 미만입니다"
 ```
+
+> ⚠️ **DEBUG=false 에서 아래 셋 중 하나라도 틀리면 API 는 기동을 거부한다**(SR29-1):
+> `JWT_SECRET`(32자 이상) · `FIELD_ENCRYPTION_KEY`(정확히 32바이트) · `ARGON2_*`(OWASP 하한).
+> **뜨지 않는 것이 의도된 동작이다** — 셋 다 잘못돼도 앱은 정상처럼 돌기 때문이다
+> (빈 `JWT_SECRET` 으로도 토큰은 발급·검증된다 = 누구나 토큰을 위조할 수 있다).
+> 로그에는 **항목 이름만** 남고 값은 남지 않는다.
+> `POSTGRES_PASSWORD` 비어 있음·`COOKIE_SECURE=false` 는 **경고만** 하고 기동한다
+> (전자는 첫 DB 접속에서 큰 소리로 죽고, 후자는 운영에서 Secure 가 강제되어 효력이 없다).
 
 **(확인) 서버측 쿼리 상한이 실제로 붙었는가 — SR24-4**
 
@@ -627,7 +712,8 @@ docker compose -f docker-compose.deploy.yml down -v    # ⚠️ realestate-pgdat
 
 | 증상 | 원인 | 조치 |
 |---|---|---|
-| api 가 기동 직후 죽음 | `.env` 검증 실패 | `logs api` 확인. JWT_SECRET 32자↑, FIELD_ENCRYPTION_KEY 정확히 32 |
+| api 가 기동 직후 죽음 | `.env` 검증 실패(기동 점검이 막은 것 — 의도된 동작) | `logs api` 에서 `기동 점검 실패:` 줄 확인. JWT_SECRET 32자↑, FIELD_ENCRYPTION_KEY 정확히 32, ARGON2_* 는 하한 이상 |
+| 적정가 밴드가 몇 달 전 시점으로 나옴 | 시장지수 배치를 안 돌렸거나, 기준월이 아직 안 열림(M말+30일) | §5-3c 재실행. 기준월 규칙은 §5-3c ⚠️ 참조 |
 | `/affordability` 가 503 `TAX_RULES_UNAVAILABLE` | `config/` 마운트 누락 또는 `status != verified` | compose 의 `./config:/srv/config:ro` 확인 |
 | 로그인이 503 `BUSY` | Argon2 동시 한도 | 정상 동작(SR8-1/8-2). 잦으면 `ARGON2_CONCURRENCY` 조정 — **단 메모리 재계산 먼저** |
 | nginx reload 실패 | `limit_req_zone` 이름 충돌 | `nginx -t` 메시지 확인. zone 이름 `re_api`/`re_auth` 를 다른 이름으로 |

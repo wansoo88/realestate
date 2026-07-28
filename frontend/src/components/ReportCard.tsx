@@ -15,6 +15,7 @@ import type { RecommendationItem } from "../api/client";
 import { agentLabel, severityLabel } from "../lib/agentLabels";
 import { formatArea, formatKrw, formatPct } from "../lib/format";
 import {
+  bandTimeView,
   dongView,
   findingView,
   priceView,
@@ -49,6 +50,8 @@ export function ReportCard({ item, tags, unknownTags, llmActive = false, onShowO
   const score = scoreView(item);
   const dong = dongView(item.dong_valuation);
   const band = item.price_band;
+  // 이 밴드가 **언제의 가격인지**. 판단은 전부 bandTimeView 안에 있다(CR33-3).
+  const bandTime = bandTimeView(band);
   const summary = summaryBasisView(item, { llmActive });
 
   const coverage = coverageView(item);
@@ -123,16 +126,25 @@ export function ReportCard({ item, tags, unknownTags, llmActive = false, onShowO
         </p>
       )}
 
+      {/* 적정가 밴드 — 출처 앞에 **시점**을 먼저 밝힌다.
+          환산된 중위를 그냥 "국토교통부 실거래가"라고 부르면 원본 체결가로 읽힌다(CR33-3).
+          서버가 시점을 말하지 않는 응답(구버전)에서는 꼬리표 자체가 없다 — 없는 걸 주장하지 않는다.
+          농도 규칙: 시점 꼬리표는 캡션 색까지만. 금액(중위)보다 튀면 안 된다. */}
       {band && (
         <p className="report__band">
           적정가 밴드 <span className="num">{formatKrw(band.p25_krw)}</span>~
           <span className="num">{formatKrw(band.p75_krw)}</span> · 중위{" "}
           <span className="num">{formatKrw(band.median_krw)}</span>
           <span className="report__band-meta">
-            {` (${band.source} · 최근 ${band.period_months}개월 ${band.sample_size}건${
+            {" ("}
+            {bandTime.label && (
+              <span className="report__band-asof">{`${bandTime.label} · `}</span>
+            )}
+            {`${band.source} · 최근 ${band.period_months}개월 ${band.sample_size}건${
               band.expanded ? " · 표본 부족으로 기간 확장" : ""
             })`}
           </span>
+          {bandTime.detail && <span className="report__band-why">{bandTime.detail}</span>}
         </p>
       )}
 
