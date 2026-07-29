@@ -14,7 +14,7 @@ import type { RecommendationJob } from "../api/client";
 import { useTagFilter } from "../hooks/useTagFilter";
 import { sameBbox } from "../lib/bbox";
 import { formatKrwShort } from "../lib/format";
-import { filterList } from "../lib/listFilter";
+import { budgetVerdict, filterList } from "../lib/listFilter";
 import { NOTICE_NOT_ADVICE, NOTICE_TRADE_DELAY } from "../lib/notices";
 import { llmSummaryActive, progressText, type JobPhase } from "../lib/recommendation";
 import { conditionText, type ConditionPlan } from "../lib/recommendConditions";
@@ -34,9 +34,15 @@ interface Props {
   budgetKrw: number | null;
   /**
    * 목록 필터가 쓰는 실효 예산(희망가 우선, 없으면 한도).
-   * 안 주면 `budgetKrw` 로 폴백한다 — 지도와 다른 숫자를 쓰지 않기 위한 값이다.
+   *
+   * ⚠️ **키를 넘겼으면 `null` 도 그 값 그대로 쓴다** — `?? budgetKrw` 로 접지 않는다.
+   *    `null` 은 "예산이 없다"가 아니라 "지금은 초과 표시를 하지 않는다"(예산 칩 꺼짐)일
+   *    수 있고, 접으면 지도는 배지가 사라졌는데 추천만 배지가 남는다(CR37-7).
+   *    아예 안 넘긴 호출부(`undefined`)만 `budgetKrw` 로 폴백한다.
    */
   listBudgetKrw?: number | null;
+  /** 초과 표시가 꺼져 있는가 — 목록 위 문장이 "예산 미상"과 구분해 말한다. */
+  budgetDisplayOff?: boolean;
   /** 예산 내만 보기. 주변 단지 목록과 **같은 스위치**를 공유한다. */
   budgetOnly?: boolean;
   onBudgetOnlyChange?: (on: boolean) => void;
@@ -66,6 +72,11 @@ interface Props {
   onCancel: () => void;
   onShowOnMap?: (complexId: number) => void;
   onEditConditions?: () => void;
+  /**
+   * "내 매물"(호가 직접 입력)로 가는 길 (CR35-2).
+   * 결과 카드의 설명이 그 화면을 가리키므로, 그 자리에서 열 수 있어야 한다.
+   */
+  onAddListing?: (complex: { id: number; name: string }) => void;
 }
 
 export function RecommendPanel({
@@ -74,6 +85,7 @@ export function RecommendPanel({
   error,
   budgetKrw,
   listBudgetKrw,
+  budgetDisplayOff = false,
   budgetOnly = false,
   onBudgetOnlyChange,
   regionCodes,
@@ -89,6 +101,7 @@ export function RecommendPanel({
   onCancel,
   onShowOnMap,
   onEditConditions,
+  onAddListing,
 }: Props) {
   const running = phase === "queued" || phase === "running";
   const items = useMemo(() => job?.items ?? [], [job]);
@@ -110,20 +123,31 @@ export function RecommendPanel({
    * 서버가 준 원래 순위다. 필터 결과에 1,2,3 을 새로 붙이면 그건 새 순위처럼 읽히는
    * 거짓 정보가 된다("3위였던 게 1위로 올랐다"고 읽힌다).
    *
-   * 가격은 `est_price_krw` — 판단·예산 비교에 서버가 실제로 쓴 값이다(호가일 수도,
-   * 실거래 추정일 수도 있다. 어느 쪽인지는 카드가 라벨로 말한다).
+   * ⚠️ **화면이 예산을 판정하는 유일한 목록이다** (CR38-1).
+   *    지도·목록은 서버가 항목마다 그 면적의 한도로 판정해 준 값(`over_budget`)을 쓰지만,
+   *    추천 응답에는 항목별 판정이 없다. 그래서 여기서만 금액 하나로 판정한다.
+   *
+   *    두 목록이 다른 말을 하지 않는가 — 그 위험은 두 가지로 막혀 있다.
+   *      · 추천 카드에는 **예산 배지가 없다**(`ReportCard`). 이 판정은 `예산 내` 토글이
+   *        몇 건을 숨겼는지 세는 데만 쓰이고, 지도 배지와 한 화면에서 만나지 않는다.
+   *      · 두 목록은 애초에 다른 금액을 말한다 — 지도는 최근 체결 1건, 추천은 창 중위를
+   *        기준월로 환산한 추정가(CR35-4). 각자 **자기가 보여주는 금액**으로 판정하는
+   *        것이 원칙이고, 여기서 쓰는 값이 카드에 찍히는 `est_price_krw` 다.
    */
   const outcome = useMemo(
     () =>
       filterList(
         items.map((item) => ({
           item,
-          priceKrw: item.est_price_krw,
+          // `undefined`(안 넘김)일 때만 폴백한다. `null` 은 넘긴 사람의 뜻이다(위 주석).
+          budget: budgetVerdict(
+            item.est_price_krw,
+            listBudgetKrw === undefined ? budgetKrw : listBudgetKrw,
+          ),
           facts: recommendationTagFacts(item),
         })),
         {
           budgetOnly,
-          budgetKrw: listBudgetKrw ?? budgetKrw,
           tags: tagFilter.tags,
           includeUnknownTag: tagFilter.includeUnknown,
         },
@@ -265,6 +289,7 @@ export function RecommendPanel({
           onClearTags={tagFilter.clear}
           includeUnknownTag={tagFilter.includeUnknown}
           onIncludeUnknownChange={tagFilter.setIncludeUnknown}
+          budgetDisplayOff={budgetDisplayOff}
         />
       )}
 
@@ -284,6 +309,7 @@ export function RecommendPanel({
           unknownTags={entry.unknownTags}
           llmActive={llmActive}
           onShowOnMap={onShowOnMap}
+          onAddListing={onAddListing}
         />
       ))}
 

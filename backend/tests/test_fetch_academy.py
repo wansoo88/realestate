@@ -102,11 +102,12 @@ def test_같은_학원이라도_교습과정이_다르면_다른_행이다():
 # 산정 집계 — 지오코딩 규모의 근거가 되는 숫자들
 # ---------------------------------------------------------------------------
 
-def _write(tmp_path: Path, rows: list[dict]) -> Path:
+def _write(tmp_path: Path, rows: list[dict], *,
+           failures: list[str] | None = None) -> Path:
     path = tmp_path / "academy.json"
     path.write_text(json.dumps({
         "dataset": "academy",
-        "failures": [],
+        "failures": failures or [],
         "pages": [{"acaInsTiInfo": [{"head": [{"list_total_count": len(rows)}]},
                                     {"row": rows}]}],
     }, ensure_ascii=False), encoding="utf-8")
@@ -233,3 +234,81 @@ def test_행정동_통계는_행이_아니라_고유학원_집합을_담는다(t
     src = (SCRIPTS_DIR / "fetch_academy.py").read_text(encoding="utf-8")
     assert "zone_academic[f\"{office}/{row.get('ADMST_ZONE_NM') or ''}\"].add(asnum)" in src, (
         "행정동 집계가 고유 학원(ACA_ASNUM) 집합이 아니라 행 카운터로 되돌아갔습니다")
+
+
+# ---------------------------------------------------------------------------
+# 실패가 밖으로 나가는 길 (SR30-6 · CR33-6)
+#
+# 이 절이 지키는 것은 계산이 아니라 **끝나는 방식**이다. 수집기의 실패는 두 가지
+# 경로로만 관측된다: ① 종료코드 ② stderr 문자열. 둘 다 틀리면 cron 은 성공으로 읽고,
+# 낡거나 반쪽인 데이터가 몇 달간 사실 행세를 한다.
+# ---------------------------------------------------------------------------
+
+def test_실패_메시지가_마스킹을_탄다(monkeypatch, tmp_path):
+    """★ SR30-6. 주석은 "마스킹 계층이 한 번 더 훑는다"고 말했지만 **거짓이었다** —
+    `SystemExit` 메시지는 인터프리터가 stderr 로 직접 찍어 로깅 필터를 타지 않는다.
+
+    변이: `mask_secrets(...)` 를 벗겨 `f"[FAIL] {exc}"` 로 되돌리면 키가 그대로
+    남아 여기서 잡힌다.
+    """
+    monkeypatch.setattr(fetch_academy, "OUT_DIR", tmp_path)
+    monkeypatch.setenv("NEIS_API_KEY", "SUPERSECRETKEY123")
+
+    def _boom(*a, **k):
+        # 실제 사고 형태: 예외 문자열에 요청 URL(쿼리스트링에 키가 있다)이 실린다.
+        raise fetch_academy.FetchError(
+            "https://open.neis.go.kr/hub/acaInsTiInfo?KEY=SUPERSECRETKEY123&Type=json")
+
+    monkeypatch.setattr(fetch_academy, "fetch", _boom)
+
+    with pytest.raises(SystemExit) as exc:
+        fetch_academy.main([])
+
+    message = str(exc.value)
+    assert "SUPERSECRETKEY123" not in message, "키가 stderr 로 그대로 나갔다"
+    assert "***" in message
+
+
+def test_부분_수집은_0으로_끝나지_않는다(tmp_path, monkeypatch):
+    """★ CR33-6. "총 70,000행 중 3,000행만 수신"이 exit 0 이면 cron 은 성공으로 읽는다.
+
+    시장지수 크론 래퍼(`/opt/realestate/scripts/market-index.sh`)가 이미 같은 규율을
+    쓴다 — 실패하면 0 이 아닌 코드로 끝나고 결과까지 검증한다.
+
+    변이: `return EXIT_PARTIAL` 을 `return 0` 으로 되돌리면 잡힌다.
+    """
+    monkeypatch.setattr(fetch_academy, "OUT_DIR", tmp_path)
+    _write(tmp_path, [_row("A")], failures=["B10: 총 70000행 중 3000행만 수신"])
+    monkeypatch.setattr(fetch_academy, "OUT_NAME", "academy.json")
+
+    assert fetch_academy.main(["--stats-only"]) == fetch_academy.EXIT_PARTIAL
+    assert fetch_academy.EXIT_PARTIAL not in (0, 1), "성공·완전실패와 구분되는 코드여야 한다"
+
+
+def test_부분_수집이어도_파일은_남는다(tmp_path, monkeypatch):
+    """★ 반대 방향. 코드로 알리되 **받은 것까지 버리지는 않는다.**"""
+    monkeypatch.setattr(fetch_academy, "OUT_DIR", tmp_path)
+    path = _write(tmp_path, [_row("A")], failures=["B10: 일부만 수신"])
+    monkeypatch.setattr(fetch_academy, "OUT_NAME", "academy.json")
+
+    fetch_academy.main(["--stats-only"])
+    assert path.exists()
+    assert fetch_academy.stats(path)["academies"] == 1
+
+
+def test_완전한_수집은_0으로_끝난다(tmp_path, monkeypatch):
+    """변이: `failures` 를 안 보고 무조건 2 를 내면 정상 실행이 실패로 보여 잡힌다."""
+    monkeypatch.setattr(fetch_academy, "OUT_DIR", tmp_path)
+    _write(tmp_path, [_row("A")], failures=[])
+    monkeypatch.setattr(fetch_academy, "OUT_NAME", "academy.json")
+
+    assert fetch_academy.main(["--stats-only"]) == 0
+
+
+def test_부분_수집을_알고도_넘기려면_명시해야_한다(tmp_path, monkeypatch):
+    """`--allow-partial` 은 **사람이 판단했다**는 기록이다. 기본값이 되면 안 된다."""
+    monkeypatch.setattr(fetch_academy, "OUT_DIR", tmp_path)
+    _write(tmp_path, [_row("A")], failures=["B10: 일부만 수신"])
+    monkeypatch.setattr(fetch_academy, "OUT_NAME", "academy.json")
+
+    assert fetch_academy.main(["--stats-only", "--allow-partial"]) == 0

@@ -21,6 +21,7 @@ ORM 모델을 따로 두면 두 벌이 되고, 언젠가 반드시 어긋난다 
 """
 from __future__ import annotations
 
+import datetime as dt
 import json
 import logging
 from decimal import Decimal
@@ -47,6 +48,9 @@ from app.domain.redevelopment.models import RedevProject
 from app.domain.valuation.models import ListingRow, TradeRow
 from app.domain.valuation.timeadjust import INDEX_METHOD, IndexPoint, MarketIndex
 from app.repositories.base import (
+    LISTING_SOURCE_USER,
+    LISTING_STALE_DAYS,
+    MAX_USER_LISTINGS,
     STATUS_APPROVED,
     BBox,
     ComplexSummary,
@@ -55,6 +59,7 @@ from app.repositories.base import (
     NearestStationFact,
     ProfileRecord,
     RedevelopmentFact,
+    UserListingRecord,
     UserRecord,
 )
 
@@ -284,6 +289,39 @@ def _to_user(row: Any) -> UserRecord:
         status_changed_at=row.status_changed_at,
         status_changed_by=row.status_changed_by,
         status_reason=row.status_reason,
+    )
+
+
+def _listing_seen_on(row: Any) -> dt.date | None:
+    """이 호가가 살아 있음을 **마지막으로 확인한 날**.
+
+    수집분은 `collected_at`(수집 시각), 사용자 입력은 `as_of`(직접 본 날)이다.
+    사용자 입력에서 collected_at 을 쓰면 안 된다 — 3개월 전에 본 매물을 오늘 입력하면
+    collected_at 은 오늘이 되고, 그 순간 낡은 호가가 **오늘 확인된 호가**로 둔갑한다.
+    """
+    as_of = getattr(row, "as_of", None)
+    if getattr(row, "created_by_user_id", None) is not None and as_of is not None:
+        return as_of
+    collected = getattr(row, "collected_at", None)
+    return collected.date() if collected is not None else None
+
+
+def _to_user_listing(row: Any) -> UserListingRecord:
+    return UserListingRecord(
+        id=row.id,
+        user_id=row.created_by_user_id,
+        complex_id=row.complex_id,
+        ask_price_krw=int(row.ask_price_krw),
+        area_m2=float(row.area_m2),
+        as_of=row.as_of,
+        floor=row.floor,
+        apt_dong=row.apt_dong,
+        note=row.note,
+        status=row.status,
+        source=row.source,
+        complex_name=row.complex_name,
+        created_at=row.collected_at,
+        updated_at=row.updated_at,
     )
 
 
@@ -557,6 +595,19 @@ class PostgisRepository:
     #:      현행 4ms(warm) → 신규 121~138ms. 최대 bbox(2도)에서도 135ms.
     #:    역 탐색 반경·정렬은 입지 분석(`_STATIONS_SQL`)과 **같은 값**을 쓴다 —
     #:    지도 배지와 추천 카드가 다른 역을 가리키면 둘 다 못 믿게 된다.
+    #:
+    #: ⚠️ **최근 체결가는 사용자가 건 면적 조건 안에서 고른다** (CR34-3, 2026-07-29).
+    #:    예전에는 면적과 무관하게 그 단지의 최근 체결 1건을 실었다. 운영 실측
+    #:    (서울에서 55~65㎡ 를 가진 단지 400곳, 55~65㎡ 필터):
+    #:      **176곳(44%)** 의 표시가가 조건 **밖 면적**의 거래였고, 조건 안 최근
+    #:      거래와 **평균 26.8%**(최대 168.6%) 어긋났다. 59㎡ 를 찾는 사용자가
+    #:      120㎡ 체결가 43.8억을 그 단지의 값으로 읽는 형태다.
+    #:    조건 안 거래가 없으면 **NULL** 이다(조건 밖 값으로 채우지 않는다) —
+    #:    실측상 400곳 중 8곳(2%)이고, 그건 "모른다"가 맞는 답이다.
+    #:    비용 실측(warm 중위/최대 ms, 500개 상한):
+    #:      강남송파 밀집  조건없음 122.8/134 → 122.5/135 · 55~65㎡ 113.6/199 → 97.2/100
+    #:      최대bbox(2도) 조건없음 120.4/123 → 121.3/132 · 55~65㎡ 123.6/135 → 137.6/141
+    #:    최악 +14ms. 1초 목표 대비 무시할 수 있다.
     _BBOX_SQL = text("""
         SELECT c.id,
                c.name,
@@ -567,6 +618,7 @@ class PostgisRepository:
                c.total_households,
                t.price_krw       AS recent_price_krw,
                t.contract_date   AS price_as_of,
+               t.area_m2         AS price_area_m2,
                COALESCE(l.active_listings, 0) AS active_listings,
                st.name           AS station_name,
                st.distance_m     AS station_distance_m,
@@ -578,20 +630,31 @@ class PostgisRepository:
         LEFT JOIN LATERAL (
             -- idx_trade_complex_date (complex_id, contract_date DESC)
             -- 해제된 거래는 시세가 아니다. 통계에서 뺀다.
-            SELECT tr.price_krw, tr.contract_date
+            -- 면적 조건이 오면 **그 조건 안에서** 최근 1건을 고른다(위 주석의 실측).
+            -- 조건 밖 거래로 채우면 사용자가 자기 조건의 가격이라고 읽는다.
+            SELECT tr.price_krw, tr.contract_date, tr.area_m2
             FROM trade tr
             WHERE tr.complex_id = c.id AND NOT tr.is_cancelled
+              AND (CAST(:area_min AS numeric) IS NULL
+                   OR tr.area_m2 >= CAST(:area_min AS numeric))
+              AND (CAST(:area_max AS numeric) IS NULL
+                   OR tr.area_m2 <= CAST(:area_max AS numeric))
             ORDER BY tr.contract_date DESC
             LIMIT 1
         ) t ON true
         LEFT JOIN LATERAL (
             -- idx_listing_active (complex_id) WHERE status='active'
             -- 중복 매물(duplicate_of)은 대표건만 센다 — 같은 물건이 3건으로 보이면 안 된다.
+            -- ⚠️ **사용자 수동 입력은 세지 않는다**(migrations/016). 이 숫자는 지도
+            --    응답의 `active_listings` 로 나가는데, 사용자별 필터가 없는 조회다 —
+            --    세는 순간 A 가 적은 매물 건수가 B 의 지도에 보인다(교차 사용자 누출).
+            --    내 입력 건수는 `GET /me/listings` 가 소유자 스코프로 따로 답한다.
             SELECT count(*) AS active_listings
             FROM listing li
             WHERE li.complex_id = c.id
               AND li.status = 'active'
               AND li.duplicate_of IS NULL
+              AND li.created_by_user_id IS NULL
         ) l ON true
         LEFT JOIN LATERAL (
             -- 최근접 역. `&&` 로 GiST(idx_poi_geom)를 먼저 태우고 geography 로 정밀 판정.
@@ -676,6 +739,10 @@ class PostgisRepository:
                 recent_price_krw=row.recent_price_krw,
                 # 신고 지연이 있으므로 '언제 거래된 값인지'를 반드시 같이 보낸다.
                 price_as_of=row.price_as_of.isoformat() if row.price_as_of else None,
+                # **어느 면적의 거래인지**도 같이 보낸다. 이게 없으면 화면이
+                # "이 단지 15.4억"이라고만 말하고, 사용자는 그게 34㎡ 인지
+                # 120㎡ 인지 모른 채 자기 평형의 값으로 읽는다(CR34-3).
+                price_area_m2=_as_float(row.price_area_m2),
                 active_listings=row.active_listings,
                 nearest_station=_station_fact(row),
                 redevelopment=_redev_fact(row),
@@ -867,6 +934,12 @@ class PostgisRepository:
                     WHERE li2.complex_id = c.id
                       AND li2.status = 'active'
                       AND li2.duplicate_of IS NULL
+                      -- ⚠️ 사용자 수동 입력은 근거로 세지 않는다(migrations/016).
+                      --    이 조회에는 소유자 인자가 없어서, 세면 A 의 입력이 B 의
+                      --    면적 조건 통과 여부를 바꾼다(관측 가능한 교차 사용자 누출).
+                      --    소유자 스코프를 이 쿼리까지 넣는 것은 후속 과제다 —
+                      --    지금은 실거래·unit_type 근거만으로 판정한다.
+                      AND li2.created_by_user_id IS NULL
                       AND (CAST(:area_min AS numeric) IS NULL
                            OR li2.area_m2 >= CAST(:area_min AS numeric))
                       AND (CAST(:area_max AS numeric) IS NULL
@@ -902,11 +975,14 @@ class PostgisRepository:
             LIMIT 1
         ) t ON true
         LEFT JOIN LATERAL (
+            -- ⚠️ 사용자 수동 입력은 세지 않는다 — 이 값은 후보 **정렬 신호**이고
+            --    조회에 소유자 인자가 없다. 세면 A 의 입력이 B 의 후보 순서를 바꾼다.
             SELECT count(*) AS active_listings
             FROM listing li
             WHERE li.complex_id = c.id
               AND li.status = 'active'
               AND li.duplicate_of IS NULL
+              AND li.created_by_user_id IS NULL
         ) l ON true
         LEFT JOIN LATERAL (
             -- 가격 근거가 될 최근 실거래. idx_trade_complex_date 를 탄다.
@@ -1125,34 +1201,238 @@ class PostgisRepository:
             }).one()
         return int(row.with_geom or 0), int(row.total or 0)
 
+    #: 활성 호가 조회. **소유자 스코프가 SQL 안에 있다**(migrations/016).
+    #:
+    #: `:user_id` 가 NULL 이면 사용자 입력 행은 한 건도 나오지 않는다 — 배선을 잊은
+    #: 호출부에서 남의 호가가 새는 쪽이 아니라 **아무것도 안 보이는 쪽**으로 실패한다.
+    #: `:stale_cutoff` 보다 오래된 as_of 는 여기서 잘린다: 호출부가 거르기를 기대하지
+    #: 않는다(한 곳이라도 잊으면 3개월 전 호가가 현재 호가로 계산에 들어간다).
     _LISTINGS_SQL = text("""
         SELECT li.id, li.ask_price_krw, li.area_m2, li.floor,
-               li.listed_at, li.collected_at, li.building_id, li.agency, li.status
+               li.listed_at, li.collected_at, li.building_id, li.agency, li.status,
+               li.source, li.as_of, li.apt_dong, li.created_by_user_id
         FROM listing li
         WHERE li.complex_id = :complex_id AND li.status = 'active'
+          AND (
+                li.created_by_user_id IS NULL
+                OR (li.created_by_user_id = CAST(:user_id AS bigint)
+                    AND li.as_of >= CAST(:stale_cutoff AS date))
+              )
         ORDER BY li.ask_price_krw, li.id
     """)
 
-    def listings_for_complex(self, complex_id: int) -> list[ListingRow]:
+    def listings_for_complex(self, complex_id: int,
+                             user_id: int | None = None) -> list[ListingRow]:
         """활성 호가. **중복을 여기서 지우지 않는다** — 러너가 group_duplicates 로
-        묶어 대표건을 고른다. 미리 지우면 어떤 근거로 묶였는지 설명할 수 없다."""
+        묶어 대표건을 고른다. 미리 지우면 어떤 근거로 묶였는지 설명할 수 없다.
+
+        `user_id` 를 주면 **그 사용자의** 수동 입력 호가가 함께 나온다(낡지 않은 것만).
+        안 주면 수집 출처만 나온다 — 인메모리 구현과 같은 규칙이다.
+        """
+        cutoff = dt.date.today() - dt.timedelta(days=LISTING_STALE_DAYS)
         with self._engine.connect() as conn:
-            rows = conn.execute(self._LISTINGS_SQL, {"complex_id": complex_id}).all()
+            rows = conn.execute(self._LISTINGS_SQL, {
+                "complex_id": complex_id, "user_id": user_id,
+                "stale_cutoff": cutoff,
+            }).all()
         return [
             ListingRow(
                 id=row.id,
                 ask_price_krw=row.ask_price_krw,
                 area_m2=float(row.area_m2) if row.area_m2 is not None else 0.0,
                 floor=row.floor,
+                # ⚠️ 사용자 입력에는 `listed_at`(포털 등록일)이 없다 — 사용자가 모르는
+                #    값이다. as_of 를 여기 넣으면 `dedup.trust_score` 가 "등록 N일 경과"로
+                #    감점하는데, 그건 매물이 안 팔린 기간이 아니라 사용자가 입력을
+                #    미룬 기간이다. 없는 값은 None 으로 둔다.
                 listed_at=row.listed_at,
-                # collected_at 은 timestamptz — 모델은 date 를 기대한다
-                collected_at=row.collected_at.date() if row.collected_at else None,
+                # 수집분은 collected_at(수집 시각), 사용자 입력은 as_of(직접 확인한 날).
+                # 둘 다 "이 호가가 살아 있음을 마지막으로 확인한 날"이라는 같은 뜻이다.
+                collected_at=_listing_seen_on(row),
                 building_id=row.building_id,
                 agency=row.agency,
                 status=row.status,
+                # ⚠️ 출처를 실어 보낸다. 이 두 칸이 비면 분석 계층이 사용자 입력을
+                #    수집 데이터와 구분하지 못하고, `dedup.trust_score` 가 사람이 적은
+                #    한 건에 만점을 준다(= 리스크 축 100점 · 차단 ①).
+                #    DB CHECK 가 source ⟺ created_by_user_id 를 짝지으므로 소유자 자체는
+                #    싣지 않는다 — 이 객체는 근거 문자열·프롬프트 경로로 흘러간다.
+                source=row.source,
+                as_of=row.as_of,
             )
             for row in rows
         ]
+
+    # -- 사용자 수동 입력 호가 CRUD (migrations/016) ------------------------
+    #
+    # ⚠️ **모든 문장에 `created_by_user_id = :user_id` 가 들어간다.** 소유권 검사를
+    #    파이썬에서 하고 SQL 은 id 로만 찾는 형태를 만들지 않는다 — 그러면 검사를
+    #    빠뜨린 호출 경로가 하나 생기는 순간 IDOR 이 된다(security.md §2.2).
+    #    `source='user_entered'` 조건도 함께 건다: 수집 행이 사용자 CRUD 로
+    #    수정·삭제되는 경로를 구조적으로 없앤다.
+
+    _COMPLEX_NAME_SQL = text("SELECT name FROM complex WHERE id = :complex_id")
+
+    def complex_name(self, complex_id: int) -> str | None:
+        with self._engine.connect() as conn:
+            row = conn.execute(self._COMPLEX_NAME_SQL,
+                               {"complex_id": complex_id}).one_or_none()
+        return row.name if row is not None else None
+
+    _USER_LISTING_COLUMNS = """
+        li.id, li.complex_id, li.created_by_user_id, li.ask_price_krw, li.area_m2,
+        li.floor, li.apt_dong, li.as_of, li.note, li.status, li.source,
+        li.collected_at, li.updated_at, c.name AS complex_name
+    """
+
+    _ADD_USER_LISTING_SQL = text(f"""
+        WITH ins AS (
+            INSERT INTO listing (complex_id, created_by_user_id, ask_price_krw,
+                                 area_m2, floor, apt_dong, as_of, note,
+                                 status, source, collected_at, updated_at)
+            VALUES (:complex_id, :user_id, :ask_price_krw, CAST(:area_m2 AS numeric),
+                    :floor, :apt_dong, CAST(:as_of AS date), :note,
+                    'active', :source, now(), now())
+            RETURNING *
+        )
+        SELECT {_USER_LISTING_COLUMNS}
+        FROM ins li JOIN complex c ON c.id = li.complex_id
+    """)
+
+    def add_user_listing(self, user_id: int, *, complex_id: int,
+                         ask_price_krw: int, area_m2: float, as_of: dt.date,
+                         floor: int | None = None, apt_dong: str | None = None,
+                         note: str | None = None) -> UserListingRecord:
+        with self._engine.begin() as conn:
+            row = conn.execute(self._ADD_USER_LISTING_SQL, {
+                "complex_id": complex_id, "user_id": user_id,
+                "ask_price_krw": int(ask_price_krw), "area_m2": float(area_m2),
+                "floor": floor, "apt_dong": apt_dong, "as_of": as_of, "note": note,
+                "source": LISTING_SOURCE_USER,
+            }).one()
+        return _to_user_listing(row)
+
+    _LIST_USER_LISTINGS_SQL = text(f"""
+        SELECT {_USER_LISTING_COLUMNS}
+        FROM listing li JOIN complex c ON c.id = li.complex_id
+        WHERE li.created_by_user_id = :user_id
+          AND li.source = :source
+          AND (CAST(:complex_id AS bigint) IS NULL
+               OR li.complex_id = CAST(:complex_id AS bigint))
+        ORDER BY li.as_of DESC, li.id DESC
+        LIMIT CAST(:limit AS int)
+    """)
+
+    def list_user_listings(self, user_id: int, *, complex_id: int | None = None,
+                           limit: int = MAX_USER_LISTINGS) -> list[UserListingRecord]:
+        """내 호가 목록. **낡은 것도 함께** 돌려준다 — 고치라고 보여주는 화면이다."""
+        with self._engine.connect() as conn:
+            rows = conn.execute(self._LIST_USER_LISTINGS_SQL, {
+                "user_id": user_id, "complex_id": complex_id,
+                "source": LISTING_SOURCE_USER, "limit": max(1, min(int(limit), 500)),
+            }).all()
+        return [_to_user_listing(r) for r in rows]
+
+    _GET_USER_LISTING_SQL = text(f"""
+        SELECT {_USER_LISTING_COLUMNS}
+        FROM listing li JOIN complex c ON c.id = li.complex_id
+        WHERE li.id = :listing_id
+          AND li.created_by_user_id = :user_id
+          AND li.source = :source
+    """)
+
+    def get_user_listing(self, listing_id: int,
+                         user_id: int) -> UserListingRecord | None:
+        with self._engine.connect() as conn:
+            row = conn.execute(self._GET_USER_LISTING_SQL, {
+                "listing_id": listing_id, "user_id": user_id,
+                "source": LISTING_SOURCE_USER,
+            }).one_or_none()
+        return _to_user_listing(row) if row is not None else None
+
+    #: 수정 가능한 컬럼 ↔ SQL 캐스트. **화이트리스트다** — 여기 없는 키는 거절한다.
+    #: 키를 그대로 SQL 에 이어 붙이지 않는다(문자열 조립 금지 · 인젝션 방지):
+    #: 이 표에 있는 **상수 조각**만 쓰고 값은 전부 바인딩한다.
+    _UPDATABLE_COLUMNS = {
+        "ask_price_krw": "ask_price_krw = CAST(:ask_price_krw AS bigint)",
+        "area_m2": "area_m2 = CAST(:area_m2 AS numeric)",
+        "floor": "floor = CAST(:floor AS smallint)",
+        "apt_dong": "apt_dong = CAST(:apt_dong AS text)",
+        "as_of": "as_of = CAST(:as_of AS date)",
+        "note": "note = CAST(:note AS text)",
+        "status": "status = CAST(:status AS text)",
+    }
+
+    def update_user_listing(self, listing_id: int, user_id: int,
+                            **fields: Any) -> UserListingRecord | None:
+        unknown = [k for k in fields if k not in self._UPDATABLE_COLUMNS]
+        if unknown:
+            raise ValueError(f"수정할 수 없는 필드입니다: {', '.join(sorted(unknown))}")
+        if not fields:
+            return self.get_user_listing(listing_id, user_id)
+
+        assignments = ", ".join(self._UPDATABLE_COLUMNS[k] for k in sorted(fields))
+        sql = text(f"""
+            WITH upd AS (
+                UPDATE listing li
+                   SET {assignments}, updated_at = now()
+                 WHERE li.id = :listing_id
+                   AND li.created_by_user_id = :user_id
+                   AND li.source = :source
+                RETURNING *
+            )
+            SELECT {self._USER_LISTING_COLUMNS}
+            FROM upd li JOIN complex c ON c.id = li.complex_id
+        """)
+        params: dict[str, Any] = {
+            "listing_id": listing_id, "user_id": user_id,
+            "source": LISTING_SOURCE_USER,
+        }
+        params.update(fields)
+        with self._engine.begin() as conn:
+            row = conn.execute(sql, params).one_or_none()
+        return _to_user_listing(row) if row is not None else None
+
+    _DELETE_USER_LISTING_SQL = text("""
+        DELETE FROM listing
+         WHERE id = :listing_id
+           AND created_by_user_id = :user_id
+           AND source = :source
+    """)
+
+    def delete_user_listing(self, listing_id: int, user_id: int) -> bool:
+        """**진짜로 지운다**(소프트 삭제 아님).
+
+        잘못 적은 값을 되돌릴 수 없으면 사용자는 이 기능을 안 쓴다. 그리고 이건
+        사용자 본인의 개인 데이터라 흔적을 남길 이유가 없다 — 이미 나간 추천 결과는
+        `recommendation_item` 스냅샷에 그대로 남아 재현성은 유지된다.
+        '팔렸다·내렸다'를 기록하고 싶으면 `status` 를 바꾸는 길이 따로 있다.
+        """
+        with self._engine.begin() as conn:
+            result = conn.execute(self._DELETE_USER_LISTING_SQL, {
+                "listing_id": listing_id, "user_id": user_id,
+                "source": LISTING_SOURCE_USER,
+            })
+        return (result.rowcount or 0) > 0
+
+    _COMPLEX_REGION_SQL = text("""
+        SELECT c.region_code FROM complex c WHERE c.id = :complex_id
+    """)
+
+    def complex_region_code(self, complex_id: int) -> str | None:
+        """이 단지의 법정동코드. 없거나 미상이면 **None**.
+
+        시점 보정은 지역 지수로만 되므로 이 값이 없으면 보정할 수 없다.
+        추천 경로는 후보 조회가 이미 실어 오지만, 자금계획(`/affordability`)은
+        단지 하나를 직접 물어보므로 여기가 필요하다(`recommend.complex_reference_price`).
+        빈 문자열을 돌려주지 않는다 — 빈 코드로 지수를 찾으면 엉뚱한 지역이 걸린다.
+        """
+        with self._engine.connect() as conn:
+            row = conn.execute(self._COMPLEX_REGION_SQL,
+                               {"complex_id": complex_id}).first()
+        # region_code 는 char(10) 이라 공백 패딩이 붙어 올 수 있다.
+        code = (row.region_code or "").rstrip() if row is not None else ""
+        return code or None
 
     _TRADES_SQL = text("""
         SELECT tr.contract_date, tr.price_krw, tr.area_m2, tr.floor,

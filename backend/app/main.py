@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -11,14 +12,50 @@ from fastapi.responses import JSONResponse
 from app.api.routes import router
 from app.core.config import enforce_runtime_settings, get_settings
 from app.core.masking import install_log_masking
-from app.core.security import HashCapacityError, mask_sensitive
+from app.core.security import HashCapacityError
 
 logger = logging.getLogger("app")
 
-#: 이 경로들은 접근 로그에서 **쿼리스트링까지 지운다** (security.md §3.3).
-#: 요청·응답 **본문은 어떤 경로에서도 로그에 남기지 않는다** — 남길 수 있게 만들면
+#: ★ SR32-1. **쿼리스트링의 값은 어떤 경로에서도 로그에 남기지 않는다.**
+#:
+#: 예전에는 `SENSITIVE_PATHS` 라는 **허용목록의 반대**(민감목록)를 두고 거기 실린
+#: 경로에서만 쿼리를 지웠다. 그 구조가 그대로 사고가 됐다:
+#:   · `/me/profile`·`/affordability` 는 목록에 있었다 — 본문이 안 남는다.
+#:   · **`/map/complexes` 는 목록에 없었다.** 그런데 그 쿼리에 실려 있던
+#:     `max_price_krw=1314310000` 은 방금 그 `/affordability` 가 **암호화된 자산·소득·
+#:     대출을 복호화해 계산한 결론**이었다. 세 겹으로 지킨 값이 네 번째 길로 나갔다.
+#: 목록으로 관리하는 방어는 **새 엔드포인트가 생길 때마다 사람이 기억해야** 하고,
+#: 기억은 언젠가 빠진다. 그래서 규칙을 뒤집는다 — **기본이 '지운다'** 이고, 남기려면
+#: 그 자리에서 이유를 대야 한다(지금은 예외가 하나도 없다).
+#:
+#: 요청·응답 **본문도 어떤 경로에서도 로그에 남기지 않는다** — 남길 수 있게 만들면
 #: 언젠가 누군가 디버깅하려고 켜고, 그날 자산 금액이 로그로 샌다.
-SENSITIVE_PATHS = ("/api/v1/me/profile", "/api/v1/affordability", "/api/v1/auth")
+#:
+#: ⚠️ 이 미들웨어는 **세 싱크 중 하나**다. 나머지 둘도 같이 막혀 있어야 뜻이 있다:
+#:    ② uvicorn 접근 로그 → `masking.install_access_log_query_stripping()`
+#:    ③ nginx `combined` → `deploy/nginx-realestate.conf` 의 `re_noquery` log_format
+#:    하나만 막으면 나머지가 계속 쓴다(SR-032 §4-1 실측).
+
+#: 쿼리 **이름**은 남긴다 — "어떤 조건이 걸린 요청이었나"는 운영에 필요한 사실이고,
+#: 이름 자체는 값이 아니다. 다만 **이름 자리에 값을 넣는 요청**(`?1314310000=x`)이
+#: 오면 그것도 유출이므로, 소문자 식별자 모양만 통과시킨다(숫자로 시작하는 이름,
+#: 이메일·금액처럼 생긴 이름은 그 자리에서 버린다).
+_QUERY_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+
+
+def log_target(path: str, query: str) -> str:
+    """접근 로그에 남길 문자열. **값은 절대 넣지 않는다.**
+
+    `/api/v1/map/complexes [q: bbox,budget,zoom]` 처럼 경로 + 파라미터 이름만.
+    """
+    if not query:
+        return path
+    names = sorted({k for k, _, _ in (p.partition("=") for p in query.split("&")) if k})
+    shown = [n for n in names if _QUERY_NAME_RE.match(n)]
+    dropped = len(names) - len(shown)
+    if dropped:
+        shown.append(f"+{dropped}")
+    return f"{path} [q: {','.join(shown)}]" if shown else path
 
 #: 422 응답에 실을 검증 메시지 1건의 길이 상한(문자). **되비침의 총량을 묶는다**(SR25-2).
 #: 정상 메시지는 실측 100자 이하다. 이 상한이 하는 일은 "누군가 검증기에 입력값을
@@ -72,12 +109,9 @@ def create_app(*, repo=None) -> FastAPI:
     async def access_log_and_headers(request: Request, call_next):
         response = await call_next(request)
 
-        path = request.url.path
-        if any(path.startswith(p) for p in SENSITIVE_PATHS):
-            logged_target = path                       # 쿼리스트링 제거
-        else:
-            logged_target = path + (f"?{request.url.query}" if request.url.query else "")
-        logger.info("%s %s %s", request.method, logged_target, response.status_code)
+        logger.info("%s %s %s", request.method,
+                    log_target(request.url.path, request.url.query),
+                    response.status_code)
 
 
         response.headers["X-Content-Type-Options"] = "nosniff"
@@ -139,10 +173,21 @@ def create_app(*, repo=None) -> FastAPI:
         return JSONResponse(status_code=422, content={"detail": detail})
 
     @app.exception_handler(Exception)
-    async def unhandled(request: Request, exc: Exception):  # pragma: no cover
+    async def unhandled(request: Request, exc: Exception):
         # 스택트레이스·로컬 변수를 응답에 절대 싣지 않는다.
+        #
+        # ★ SR33-1 — 여기는 **위에서 선언한 규칙의 예외가 아니다.**
+        #   예전에는 `mask_sensitive(str(request.url))` 이었는데, 그 함수는
+        #   dict/list 의 **키 이름**으로 민감 필드를 찾는 구조 마스커라 문자열이
+        #   들어오면 아무 일도 하지 않았다(그대로 반환). 그래서 이 한 줄이
+        #   `?bbox=…&area_min_m2=84.5` 처럼 **쿼리를 통째로** 로그에 남겼다.
+        #   하필 이 줄이 앱 로거에서 운영에 실제로 나가는 **유일한 줄**이다 —
+        #   root 핸들러가 없어 위 미들웨어의 INFO 는 버려지고, ERROR 만
+        #   `logging.lastResort` 로 stderr(= `docker logs`)에 나간다.
+        #   즉 "값을 지우는 계층"은 침묵하고 "값을 담는 계층"만 말하고 있었다.
+        #   → 같은 파일의 `log_target` 을 쓴다(쿼리는 **이름만** 남는다).
         logger.exception("처리되지 않은 오류: %s %s", request.method,
-                         mask_sensitive(str(request.url)))
+                         log_target(request.url.path, request.url.query))
         return JSONResponse(
             status_code=500,
             content={"error": {"code": "INTERNAL", "message": "처리 중 오류가 발생했습니다"}},

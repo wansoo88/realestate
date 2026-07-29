@@ -16,6 +16,7 @@ function state(over: Partial<MapFilterState> = {}): MapFilterState {
     targetPriceKrw: null,
     prefer: { area_min_m2: 59, area_max_m2: 84, built_after: 2010 },
     preferApplied: true,
+    purpose: "live",
     ...over,
   };
 }

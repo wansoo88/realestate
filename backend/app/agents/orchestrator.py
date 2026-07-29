@@ -80,7 +80,13 @@ DISCLAIMER = ("투자 권유가 아니며 개인 판단을 돕는 참고 자료�
               "실제 계약 전 현장 확인과 전문가 상담을 권합니다.")
 
 #: 실거래 신고 지연 — 모든 시세 판단에 붙는 상수 리스크
-DELAY_RISK = Risk("medium", "실거래는 신고까지 최대 30일이 걸려 최근 거래가 반영되지 않았을 수 있습니다.")
+#: ⚠️ 30일은 **신고기한**이다(부동산거래신고법 제3조 제1항). "신고까지 최대 30일"이라고만
+#:    말하면 30일이 지연의 상한처럼 읽히는데 그렇지 않다 — 기한 안에 낸 신고가 공개
+#:    API 에 실리기까지 시간이 더 걸리고, 지각 신고도 있다(CR34-4). 우리는 그 추가분을
+#:    재지 않았으므로 **숫자로 말하지 않는다.**
+DELAY_RISK = Risk("medium",
+                  "실거래는 계약일로부터 30일 이내에 신고하게 되어 있고 공개까지는 "
+                  "시간이 더 걸립니다 — 최근 거래가 반영되지 않았을 수 있습니다.")
 
 # --- 가격 근거 (price_basis) ------------------------------------------------
 #
@@ -117,6 +123,27 @@ AVOID_REDEV_EARLY = "redevelopment_early_stage"
 #: 실거래 기준 후보에 붙는 표준 문구. UI 가 그대로 노출해도 되도록 완결형으로 둔다.
 TRADE_BASIS_NOTE = ("현재 등록된 매물이 없습니다 — 최근 실거래 기준 추정가입니다. "
                     "실제 매수 가능 가격은 다를 수 있습니다.")
+
+
+def trade_basis_note(band: Any) -> str:
+    """실거래 기준 후보의 `price_note`. **시점까지 말한다**(CR34-5).
+
+    `TRADE_BASIS_NOTE` 만으로는 부족하다 — 그 문장은 *가격 근거*(호가가 없다)만
+    말하고 이 숫자가 **언제 시점의 값인지**는 말하지 않는다. 그런데 보정이 켜진 뒤로
+    같은 문구가 두 가지 다른 값에 붙는다:
+      · 보정됨   — 특정 기준월로 환산한 추정가
+      · 보정 안 됨 — 6~36개월 거래를 시점 구분 없이 섞은 값(어느 시점도 아니다)
+    두 값에 같은 말을 붙이면 사용자는 구분할 방법이 없다. 상수는 문구가 고정이라
+    기준월을 담을 수 없으므로, 뒤에 한 문장을 **덧붙여** 만든다.
+
+    ⚠️ 상수 자체는 그대로 둔다 — 다른 곳(테스트·프론트 문구 대조)이 그 문자열을
+       접두로 본다. 여기서 하는 일은 **덧붙이기**지 바꾸기가 아니다.
+    """
+    ym = getattr(band, "as_of_label", None)
+    if ym:
+        return f"{TRADE_BASIS_NOTE} 이 금액은 {ym} 시점으로 환산한 값입니다."
+    return (f"{TRADE_BASIS_NOTE} 시점 보정을 하지 못해 여러 시점의 거래를 섞은 값이라 "
+            f"특정 시점의 가격이 아닙니다.")
 #: 실거래 기준 후보의 판정 문구(호가 갭 판정을 대체한다).
 TRADE_BASIS_VERDICT = "현재 매물 없음 — 최근 실거래 기준"
 
@@ -343,6 +370,18 @@ def finance_finding(result: AffordabilityResult) -> Finding:
 
 def listing_finding(candidate: Candidate, median_krw: int | None,
                     as_of: dt.date) -> Finding:
+    """매물 신뢰도(= 리스크 축). **출처에 따라 판정 가능 여부가 갈린다.**
+
+    수집 호가 → 예전과 같다(중복 등록·등록 경과일·시세 갭·최근 확인).
+    사용자 수동 입력 → `trust_score` 가 `None` 을 준다. 그 사유를 그대로 내보내고
+                      **점수를 만들지 않는다**(리스크 축은 '미반영'이 된다).
+
+    ⚠️ 여기서 점수를 지어내면 무슨 일이 벌어지나 (2026-07-29 실측)
+       사용자 입력 그룹은 신뢰도 신호 넷 중 셋이 침묵하고 "최근 확인됨" 가산만 붙어
+       **만점**이 나온다. 같은 후보(호가가 적정가보다 +9.3% 비쌈)에서 리스크 축
+       100.0점(실효비중 25%)이 붙어 총점 67.0 — 안 붙이면 56.0 이다.
+       즉 **비싼 매물을 손으로 입력할수록 추천 점수가 올라간다.**
+    """
     if candidate.group is None:
         # 평가할 매물 자체가 없다. "정상 매물"도 "허위 의심"도 아니다 —
         # 공공 API 에는 호가가 없으므로 이건 **정상적인 데이터 없음**이다(G4).
@@ -352,21 +391,28 @@ def listing_finding(candidate: Candidate, median_krw: int | None,
 
     score, signals = trust_score(candidate.group,
                                  median_price_krw=median_krw, as_of=as_of)
+    if score is None:
+        # 판정 못 한 것을 판정한 것처럼 내보내지 않는다. 사유는 도메인이 준 그대로 —
+        # 여기서 다시 쓰면 두 곳이 갈라지고, 갈라지면 한쪽만 고쳐진다.
+        return insufficient("listing-researcher", list(signals))
     rep = candidate.group.representative
+    # 중개사 중복 등록 수는 **수집 건수**다. 사용자가 자기 손으로 적은 한 건이 "중개사
+    # 하나 더"로 세어지면, 사용자가 자기 입력으로 중복 등록 신호를 만든 꼴이 된다.
+    listed_count = len(candidate.group.collected)
 
     risks: list[Risk] = []
     if score < 0.7:
         risks.append(Risk("medium", "매물 신뢰도가 낮습니다: " + "; ".join(signals)))
-    if candidate.group.duplicate_count >= 4:
+    if listed_count >= 4:
         risks.append(Risk("low",
-                          f"{candidate.group.duplicate_count}개 중개사에 중복 등록되어 있습니다."))
+                          f"{listed_count}개 중개사에 중복 등록되어 있습니다."))
 
     return validate_finding(Finding(
         agent_id="listing-researcher",
         verdict="확인 필요" if score < 0.7 else "정상 매물",
         rationale=(f"호가 {rep.ask_price_krw:,}원, {rep.floor}층. "
                    + ("특이사항: " + "; ".join(signals) if signals else "특이 신호 없음.")),
-        evidence=[Evidence(claim=f"활성 매물 {candidate.group.duplicate_count}건",
+        evidence=[Evidence(claim=f"활성 매물 {listed_count}건",
                            source="포털 매물 수집", as_of=as_of.isoformat())],
         risks=risks,
         score=round(score * 100, 1),
@@ -1463,7 +1509,10 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
             "ask_price_krw": cand.ask_price_krw,     # 호가 없으면 None (위장 금지)
             "est_price_krw": price,                  # 판단·예산 비교에 실제로 쓴 값
             "price_estimated": basis != PRICE_BASIS_LISTING,
-            "price_note": (None if basis == PRICE_BASIS_LISTING else TRADE_BASIS_NOTE),
+            # 호가 기준이면 시점 이야기가 필요 없다(지금 살 수 있는 값이다).
+            # 실거래 기준이면 **언제 시점의 값인지**까지 말한다(CR34-5).
+            "price_note": (None if basis == PRICE_BASIS_LISTING
+                           else trade_basis_note(band)),
             "ask_gap_pct": (ask_gap_pct(cand.ask_price_krw, band)
                             if cand.ask_price_krw is not None and band.available else None),
             "price_band": _price_band_dict(band),

@@ -179,6 +179,43 @@
   opacity: 0.9;
 }
 
+/* 기준가 근거 — 금액 **바로 아래**. 접으면 아무도 안 본다(G2).
+   농도 규칙: 캡션 색까지만. 금액보다 튀면 안 된다. */
+.plan__ref {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: calc(-1 * var(--sp-2)) 0 var(--sp-3);
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.plan__ref-label {
+  font-weight: 600;
+}
+
+.plan__ref--est .plan__ref-label {
+  font-weight: 400;
+}
+
+.plan__ref-detail,
+.plan__ref-area {
+  color: var(--text-estimated);
+}
+
+.plan__ref-why {
+  color: var(--warn-text);
+}
+
+/* 기준가를 못 만든 경우 — 계획을 지어내지 않고 사유만 남는 자리 */
+.plan__noref {
+  margin: 0 0 var(--sp-2);
+  font-size: var(--fs-caption);
+  color: var(--warn-text);
+  line-height: 1.6;
+}
+
 .plan__rows {
   margin: 0;
   display: grid;

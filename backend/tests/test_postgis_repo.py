@@ -521,6 +521,81 @@ def test_최근_실거래와_활성매물이_함께_온다(repo, engine):
     assert row.active_listings == 1
 
 
+def test_지도_시세는_사용자의_면적조건_안에서_고른다(repo, engine):
+    """★ CR34-3. 예전에는 면적과 무관하게 최근 1건을 실었다.
+
+    운영 실측(2026-07-29): 서울에서 55~65㎡ 를 가진 단지 400곳에 그 필터를 걸었을 때
+    **176곳(44%)** 의 표시가가 조건 밖 면적의 거래였고, 조건 안 최근 거래와
+    **평균 26.8%**(최대 168.6%) 어긋났다. 59㎡ 를 찾는 사용자가 120㎡ 체결가를
+    그 단지의 값으로 읽는 형태다.
+
+    변이: LATERAL 의 area 조건 두 줄을 지우면 `recent_price_krw` 가 30억(대형)이 되어
+    여기서 잡힌다. `price_area_m2` 를 안 실으면 두 번째 단언에서 잡힌다.
+    """
+    cid = _seed_complex(engine, name="혼합평형단지", lon=127.05, lat=37.50)
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO unit_type (complex_id, area_m2, type_name) VALUES
+              (:cid, 59.9, 'A'), (:cid, 120.0, 'B')
+        """), {"cid": cid})
+        conn.execute(text("""
+            INSERT INTO trade (complex_id, contract_date, price_krw, area_m2, source)
+            VALUES
+              -- 소형의 최근 거래 (사용자가 찾는 평형)
+              (:cid, DATE '2026-05-10', 1400000000, 59.9, 'molit'),
+              -- **더 최근**의 대형 거래. 조건이 없으면 이게 그 단지 가격이 된다.
+              (:cid, DATE '2026-07-04', 3000000000, 120.0, 'molit')
+        """), {"cid": cid})
+
+    box = {"min_lon": 127.0, "min_lat": 37.4, "max_lon": 127.1, "max_lat": 37.6}
+
+    # 조건이 없으면 예전 그대로 — 그 단지의 최근 체결 1건이다.
+    plain = repo.complexes_in_bbox(**box)[0]
+    assert plain.recent_price_krw == 3_000_000_000
+    assert plain.price_area_m2 == pytest.approx(120.0)
+
+    # 55~65㎡ 를 요구하면 **그 조건 안** 최근 거래를 준다.
+    narrow = repo.complexes_in_bbox(**box, area_min_m2=55, area_max_m2=65)[0]
+    assert narrow.recent_price_krw == 1_400_000_000
+    assert narrow.price_area_m2 == pytest.approx(59.9)
+    assert narrow.price_as_of == "2026-05-10"
+
+
+def test_조건에_맞는_거래가_없으면_금액을_비운다(repo, engine):
+    """★ 조용한 대체 금지. 조건 밖 거래로 채우면 그건 다른 평형의 가격이다.
+
+    변이: LATERAL 조건 대신 라우터에서 필터링하면(= 조건 밖 값을 그대로 실으면)
+    `recent_price_krw` 가 30억이 되어 잡힌다.
+    """
+    cid = _seed_complex(engine, name="대형만있는단지", lon=127.05, lat=37.50)
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO unit_type (complex_id, area_m2, type_name) VALUES (:cid, 59.9, 'A')
+        """), {"cid": cid})
+        conn.execute(text("""
+            INSERT INTO trade (complex_id, contract_date, price_krw, area_m2, source)
+            VALUES (:cid, DATE '2026-07-04', 3000000000, 120.0, 'molit')
+        """), {"cid": cid})
+
+    row = repo.complexes_in_bbox(min_lon=127.0, min_lat=37.4, max_lon=127.1,
+                                 max_lat=37.6, area_min_m2=55, area_max_m2=65)[0]
+    assert row.recent_price_krw is None
+    assert row.price_area_m2 is None
+    assert row.price_as_of is None
+
+
+def test_단지_지역코드를_읽는다(repo, engine):
+    """자금계획(`/affordability`)의 시점 보정이 이 값 하나에 달려 있다.
+
+    변이: `rstrip()` 을 지우면 char(10) 공백 패딩 때문에 지역 키가 안 맞아
+    보정이 조용히 꺼진다(오류는 안 난다).
+    """
+    cid = _seed_complex(engine, name="코드단지", lon=127.05, lat=37.50,
+                        region="1168010100")
+    assert repo.complex_region_code(cid) == "1168010100"
+    assert repo.complex_region_code(999_999) is None
+
+
 def test_예산초과_단지를_걸러내지_않는다(repo, engine):
     """ux/README.md §4 — 왜 후보에 없는지 보이게 하려면 목록에는 남아야 한다."""
     _seed_complex(engine, name="비싼단지", lon=127.05, lat=37.50)
@@ -1752,6 +1827,25 @@ def test_API_전구간이_PostGIS_위에서_동작한다(repo, engine, monkeypat
             body = r.json()
             assert body["level"] == "complex"
             assert [i["name"] for i in body["items"]] == ["E2E단지"]
+            # 기준을 안 걸면 초과 판정은 **모름**이다(false 로 접지 않는다).
+            assert body["items"][0]["over_budget"] is None
+            assert body["budget"]["applied"] is False
+
+            # ★ SR32-1 — 예산 상한을 **서버가** 만든다(요청에 금액이 없다).
+            #   이 경로는 PostGIS 의 get_preferences·get_profile 과 복호화를 지난다.
+            r = client.get("/api/v1/map/complexes", headers=auth,
+                           params={"bbox": "127.0,37.4,127.1,37.6", "zoom": 15,
+                                   "budget": "mine"})
+            assert r.status_code == 200, r.text
+            budget = r.json()["budget"]
+            assert budget == {"applied": True, "basis": "max_purchase",
+                              "reason": None}, budget
+            # 옛 파라미터는 조용히 무시되지 않는다.
+            r = client.get("/api/v1/map/complexes", headers=auth,
+                           params={"bbox": "127.0,37.4,127.1,37.6", "zoom": 15,
+                                   "max_price_krw": 1_314_310_000})
+            assert r.status_code == 400, r.text
+            assert "1314310000" not in r.text
 
             r = client.post("/api/v1/recommendations", headers=auth,
                             json={"region_codes": ["1168010100"], "purpose": "live"})

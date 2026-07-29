@@ -8,7 +8,7 @@
  */
 import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RecommendationItem } from "../api/client";
 import { ReportCard } from "./ReportCard";
 
@@ -540,5 +540,36 @@ describe("요약 출처(summary_basis)", () => {
   it("서버가 값을 안 주는 구버전에서는 단정하지 않는다", () => {
     render(<ReportCard item={TRADE} llmActive />);
     expect(screen.queryByText("규칙 기반 요약")).toBeNull();
+  });
+});
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * CR35-2 — 안내만 있고 갈 곳이 없던 문제
+ *
+ * 이 카드의 점수 설명은 호가가 없을 때 *"'내 매물'에서 직접 입력하시면 가격 축이
+ * 반영됩니다"* 라고 말한다. 그 문장이 가리키는 화면으로 **여기서 갈 수 있어야** 한다.
+ * ───────────────────────────────────────────────────────────────────────── */
+
+describe("호가 입력 동선", () => {
+  it("호가가 없는 후보에는 '이 단지 호가 입력'이 뜨고 단지를 그대로 넘긴다", async () => {
+    const onAdd = vi.fn();
+    const user = userEvent.setup();
+    render(<ReportCard item={TRADE} onAddListing={onAdd} />);
+
+    const btn = screen.getByRole("button", { name: "이 단지 호가 입력" });
+    await user.click(btn);
+    expect(onAdd).toHaveBeenCalledWith({ id: 1024, name: "○○아파트" });
+    // 왜 넣어야 하는지가 버튼 옆에 있다(가격 축이 이 후보의 점수에서 빠져 있다)
+    expect(screen.getByText(/가격 축/)).toBeTruthy();
+  });
+
+  it("이미 호가가 있으면 그 버튼을 띄우지 않는다(할 일이 없다)", () => {
+    render(<ReportCard item={LISTING} onAddListing={vi.fn()} />);
+    expect(screen.queryByRole("button", { name: "이 단지 호가 입력" })).toBeNull();
+  });
+
+  it("동선이 연결되지 않은 화면에서는 버튼을 그리지 않는다(죽은 버튼 금지)", () => {
+    render(<ReportCard item={TRADE} />);
+    expect(screen.queryByRole("button", { name: "이 단지 호가 입력" })).toBeNull();
   });
 });

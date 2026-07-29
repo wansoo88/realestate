@@ -465,6 +465,30 @@ def test_거부는_사유를_감사기록에_남긴다(admin_client):
     assert _login(admin_client, "waiting@b.co").status_code == 403
 
 
+def test_거부_사유의_제어문자는_거절한다(admin_client):
+    """★ SR32-3. `note`·`apt_dong` 과 **같은 계약**이어야 한다.
+
+    이 값은 PostgreSQL `text` 로 들어가고 NUL 이 섞이면 운영은 `psycopg.DataError`
+    → 500, 인메모리는 200 이다. 두 구현이 다른 입력을 받으면 그 구간에서 테스트가
+    운영을 대표하기를 멈춘다.
+
+    변이: `RejectIn._strip_or_none` 을 지우면 NUL 이 201/200 으로 통과해 여기서 깨진다.
+    """
+    path = f"/api/v1/admin/users/{admin_client.waiting_id}/reject"
+    h = _auth(admin_client.admin_token)
+
+    for bad in ("본인 확인\x00불가", "확인\x01불가", "확인\x7f불가"):
+        r = admin_client.post(path, json={"reason": bad}, headers=h)
+        assert r.status_code == 422, (bad.encode(), r.text)
+        assert "\\u0000" not in r.text and "\x00" not in r.text, "값을 되비치지 않는다"
+
+    # 탭·줄바꿈·한글은 그대로 받는다(사람이 쓰는 문장이다).
+    r = admin_client.post(path, json={"reason": "본인 확인 불가\n서류 미제출"}, headers=h)
+    assert r.status_code == 200, r.text
+    assert (admin_client.repo.get_user_by_email("waiting@b.co").status_reason
+            == "본인 확인 불가\n서류 미제출")
+
+
 def test_없는_사용자를_승인해도_존재를_알려주지_않는다(admin_client):
     r = admin_client.post("/api/v1/admin/users/999999/approve",
                           headers=_auth(admin_client.admin_token))

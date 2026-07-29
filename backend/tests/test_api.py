@@ -624,16 +624,24 @@ def test_클라이언트는_권역으로_6억캡을_끌_수_없다(client, monke
 # ---------------------------------------------------------------------------
 
 def _seed_complexes(repo):
-    for i, (lon, lat, region) in enumerate([
-        (127.05, 37.51, "1168000000"),
-        (127.06, 37.52, "1168000000"),
-        (126.95, 37.55, "1114000000"),
+    """지도 단지 3건.
+
+    ⚠️ `price_area_m2` 를 **반드시 함께** 넣는다. PostGIS 조회는 가격·기준일·면적을
+       한 거래 행(LATERAL 1건)에서 가져오므로 **금액이 있으면 면적도 있다** — 인메모리
+       픽스처가 면적만 비워 두면 운영에 없는 상태를 테스트가 표준으로 삼게 된다.
+       면적을 세 값으로 나눠 둔 것도 의도적이다: 예산 상한은 면적의 함수라
+       (취득세 농특세 85㎡ 경계) 한 면적만 쓰면 그 사실을 밟지 못한다(CR37-1).
+    """
+    for i, (lon, lat, region, area) in enumerate([
+        (127.05, 37.51, "1168000000", 59.94),
+        (127.06, 37.52, "1168000000", 84.97),
+        (126.95, 37.55, "1114000000", 114.50),
     ], start=1):
         repo.add_complex(ComplexSummary(
             id=i, name=f"단지{i}", lon=lon, lat=lat, region_code=region,
             built_year=2010 + i, total_households=500 + i,
             recent_price_krw=1_000_000_000 + i * 100_000_000,
-            price_as_of="2026-06-30", active_listings=i,
+            price_as_of="2026-06-30", price_area_m2=area, active_listings=i,
         ))
 
 
@@ -679,17 +687,124 @@ def test_줌아웃하면_군집으로_반환(client):
 
 
 def test_예산초과_단지는_지우지_않고_표시만(client):
-    """왜 후보에 없는지 보이게 한다 (ux/README.md §4)."""
+    """왜 후보에 없는지 보이게 한다 (ux/README.md §4).
+
+    ★ SR32-1 이후 **예산 금액은 요청에 실리지 않는다.** 클라이언트는 기준만 말하고
+    (`budget=profile`) 서버가 저장된 희망 매매가로 상한을 정한다.
+    """
+    token = _register_and_login(client, "a@b.co")
+    _seed_complexes(client.repo)
+    # 저장된 "내 조건"의 희망 매매가 = 지도의 상한. 값은 **본문**으로만 오간다.
+    client.put("/api/v1/me/preferences",
+               json={"prefer": {"target_price_krw": 1_150_000_000}},
+               headers=_auth(token))
+
+    body = client.get("/api/v1/map/complexes",
+                      params={"bbox": "126.9,37.4,127.1,37.6", "zoom": 15,
+                              "budget": "mine"},
+                      headers=_auth(token)).json()
+
+    assert len(body["items"]) == 3, "예산 초과라고 목록에서 지우면 안 된다"
+    assert sum(1 for i in body["items"] if i["over_budget"]) == 2
+    assert body["budget"] == {"applied": True, "basis": "target_price", "reason": None}
+    assert "krw" not in body["budget"], "금액은 응답에도 싣지 않는다(최소 노출)"
+
+
+def test_예산_기준을_안_걸면_초과판정은_null(client):
+    """**모름을 아님으로 접지 않는다.** 예전에는 예산을 몰라도 `false`(= 예산 안)였다."""
+    token = _register_and_login(client, "a@b.co")
+    _seed_complexes(client.repo)
+
+    body = client.get("/api/v1/map/complexes",
+                      params={"bbox": "126.9,37.4,127.1,37.6", "zoom": 15},
+                      headers=_auth(token)).json()
+
+    assert all(i["over_budget"] is None for i in body["items"])
+    assert body["budget"]["applied"] is False
+
+
+def test_지도_예산은_자산으로_서버가_계산한다(client):
+    """희망가가 없으면 **저장된 자산**으로 한도를 산출한다 — 클라이언트는 금액을 모른다.
+
+    변이: `_resolve_map_budget` 이 프로필 분기를 안 타면(항상 None) 초과 판정이
+    전부 null 이 되어 여기서 깨진다.
+    """
+    token = _register_and_login(client, "a@b.co")
+    _seed_complexes(client.repo)
+    client.put("/api/v1/me/profile",
+               json={"cash_krw": 200_000_000, "income_krw": 60_000_000},
+               headers=_auth(token))
+
+    body = client.get("/api/v1/map/complexes",
+                      params={"bbox": "126.9,37.4,127.1,37.6", "zoom": 15,
+                              "budget": "mine"},
+                      headers=_auth(token)).json()
+
+    assert body["budget"] == {"applied": True, "basis": "max_purchase", "reason": None}
+    # 자산 2억·소득 6천만으로 11~13억 단지를 다 살 수는 없다 — 판정이 실제로 돈다.
+    assert any(i["over_budget"] for i in body["items"])
+    # 그 금액이 `/affordability` 와 **같은 값**인지 — 두 화면이 다른 상한을 말하면 안 된다.
+    #
+    # ⚠️ **이 루프는 CR37-1(면적별 판정)을 지키지 못한다. 여기서 지킬 수 없다.**
+    #    이 파일은 픽스처 세율(`fixtures/tax_rules_test.yaml`)로 도는데, 거기서는
+    #    `t_first_small`(85㎡ 이하)과 `t_first_other` 의 합계 세율이 **둘 다 1.1%** 라
+    #    한도가 면적과 무관하다(실측: 59.94·84.97·114.5㎡ 전부 568,250,000).
+    #    그래서 서버를 고정 84㎡ 판정으로 되돌려도 이 루프는 **그대로 통과한다**
+    #    (전 스위트 변이 실측 2026-07-29: 이 테스트는 안 죽는다).
+    #    면적별 정확성은 **운영 세율로 도는 `test_map_budget_parity.py`** 가 지킨다 —
+    #    그 파일만 이 변이에 죽는다. 여기서 지키는 것은 그보다 약한 명제다:
+    #    *지도 판정이 `/affordability` 가 준 상한과 같은 부등호를 쓴다*
+    #    (`price_area_m2` 배선과 가격 비교 방향).
+    for item in body["items"]:
+        afford = client.post("/api/v1/affordability",
+                             json={"area_m2": item["price_area_m2"]},
+                             headers=_auth(token)).json()
+        limit = afford["max_purchase_krw"]
+        assert item["over_budget"] == (item["recent_price_krw"] > limit), item
+
+
+def test_자산도_희망가도_없으면_예산기준을_세우지_못했다고_말한다(client):
     token = _register_and_login(client, "a@b.co")
     _seed_complexes(client.repo)
 
     body = client.get("/api/v1/map/complexes",
                       params={"bbox": "126.9,37.4,127.1,37.6", "zoom": 15,
-                              "max_price_krw": 1_150_000_000},
+                              "budget": "mine"},
                       headers=_auth(token)).json()
 
-    assert len(body["items"]) == 3, "예산 초과라고 목록에서 지우면 안 된다"
-    assert sum(1 for i in body["items"] if i["over_budget"]) == 2
+    assert body["budget"]["applied"] is False
+    assert "자산 정보가 없어" in body["budget"]["reason"], "왜 못 세웠는지 말해야 한다"
+    assert all(i["over_budget"] is None for i in body["items"])
+
+
+def test_옛_클라이언트가_금액을_보내면_거절한다(client):
+    """★ SR32-1. **조용히 무시하지 않는다** — 무시하면 예산 조건이 소리 없이 풀린다.
+
+    그리고 거절 문장에 **보낸 금액을 되비치지 않는다**(SR25-2 규약).
+    """
+    token = _register_and_login(client, "a@b.co")
+    _seed_complexes(client.repo)
+
+    r = client.get("/api/v1/map/complexes",
+                   params={"bbox": "126.9,37.4,127.1,37.6", "zoom": 15,
+                           "max_price_krw": 1_314_310_000},
+                   headers=_auth(token))
+
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert detail["code"] == "PARAM_REMOVED"
+    assert "budget=mine" in detail["message"]
+    assert "1314310000" not in r.text, "거절 응답이 금액을 되돌려주면 안 된다"
+
+
+def test_예산_파라미터에_금액을_넣으면_422(client):
+    """`budget` 은 열거값이다 — 숫자를 넣어 옛 방식으로 되돌아갈 수 없다."""
+    token = _register_and_login(client, "a@b.co")
+    r = client.get("/api/v1/map/complexes",
+                   params={"bbox": "126.9,37.4,127.1,37.6", "zoom": 15,
+                           "budget": "1314310000"},
+                   headers=_auth(token))
+    assert r.status_code == 422
 
 
 def test_잘못된_bbox는_400(client):
@@ -780,14 +895,151 @@ def test_민감경로는_쿼리스트링을_로그에_남기지_않는다(client
     assert "90000000" not in logged
 
 
-def test_일반경로는_쿼리스트링이_남는다(client, caplog):
+def test_관심_단지가_접근_로그에_남지_않는다(client, caplog):
+    """★ SR31-4. `?complex_id=1234` 는 값이 아니라 **어디를 사려는지**를 남긴다.
+
+    이 저장소는 그 정보를 이미 민감하다고 분류했다(`UserListingRepository` docstring —
+    SQL 안에 소유자 스코프를 넣은 근거가 바로 그 문장이다). 응답에서 막고 로그로
+    흘리면 방어가 반쪽이다.
+
+    변이: `main.log_target` 이 값을 다시 붙이면(`f"{path}?{query}"`) 여기서 깨진다.
+    """
+    import logging
+    token = _register_and_login(client, "a@b.co")
+    caplog.set_level(logging.INFO, logger="app")
+
+    client.get("/api/v1/me/listings", params={"complex_id": 1234},
+               headers=_auth(token))
+
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert "/api/v1/me/listings" in logged, "경로 자체는 남아야 한다(운영 관측)"
+    assert "1234" not in logged, "관심 단지 식별자가 접근 로그에 남았다"
+
+
+def test_어떤_경로도_쿼리_값을_로그에_남기지_않는다(client, caplog):
+    """★ SR32-1. **이 테스트는 예전에 정반대였다** — `test_일반경로는_쿼리스트링이_남는다`.
+
+    그 테스트가 잠가 둔 동작이 곧 사고였다. `/map/complexes` 는 '일반 경로'로 분류돼
+    쿼리가 통째로 로그에 남았고, 그 쿼리에는 `max_price_krw=1314310000`
+    (= 암호화해 보관하던 자산·소득·대출을 복호화해 계산한 최대 구매가능 금액)이
+    실려 있었다. 그래서 규칙을 뒤집는다: **값은 어디서도 남기지 않고, 이름만 남긴다.**
+    """
     import logging
     token = _register_and_login(client, "a@b.co")
     caplog.set_level(logging.INFO, logger="app")
 
     client.get("/api/v1/map/complexes",
-               params={"bbox": "126.9,37.4,127.1,37.6", "zoom": 15},
+               params={"bbox": "126.9,37.4,127.1,37.6", "zoom": 15,
+                       "built_after": 2011},
                headers=_auth(token))
 
     logged = "\n".join(r.getMessage() for r in caplog.records)
-    assert "zoom=15" in logged, "일반 경로는 디버깅을 위해 쿼리가 필요하다"
+    assert "/api/v1/map/complexes" in logged, "경로·파라미터 이름은 운영에 필요하다"
+    assert "[q: bbox,built_after,zoom]" in logged
+    for value in ("126.9", "37.4", "15", "2011"):
+        assert value not in logged, f"쿼리 값 {value} 이 로그에 남았다"
+
+
+def test_모든_GET_쿼리_값은_로그에_남지_않는다(client, caplog):
+    """전수 그물 — **라우터에서 쿼리 파라미터를 뽑아** 카나리를 심고 로그를 검사한다.
+
+    SR32-1 이 오래 안 보였던 이유는 새 엔드포인트가 생길 때마다 사람이 민감목록을
+    갱신해야 했기 때문이다. 이 테스트는 목록을 읽지 않고 **앱에 실제로 등록된 GET
+    경로**를 순회하므로, 내일 누가 `?annual_income=…` 을 추가해도 그날 깨진다.
+    """
+    import logging
+    from fastapi.routing import APIRoute
+
+    token = _register_and_login(client, "a@b.co")
+    canary = "918273645"
+    checked = 0
+
+    caplog.set_level(logging.INFO, logger="app")
+    for route in client.app.routes:
+        if not isinstance(route, APIRoute) or "GET" not in route.methods:
+            continue
+        names = [p.name for p in route.dependant.query_params]
+        if not names:
+            continue
+        # 경로 파라미터도 카나리로 채운다(`/recommendations/{job_id}` 등).
+        path = route.path
+        for param in route.dependant.path_params:
+            path = path.replace("{%s}" % param.name, canary)
+        client.get(path, params={n: canary for n in names}, headers=_auth(token))
+        checked += 1
+
+    assert checked >= 3, "쿼리 파라미터를 가진 GET 경로를 찾지 못했다 — 검사가 비었다"
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert canary not in logged, "쿼리·경로 값이 접근 로그에 남았다"
+
+
+def test_500_이_나도_쿼리_값은_로그에_남지_않는다(monkeypatch, caplog):
+    """★ SR33-1. **500 핸들러가 이 규칙의 예외였다.**
+
+    위 전수 그물(`test_모든_GET_쿼리_값은…`)은 **500 을 한 번도 만들지 않는다.** 그래서
+    `unhandled` 가 `mask_sensitive(str(request.url))` 로 쿼리를 통째로 남기는 것을
+    한 건도 잡지 못했다 — `mask_sensitive` 는 dict 키로 찾는 구조 마스커라 문자열에
+    아무 일도 안 한다(이름만 마스킹을 암시했다).
+
+    이 줄이 특히 나쁜 이유: 앱 로거에서 **운영에 실제로 나가는 유일한 줄**이다.
+    root 핸들러가 없어 미들웨어의 INFO 는 버려지고 ERROR 만 `lastResort` 로
+    stderr(=`docker logs`)에 나간다. 값을 지우는 계층은 침묵하고 값을 담는 계층만
+    말하던 상태다.
+
+    변이: `log_target(...)` 을 `str(request.url)`(또는 옛 `mask_sensitive(...)`)로
+    되돌리면 여기서 깨진다.
+    """
+    import logging
+
+    class _BoomRepo(InMemoryRepository):
+        def complexes_in_bbox(self, **kwargs):
+            raise RuntimeError("리포지토리가 터졌다")
+
+    _set_test_env(monkeypatch)
+    from app.core.config import get_settings
+    get_settings.cache_clear()
+    from app.main import create_app
+
+    repo = _BoomRepo()
+    app = create_app(repo=repo)
+    # ⚠️ `raise_server_exceptions=False` — 켜 두면 TestClient 가 예외를 다시 던져
+    #    **500 응답 경로가 실행되지 않는다**(핸들러를 지나기는 하지만 응답을 못 본다).
+    client = TestClient(app, raise_server_exceptions=False)
+    client.repo = repo
+
+    token = _register_and_login(client, "a@b.co")
+    caplog.set_level(logging.INFO, logger="app")
+
+    r = client.get("/api/v1/map/complexes",
+                   params={"bbox": "126.9,37.4,127.1,37.6", "zoom": 15,
+                           "built_after": 2011, "area_min_m2": 84.5},
+                   headers=_auth(token))
+    assert r.status_code == 500, r.text
+
+    errors = [rec for rec in caplog.records if rec.levelno >= logging.ERROR]
+    assert errors, "500 이 났는데 ERROR 로그가 없다 — 이 테스트가 경로를 안 밟았다"
+    logged = "\n".join(rec.getMessage() for rec in errors)
+    assert "/api/v1/map/complexes" in logged, "어느 경로에서 터졌는지는 남아야 한다"
+    assert "[q: area_min_m2,bbox,built_after,zoom]" in logged, (
+        "쿼리 **이름**은 남긴다 — 어떤 조건의 요청이 터졌는지는 운영 정보다")
+    for value in ("126.9", "37.4", "2011", "84.5"):
+        assert value not in logged, f"500 로그에 쿼리 값 {value} 이 남았다"
+
+    get_settings.cache_clear()
+
+
+def test_이름_자리에_들어온_값도_로그에_남지_않는다(client, caplog):
+    """`?1314310000=x` 처럼 **파라미터 이름 자리에 값**을 넣는 경로까지 막는다.
+
+    이름만 남기기로 한 결정의 뒷문이다 — 이름은 값이 아니라는 전제가 깨지는 자리.
+    """
+    import logging
+    token = _register_and_login(client, "a@b.co")
+    caplog.set_level(logging.INFO, logger="app")
+
+    client.get("/api/v1/map/complexes?bbox=126.9,37.4,127.1,37.6&zoom=15"
+               "&1314310000=x&a@b.co=y", headers=_auth(token))
+
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert "1314310000" not in logged and "a@b.co" not in logged
+    assert "+2" in logged, "버린 파라미터가 있었다는 사실 자체는 남긴다"

@@ -18,6 +18,12 @@ export interface ApiError {
   code: string;
   message: string;
   problems?: string[];
+  /**
+   * 어느 입력이 틀렸는가(pydantic 422 의 `loc` 마지막 조각). `problems[i]` 와 짝이다.
+   * 화면은 이걸로 오류를 **해당 입력 옆에** 붙인다 — 폼 위에 한 줄로 뭉뚱그리면
+   * 어느 칸을 고쳐야 하는지 알 수 없다.
+   */
+  fields?: string[];
   /** 서버가 사유를 함께 줄 때만 채워진다(현재 로그인 403 에는 오지 않는다). */
   reason?: string | null;
 }
@@ -28,6 +34,19 @@ export class ApiException extends Error {
     this.name = "ApiException";
   }
 }
+
+/**
+ * 한도 산정 가정 — **실거주냐 투자냐** (api-spec §3·§4·§5).
+ *
+ * 세 엔드포인트(`/affordability` · `/map/complexes` · `/recommendations`)가 **같은 값
+ * 집합**을 쓴다. 목적에 따라 대출 절대한도·스트레스 가산이 **달라질 수 있어** 한도가
+ * 갈릴 수 있고, 그러면 한 화면에서 "지도는 초과, 자금계획은 가능"이 동시에 뜬다.
+ *
+ * ⚠️ **오늘은 두 값의 한도가 같다** (CR38-4): 운영 데이터에 `purpose` 를 조건으로 쓰는
+ *    규칙이 0개다(백엔드 `test_tax_rules_real.py` 가 못박고, 규칙이 생기면 깨진다).
+ * 화면의 기본값·단일 출처는 `lib/purpose.ts` 에 있다.
+ */
+export type Purpose = "live" | "invest";
 
 /** 로그인·갱신 공통 응답. refresh_token 은 **body 에 오지 않는다**(쿠키로 내려온다). */
 export interface TokenResponse {
@@ -100,6 +119,123 @@ export interface RedevelopmentInfo {
   missing?: string[];
 }
 
+/**
+ * 내가 직접 보고 옮겨 적은 호가 1건 (`/me/listings` · api-spec §2.5).
+ *
+ * ⚠️ 이 값은 **공공 데이터가 아니다.** 서버가 `source`·`source_label` 을 항상 실어 주는
+ *    이유가 그것이다 — 프론트가 라벨을 자체 생성하면 어느 화면에선가 빠지고, 빠진 화면에서
+ *    이 숫자는 국토교통부 실거래가처럼 보인다. 그래서 화면은 **서버가 준 문자열만** 쓴다
+ *    (`lib/userListings.ts::sourceLabel`).
+ *
+ * ⚠️ `staleness`·`eligible_for_recommendation` 은 **서버만 아는 사실**이다. 90일 임계는
+ *    서버의 계산 경로와 같은 판정이라 화면이 `age_days` 로 되짚어 만들면 언젠가 어긋난다.
+ */
+export interface UserListing {
+  id: number;
+  complex_id: number;
+  complex_name?: string | null;
+  ask_price_krw: number;
+  area_m2: number;
+  floor?: number | null;
+  apt_dong?: string | null;
+  /** **이 호가를 직접 확인한 날짜**(YYYY-MM-DD). 저장 시각(`created_at`)과 다르다. */
+  as_of: string;
+  note?: string | null;
+  status: string; // active | traded | withdrawn
+  source: string; // user_entered
+  /** 화면에 그대로 노출한다. 프론트가 만들지 않는다. */
+  source_label: string;
+  age_days: number;
+  /** fresh(≤30일) | aging(≤90일) | stale(>90일) */
+  staleness: string;
+  /**
+   * 이 호가가 추천 계산에 들어갈 **자격**이 있는가(활성 + 안 낡음). (CR35-7 · SR31-2)
+   *
+   * ⚠️ **"반영됐다"가 아니다.** 예전 이름("추천에 사용됨")은 낙관적 거짓이었다 —
+   *    서버가 재는 것은 이 호가 한 건의 상태뿐이고, 실제로 반영되려면 그 **단지**가
+   *    추천 요청의 지역·예산·평수 조건과 후보 조회 상한(120단지)까지 통과해야 한다.
+   *    실측: 인천 단지에 넣은 호가가 `true` 인데 서울만 요청한 추천은 그 호가를 0회 본다.
+   *    → `false` = 확실히 반영 안 됨 / `true` = **이 호가 때문에 빠지지는 않음**.
+   *    남은 조건은 응답 `notes` 가 상시로 말한다.
+   *
+   * ⚠️ **옵셔널로 두지 않는다.** 옵셔널이면 서버가 이름을 또 바꿔도 타입이 통과하고,
+   *    화면은 `undefined === true` → 전부 false 로 **조용히 거짓**을 말한다.
+   *    실제 누락은 `lib/userListings.ts::eligibility` 가 런타임에 "모름"으로 잡는다.
+   */
+  eligible_for_recommendation: boolean;
+  price_per_m2_krw: number;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+/**
+ * 단건 응답(201·200).
+ *
+ * ⚠️ **성공해도 `problems` 가 비어 있지 않을 수 있다.** 서버는 "불가능한 값"만 422 로 막고
+ *    "가능하지만 이상한 값"(단가 이상·낡음·중복)은 저장하되 말한다. 이걸 안 보여주면
+ *    검증의 절반이 사라진다 — 단위 실수(1.48억↔14.8억)가 그대로 추천 점수를 바꾼다.
+ */
+export interface UserListingItem {
+  item: UserListing;
+  problems: string[];
+  /**
+   * **항상** 실리는 고정 고지(출처 · `eligible_for_recommendation` 의 한계).
+   * `problems` 와 나눈 이유: 저쪽은 *이 건에만 해당하는 사실*이고 이쪽은 항상 참인 성질이다.
+   *
+   * ⚠️ POST 201 에도 온다 — 사용자가 `eligible_for_recommendation: true` 를 **처음 보는
+   *    자리가 저장 직후**라서, 거기서 조건을 말하지 않으면 목록을 보기도 전에
+   *    "반영됐다"고 믿는다. 그래서 화면은 저장 결과에서도 이걸 렌더한다.
+   */
+  notes: string[];
+}
+
+export interface UserListingList {
+  items: UserListing[];
+  /**
+   * `eligible_for_recommendation` 이 "다 넣었는데 왜 추천이 안 바뀌지"의 **절반**에 답한다.
+   * 나머지 절반(그 단지가 후보 조회에 잡혔는가)은 이 화면이 알 수 없어 `notes` 가 말한다.
+   */
+  summary: {
+    total: number;
+    fresh: number;
+    aging: number;
+    stale: number;
+    inactive: number;
+    eligible_for_recommendation: number;
+  };
+  notes: string[];
+}
+
+/** 신규 등록(POST). `as_of` 는 **필수**다 — 기본값(오늘)을 넣지 않는다. */
+export interface UserListingCreate {
+  complex_id: number;
+  ask_price_krw: number;
+  area_m2: number;
+  floor?: number | null;
+  apt_dong?: string | null;
+  as_of: string;
+  note?: string | null;
+}
+
+/**
+ * 부분 수정(PATCH). **키 생략 = 안 건드림 · `null` = 비우기.**
+ *
+ * `null` 을 보낼 수 있는 것은 `floor`·`apt_dong`·`note` 뿐이다(나머지는 422).
+ * 그래서 타입에서도 그 셋에만 `| null` 을 준다 — 규칙을 주석이 아니라 타입이 지킨다.
+ *
+ * ⚠️ `ask_price_krw` 를 보낼 때는 `as_of` 도 **반드시** 함께 보낸다(서버 422).
+ *    조립은 `lib/userListings.ts::buildPatch` 한 곳에서만 한다.
+ */
+export interface UserListingPatch {
+  ask_price_krw?: number;
+  area_m2?: number;
+  floor?: number | null;
+  apt_dong?: string | null;
+  as_of?: string;
+  note?: string | null;
+  status?: "active" | "traded" | "withdrawn";
+}
+
 export interface ComplexItem {
   id: number;
   name: string;
@@ -117,9 +253,30 @@ export interface ComplexItem {
   built_year: number | null;
   recent_price_krw: number | null;
   price_as_of: string | null;
+  /**
+   * 이 금액이 **어느 면적**의 체결가인가 (CR35-4).
+   *
+   * 없으면(구버전 서버) **모름**이다 — 사용자가 보는 평형의 값이라고 말하면 안 된다.
+   * 서울 단지 절반이 조건 밖 면적을 보여주고 있었고 평균 22.2% 어긋났다. 서버가 이제
+   * 조건 안에서 고르지만, **어느 면적인지는 화면이 말해야** 같은 실수가 반복되지 않는다.
+   */
+  price_area_m2?: number | null;
+  /** 값의 근거. `latest_trade` = 실제로 체결된 최근 1건(추천 카드의 추정가와 다른 양이다). */
+  price_basis?: string | null;
   price_confidence: "estimated" | "unknown";
   active_listings: number;
-  over_budget: boolean;
+  /**
+   * 예산 초과인가 — **3값이다**(api-spec §4, 2026-07-29).
+   *
+   *   `true`  초과   ·  `false` 예산 내  ·  **`null` 판정 못 함**
+   *   (예산 기준이 없거나 이 단지의 가격을 모른다)
+   *
+   * ⚠️ **`null` 을 `false` 로 접지 않는다.** 접는 순간 "예산 안"과 "모른다"가 같은 값이
+   *    되어 화면이 그 둘을 구분할 수 없다(G2). 12억짜리일 수도 있는 단지가 "예산 내"로
+   *    보이던 게 정확히 그 증상이었다.
+   *    그래서 이 값을 읽는 곳은 전부 **`=== true`** 로 비교한다(falsy 검사 금지).
+   */
+  over_budget: boolean | null;
 }
 
 export interface ClusterItem {
@@ -127,11 +284,57 @@ export interface ClusterItem {
   count: number;
   center: [number, number];
   median_price_krw: number | null;
+  price_basis?: string | null;
+}
+
+/**
+ * 서버가 예산 상한을 **무엇으로** 세웠는가 (api-spec §4).
+ *  · `target_price` — 저장된 희망 매매가(`user_preference.prefer.target_price_krw`)
+ *  · `max_purchase` — 자산·소득으로 계산한 최대 실구매 가능 금액
+ *
+ * 프론트의 `lib/mapFilters.effectiveBudget` 과 **같은 우선순위·같은 어휘**다.
+ * 같은 말을 써야 서버 기준과 화면 기준을 대조할 수 있다.
+ */
+export type BudgetBasis = "target_price" | "max_purchase";
+
+/**
+ * 예산 기준을 **적용했는가 · 무엇으로 했는가 · 못 했으면 왜인가**.
+ *
+ * ⚠️ **금액은 실리지 않는다**(최소 노출). 화면은 그 숫자를 `/affordability` 로 이미
+ *    알고 있고, 여기 또 실으면 같은 값이 흐르는 길이 하나 더 늘어난다(SR32-1).
+ *
+ * 군집(cluster) 응답에도 온다 — 줌아웃했다고 조건이 사라진 것처럼 보이면 안 되기 때문.
+ */
+export interface MapBudget {
+  /** 서버가 실제로 예산 기준을 세웠는가. false 면 `over_budget` 은 전부 `null` 이다. */
+  applied: boolean;
+  /** 무엇을 기준으로 했는가. 못 세웠으면 null. */
+  basis: BudgetBasis | null;
+  /** 못 세운 사유(사람이 읽는 문장). 세웠으면 null. */
+  reason: string | null;
 }
 
 export type MapResponse =
-  | { level: "complex"; items: ComplexItem[]; note: string }
-  | { level: "cluster"; items: ClusterItem[] };
+  | {
+      level: "complex";
+      items: ComplexItem[];
+      note: string;
+      /**
+       * 예산 기준의 적용 여부·근거. **없으면 "적용 안 됨"이 아니라 "서버가 말하지
+       * 않았다"** 이다(구버전 응답) — 어느 쪽도 주장하지 않는다(lib/budgetStatus).
+       */
+      budget?: MapBudget | null;
+      /** 지도 금액과 추천 카드 금액이 **왜 다른지**를 서버가 한 번만 말한다. */
+      price_basis_note?: string;
+      redevelopment_note?: string;
+    }
+  | {
+      level: "cluster";
+      items: ClusterItem[];
+      /** 군집에는 초과 판정이 없다. 그래도 **기준이 걸렸는지는** 말한다. */
+      budget?: MapBudget | null;
+      price_basis_note?: string;
+    };
 
 /**
  * 자금계획 — **희망 매매가(`target_price_krw`)를 보냈을 때만** 응답에 실린다.
@@ -167,15 +370,52 @@ export interface AffordabilityPlan {
 
 /** `/affordability` 요청. 지역은 보내지 않는다(CR10-1 — 서버가 판정한다). */
 export interface AffordabilityRequest {
-  purpose?: "live" | "invest";
+  purpose?: Purpose;
   /** 희망 매매가. 주면 응답에 `plan` 이 함께 온다. */
   target_price_krw?: number;
+  /**
+   * 단지 기준 계획 (CR35-4). **`target_price_krw` 없이** 보내면 서버가 그 단지·면적의
+   * 기준가를 **추천 카드와 같은 함수**로 산출해 계획을 세운다.
+   *
+   * 왜 금액이 아니라 id 를 보내나: 지도의 `recent_price_krw` 는 **최근 체결 1건**이고
+   * 추천 카드는 **창 중위를 기준월로 환산한 추정가**다. 화면이 지도 값을 그대로 실어
+   * 보내면 같은 단지의 자금계획과 추천 카드가 다른 금액으로 선다(실측 부족액 최대 −3.19억).
+   * 둘 다 보내면 `target_price_krw` 가 이긴다 — 사용자가 직접 넣은 숫자를 서버가 조용히
+   * 갈아치우면 슬라이더가 말을 안 듣는 화면이 된다.
+   */
+  complex_id?: number;
+  /**
+   * 전용면적(㎡). 기준가는 **면적별** 값이라(한 단지가 34~120㎡) 이걸 안 보내면 서버
+   * 기본값(84㎡)이 쓰이고, 화면은 그 사실을 모른 채 "이 집" 계획이라고 말하게 된다.
+   * 그래서 화면은 항상 명시해 보내고 **무슨 면적을 썼는지 함께 적는다**(`lib/affordability.planArea`).
+   */
+  area_m2?: number;
+}
+
+/**
+ * 자금계획이 **무엇을 기준가로 썼는가** (CR35-4).
+ *
+ * 계획을 못 세웠으면 `krw: null` + `reason` 이 온다 — **0 으로 채우지 않는다.**
+ * 이 값은 사용자 자산으로 나눗셈을 하는 숫자라, 지어내면 "얼마나 더 필요한가"가 통째로 틀린다.
+ */
+export interface TargetPriceRef {
+  krw: number | null;
+  /** `time_adjusted_band` | `trade_band` | `client_supplied` */
+  basis?: string | null;
+  /** 시점 보정을 했으면 환산 기준월("2026-06"). 안 했으면 null. */
+  as_of_ym?: string | null;
+  sample_size?: number | null;
+  period_months?: number | null;
+  /** 보정을 못 했거나 계획을 못 세운 사유. 내부 코드일 수 있다 → `plainReason` 을 거친다. */
+  reason?: string | null;
 }
 
 export interface AffordabilityResponse {
   max_purchase_krw: number;
   /** 희망가를 보냈을 때만. 서버가 아직 이 계약을 배포하지 않았으면 없다. */
   plan?: AffordabilityPlan | null;
+  /** 계획의 기준가 근거. `target_price_krw`·`complex_id` 중 하나를 보냈을 때만 온다. */
+  target_price?: TargetPriceRef | null;
   breakdown: {
     own_cash_krw: number;
     max_loan_krw: number;
@@ -471,7 +711,7 @@ export interface RecommendationRequest {
    * ⚠️ 좌표가 없는 단지는 bbox 로 찾을 수 없어 후보에서 빠진다 — 서버가 `notes` 로 알린다.
    */
   bbox?: string;
-  purpose?: "live" | "invest";
+  purpose?: Purpose;
   budget_override_krw?: number | null;
   top_n?: number;
 
@@ -494,6 +734,101 @@ export interface RecommendationRequest {
 }
 
 const BASE = "/api/v1";
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * 🔐 쿼리 조립 — **여기 한 곳에서만** 한다 (SR32-1)
+ *
+ * 무슨 일이 있었나
+ * ----------------
+ * 지도 조회가 `?...&max_price_krw=1314310000` 으로 나갔다. 그 숫자는 사용자가 화면에
+ * 입력한 값이 아니라 **AES-256-GCM 으로 암호화해 저장한 자산·소득·대출을 복호화해
+ * 서버가 계산한 실구매 가능 금액**이다. URL 은 nginx·uvicorn 접근 로그에 평문으로
+ * 쌓이고, 로테이션된 로그 파일이 월드 리더블(0644)이라 다른 서비스 계정이 실제로 읽었다.
+ *
+ * 왜 "파생값"이 더 위험한가: 원본(현금·연소득)을 안 보냈으니 괜찮다고 읽히지만, 한도는
+ * 자산의 단조 함수라 몇 건만 모여도 원본이 좁혀진다. 그리고 눈에 안 띈다 — 이름에
+ * `cash`·`income` 이 없기 때문이다.
+ *
+ * 규칙
+ * ----
+ *  ① **개인·민감정보를 URL 쿼리에 넣지 않는다.** 금액은 본문(POST body)으로 보내거나,
+ *     아예 보내지 않고 서버가 저장된 프로필에서 만든다. 본문은 접근 로그에 남지 않는다.
+ *  ② 조립은 `buildQuery` 한 곳을 지난다. 손으로 만든 쿼리도 `raw()` 가 마지막에 한 번 더 본다.
+ *  ③ 걸리면 **던진다**(조용히 지우지 않는다). 요청 하나가 실패하는 편이 새는 것보다 낫다.
+ *  ④ 오류 메시지에 **값을 담지 않는다** — 콘솔·오류수집기로 옮겨 심으면 같은 사고다.
+ * ───────────────────────────────────────────────────────────────────────── */
+
+/**
+ * 금액성 파라미터 이름. 이름만으로 거절한다 — 값이 "만원 단위"(1.3억 → 13140)라
+ * 숫자 크기 검사를 빠져나가는 경우를 이름이 잡는다.
+ * ⚠️ `budget` 은 **일부러 빠져 있다**: 금액이 아니라 "내 예산 기준으로 걸러 달라"는
+ *    비민감 플래그(`budget=mine`)로 쓰기 때문이다. 금액이면 `_krw` 가 붙는다.
+ */
+const SENSITIVE_QUERY_KEY = /krw|price|cash|income|loan|asset|salary|deposit|net_?worth|budget_/i;
+
+/**
+ * 쿼리에 실릴 수 있는 숫자의 상한(1천만).
+ *
+ * 이 앱의 정상 쿼리 값은 전부 이보다 작다: 좌표(bbox, 문자열)·줌(1~22)·전용면적(㎡)·
+ * 준공연도(1900~2100)·목록 상한(100)·단지 id(수만). 그래서 1천만 이상인 숫자는
+ * **원화 금액일 가능성이 압도적**이다. 이름을 바꿔 우회해도 값이 걸린다.
+ */
+const MAX_QUERY_NUMBER = 10_000_000;
+
+/** 쿼리 파라미터 하나가 금액처럼 보이는가. 보이면 던진다(값은 메시지에 남기지 않는다). */
+function assertNotSensitive(key: string, value: string): void {
+  if (SENSITIVE_QUERY_KEY.test(key)) {
+    throw new Error(
+      `URL 쿼리에 금액성 파라미터를 실을 수 없습니다: "${key}" — ` +
+        "본문으로 보내거나 서버가 저장된 프로필에서 만들게 하세요 (SR32-1)",
+    );
+  }
+  const n = Number(value);
+  if (Number.isFinite(n) && Math.abs(n) >= MAX_QUERY_NUMBER) {
+    throw new Error(
+      `URL 쿼리 값이 금액으로 보입니다: "${key}" (${MAX_QUERY_NUMBER.toLocaleString("ko-KR")} 이상) — ` +
+        "접근 로그에 평문으로 남습니다 (SR32-1)",
+    );
+  }
+}
+
+/**
+ * 객체 → `?a=1&b=2`. 비어 있으면 **빈 문자열**(물음표만 남은 URL 을 만들지 않는다).
+ *
+ * `undefined`·`null` 은 "안 보냄"이다 — 서버 쪽에서 "안 보냄"과 "0"은 다른 뜻이라
+ * (조건 없음 vs 0원 상한) 여기서 0 을 조용히 지우지 않는다. 값이 0 이면 그대로 보낸다.
+ *
+ * @throws 금액성 파라미터가 섞여 있으면 (SR32-1)
+ */
+export function buildQuery(params: object): string {
+  const q = new URLSearchParams();
+  for (const [key, value] of Object.entries(params as Record<string, unknown>)) {
+    if (value === undefined || value === null) continue;
+    if (typeof value === "object") {
+      // 객체를 넣으면 "[object Object]" 가 조용히 실린다. 그건 버그다.
+      throw new Error(`쿼리 파라미터 "${key}" 는 문자열·숫자여야 합니다`);
+    }
+    const s = String(value);
+    assertNotSensitive(key, s);
+    q.set(key, s);
+  }
+  const s = q.toString();
+  return s === "" ? "" : `?${s}`;
+}
+
+/**
+ * 마지막 관문 — **모든** 요청이 여기를 지난다(`buildQuery` 를 안 쓰고 손으로 만든 URL 도).
+ *
+ * 경로(path segment)는 검사하지 않는다: 거기 오는 것은 id 뿐이고, id 는 언젠가 1천만을
+ * 넘을 수 있어 오탐이 서비스를 멈출 수 있다. 쿼리에는 id 도 금액도 필요 없다.
+ */
+function assertPathSafe(path: string): void {
+  const at = path.indexOf("?");
+  if (at === -1) return;
+  for (const [key, value] of new URLSearchParams(path.slice(at + 1))) {
+    assertNotSensitive(key, value);
+  }
+}
 
 /** CSRF 2차 방어 — 쿠키로 인증하는 요청에 서버가 요구하는 헤더. */
 const CSRF_HEADER = "X-Requested-With";
@@ -620,7 +955,37 @@ function handleApprovalRevoked(e: unknown): boolean {
  * 전송
  * ───────────────────────────────────────────────────────────────────────── */
 
+/**
+ * pydantic 검증 실패(422) → 화면이 쓸 수 있는 오류.
+ *
+ * 서버는 두 가지 모양의 422 를 낸다: 라우터가 던지는 `{code, message}` 와, 스키마 검증이
+ * 만드는 **배열**(`[{type, loc, msg}]`, main.py 의 핸들러가 `input` 을 지운 형태)이다.
+ * 배열 쪽을 예전에는 "요청이 실패했습니다 (422)" 한 줄로 뭉갰다 — 어느 칸이 왜 틀렸는지가
+ * 통째로 사라져서, 사용자는 고칠 수가 없었다.
+ *
+ * ⚠️ `msg` 는 서버가 이미 길이를 자른 문장이다. 여기서 다시 가공하지 않는다(지어내지 않는다).
+ */
+function validationError(detail: unknown[], status: number): ApiError {
+  const rows = detail.filter(
+    (d): d is { loc?: unknown[]; msg?: unknown } => typeof d === "object" && d !== null,
+  );
+  const problems = rows.map((d) => String(d.msg ?? "")).filter((m) => m !== "");
+  const fields = rows.map((d) => {
+    const loc = Array.isArray(d.loc) ? d.loc : [];
+    return String(loc[loc.length - 1] ?? "");
+  });
+  return {
+    code: "INVALID_PARAM",
+    message: problems[0] ?? `요청이 실패했습니다 (${status})`,
+    problems,
+    fields,
+  };
+}
+
 async function raw<T>(path: string, init: RequestInit = {}): Promise<T> {
+  // 🔐 SR32-1 — 나가기 직전에 한 번 더 본다. `buildQuery` 를 우회해 손으로 조립한
+  //    URL(폴링 경로·복사해 붙인 코드)도 이 문을 지나야 한다.
+  assertPathSafe(path);
   const headers = new Headers(init.headers);
   if (init.body !== undefined) headers.set("Content-Type", "application/json");
   // access token 은 매 요청에 자동 첨부. 값은 어떤 경로로도 로그에 남기지 않는다.
@@ -635,7 +1000,9 @@ async function raw<T>(path: string, init: RequestInit = {}): Promise<T> {
     const err: ApiError =
       typeof detail === "object" && detail !== null && "code" in detail
         ? (detail as unknown as ApiError)
-        : { code: "UNKNOWN", message: `요청이 실패했습니다 (${res.status})` };
+        : Array.isArray(detail)
+          ? validationError(detail, res.status)
+          : { code: "UNKNOWN", message: `요청이 실패했습니다 (${res.status})` };
     throw new ApiException(res.status, err);
   }
   return body as T;
@@ -778,20 +1145,35 @@ export const api = {
     });
   },
 
+  /**
+   * 화면 범위 안의 단지.
+   *
+   * 🔐 **금액 파라미터가 없다**(SR32-1). 예전에는 `max_price_krw` 에 실구매 가능 금액
+   *    (= 암호화 저장된 자산·소득·대출로 계산한 값)을 실어 보냈고, 그 URL 이 접근 로그에
+   *    평문으로 쌓였다. 이 경로는 **인증된 경로**이고 서버는 이미 그 사용자의 프로필과
+   *    저장된 희망 매매가를 갖고 있다 — 클라이언트가 금액을 계산해 보낼 이유가 없다.
+   *    지금은 `budget=mine` **플래그만** 보내고 상한은 서버가 만든다(lib/mapFilters).
+   */
   mapComplexes(params: {
     bbox: string;
     zoom: number;
-    max_price_krw?: number;
+    /** "내 예산 기준으로 걸러 달라"는 **비민감 플래그**. 금액이 아니다. */
+    budget?: "mine";
+    /**
+     * 한도 산정 가정(`live` | `invest`). **보내야 한다.**
+     *
+     * 왜: 목적에 따라 대출 절대한도·스트레스 가산이 **달라질 수 있다.** 안 보내면
+     * 서버는 `live` 로 계산하는데 자금계획 패널이 `invest` 로 계산하고 있으면, 같은
+     * 단지가 지도에서는 "예산 초과", 자금 패널에서는 "가능"이 된다(백엔드 지적).
+     * ⚠️ 오늘은 운영 데이터에 목적별 규칙이 0개라 두 값의 한도가 같다(CR38-4).
+     * **비민감 열거값**이라 URL 쿼리에 실어도 SR32-1 규칙에 걸리지 않는다(금액이 아니다).
+     */
+    purpose?: Purpose;
     area_min_m2?: number;
     area_max_m2?: number;
     built_after?: number;
   }) {
-    const q = new URLSearchParams({ bbox: params.bbox, zoom: String(params.zoom) });
-    if (params.max_price_krw) q.set("max_price_krw", String(params.max_price_krw));
-    if (params.area_min_m2) q.set("area_min_m2", String(params.area_min_m2));
-    if (params.area_max_m2) q.set("area_max_m2", String(params.area_max_m2));
-    if (params.built_after) q.set("built_after", String(params.built_after));
-    return request<MapResponse>(`/map/complexes?${q}`);
+    return request<MapResponse>(`/map/complexes${buildQuery(params)}`);
   },
 
   affordability(body: AffordabilityRequest = {}) {
@@ -825,6 +1207,40 @@ export const api = {
     });
   },
 
+  /* ── 내 매물(호가 직접 입력) ────────────────────────────────────────────
+   * 소유자 스코프 자원이다. **남의 것과 없는 것이 같은 404** 로 오므로(IDOR 규약)
+   * 프론트도 404 를 "권한 없음"으로 번역하지 않는다 — 그냥 "찾을 수 없습니다"다. */
+
+  listMyListings(complexId?: number | null) {
+    return request<UserListingList>(
+      `/me/listings${buildQuery({ complex_id: typeof complexId === "number" ? complexId : null })}`,
+    );
+  },
+
+  createMyListing(body: UserListingCreate) {
+    return request<UserListingItem>("/me/listings", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  },
+
+  /**
+   * 부분 수정. **`JSON.stringify` 가 `undefined` 키를 지운다** — 그래서 "생략"과
+   * "명시적 null"이 그대로 서버 규칙(안 건드림 / 비우기)에 대응한다.
+   * 본문 조립은 `lib/userListings.ts::buildPatch` 만 한다(가격↔날짜 규칙이 거기 있다).
+   */
+  updateMyListing(id: number, patch: UserListingPatch) {
+    return request<UserListingItem>(`/me/listings/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    });
+  },
+
+  /** 되돌릴 수 없다. 화면이 반드시 한 번 더 묻는다(MyListingsScreen). */
+  deleteMyListing(id: number) {
+    return request<void>(`/me/listings/${encodeURIComponent(id)}`, { method: "DELETE" });
+  },
+
   createRecommendation(body: RecommendationRequest) {
     return request<RecommendationAccepted>("/recommendations", {
       method: "POST",
@@ -850,10 +1266,9 @@ export const api = {
    * (useAdminUsers 가 그렇게 한다). 여기서는 그냥 통과시킨다. */
 
   adminListUsers(params: { status?: string; limit?: number } = {}) {
-    const q = new URLSearchParams();
-    if (params.status) q.set("status", params.status);
-    q.set("limit", String(params.limit ?? 100));
-    return request<AdminUserListResponse>(`/admin/users?${q}`);
+    return request<AdminUserListResponse>(
+      `/admin/users${buildQuery({ status: params.status || null, limit: params.limit ?? 100 })}`,
+    );
   },
 
   /** 승인/거부 응답은 **정제 전** 원본이다 — sanitizeAdminUser 를 반드시 통과시킨다. */

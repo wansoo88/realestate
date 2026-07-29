@@ -55,7 +55,7 @@ from pathlib import Path
 from typing import Any
 
 import _common  # noqa: F401  (import 부작용: 로깅 억제·마스킹 설치)
-from _common import REPO_ROOT, capped_urlopen_read, load_env
+from _common import REPO_ROOT, capped_urlopen_read, load_env, mask_secrets
 
 from app.ingest.ratelimit import RateLimiter
 
@@ -150,7 +150,13 @@ def result_fault(payload: Any) -> str | None:
     이 저장소가 가장 경계하는 실패(조용한 0행)이므로 여기서 fail-closed 로 막는다.
 
     ⚠️ `CODE`·`MESSAGE` 는 NEIS 가 준 **고정 문구**이고 우리 인증키가 아니다
-    (키는 쿼리스트링으로만 나간다). 그래도 마스킹 계층이 한 번 더 훑는다.
+    (키는 쿼리스트링으로만 나간다).
+
+    ⚠️ **"마스킹 계층이 한 번 더 훑는다"고 적어 두었으나 사실이 아니었다**(SR30-6).
+       이 문자열이 실제로 나가는 길은 `main()` 의 `SystemExit` → **stderr** 이고,
+       SystemExit 메시지는 인터프리터가 직접 찍으므로 로깅 필터를 타지 않는다.
+       그래서 이제 `main()` 이 **직접 `mask_secrets`** 를 건다 — 적어 둔 방어가
+       실제로 그 일을 하게 만든 것이지, 문구만 고친 것이 아니다.
     """
     if not isinstance(payload, dict) or payload.get("acaInsTiInfo"):
         return None
@@ -337,11 +343,29 @@ def print_stats(s: dict[str, Any]) -> None:
         logger.warning("수집 실패 %d건: %s", len(s["failures"]), s["failures"][:3])
 
 
+#: **부분 수집**의 종료코드. 0(성공)도 1(실패)도 아닌 값을 따로 쓴다 (CR33-6).
+#:
+#: 왜 0 이면 안 되는가 — "총 70,000행 중 3,000행만 수신"은 파일도 남고 로그에도
+#: warning 이 뜨지만, **cron 은 0 을 성공으로 읽는다.** 그러면 학원 밀도가 통째로
+#: 낮게 잡힌 채 몇 달이 지나고, 그건 "이 동네만 학원이 없다"는 조용한 오판정이 된다.
+#: 시장지수 크론 래퍼(`/opt/realestate/scripts/market-index.sh`)가 이미 같은 규율을
+#: 쓴다 — 실패하면 0 이 아닌 코드로 끝나고, 성공해도 결과를 검증한다.
+#:
+#: 왜 1 과 구분하는가 — 1(FetchError)은 **파일이 없다**, 2 는 **파일은 있는데 일부다**.
+#: 운영자의 조치가 다르다(전자는 재실행, 후자는 실패 목록을 보고 그 교육청만 다시).
+#: 래퍼가 두 경우를 다르게 다룰 수 있어야 해서 코드로 구분한다.
+#: ⚠️ `--stats-only` 도 같은 코드를 낸다 — 저장된 파일이 부분 수집분이면 그 파일로 낸
+#:    통계도 부분 통계다. 읽기 전용이라고 성공이라 부르면 같은 거짓말이 된다.
+EXIT_PARTIAL = 2
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="NEIS 학원·교습소 원천 내려받기 + 산정 통계")
     ap.add_argument("--stats-only", action="store_true",
                     help="저장된 원문으로 통계만 다시 낸다(네트워크 없음)")
     ap.add_argument("--json", action="store_true", help="통계를 JSON 으로 출력")
+    ap.add_argument("--allow-partial", action="store_true",
+                    help=f"부분 수집이어도 0 으로 끝낸다(기본은 {EXIT_PARTIAL})")
     args = ap.parse_args(argv)
 
     path = OUT_DIR / OUT_NAME
@@ -360,15 +384,29 @@ def main(argv: list[str] | None = None) -> int:
         except FetchError as exc:
             # 스택트레이스 대신 **할 일**을 낸다. 원인이 대개 "키가 없다" 하나뿐이라
             # 운영자가 읽고 바로 조치할 수 있어야 한다.
-            raise SystemExit(f"[FAIL] {exc}") from None
+            #
+            # ⚠️ `mask_secrets` 를 **여기서** 건다(SR30-6). SystemExit 메시지는
+            #    인터프리터가 stderr 로 직접 찍으므로 `_common` 이 설치한 로깅
+            #    마스킹 필터를 **타지 않는다**(실측: 키를 담은 문자열이 그대로 남고,
+            #    같은 문자열이 logger.error 로는 지워졌다). 지금 NEIS 문구에는 키가
+            #    실리지 않지만, 방어를 문구로만 적어 두면 실리는 날 아무것도 못 막는다.
+            raise SystemExit(mask_secrets(f"[FAIL] {exc}")) from None
     if not path.exists():
-        raise SystemExit(f"[FAIL] 원문이 없습니다: {path}")
+        raise SystemExit(mask_secrets(f"[FAIL] 원문이 없습니다: {path}"))
 
     s = stats(path)
     if args.json:
         sys.stdout.write(json.dumps(s, ensure_ascii=False, indent=2) + "\n")
     else:
         print_stats(s)
+
+    # 부분 수집을 **성공으로 끝내지 않는다**(CR33-6). 파일은 남기고 코드로 알린다 —
+    # 지우면 그나마 받은 것까지 잃고, 0 으로 끝내면 아무도 모른다.
+    failures = s.get("failures") or []
+    if failures and not args.allow_partial:
+        logger.error("부분 수집으로 끝났습니다(실패 %d건) — 종료코드 %d. "
+                     "무시하려면 --allow-partial.", len(failures), EXIT_PARTIAL)
+        return EXIT_PARTIAL
     return 0
 
 

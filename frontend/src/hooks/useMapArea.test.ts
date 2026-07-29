@@ -16,6 +16,7 @@ const FILTERS: MapFilterState = {
   budgetApplied: true,
   prefer: { built_after: 2010 },
   preferApplied: true,
+  purpose: "live",
 };
 
 let spy: MockInstance<typeof api.mapComplexes>;
@@ -51,15 +52,42 @@ describe("useMapArea", () => {
     expect(spy.mock.calls[0][0]).toMatchObject({ bbox: "5,6,7,8" });
   });
 
-  it("내 예산과 선호가 요청 파라미터로 나간다", async () => {
+  it("내 예산과 선호가 요청 파라미터로 나간다 — 예산은 **금액이 아니라 플래그**(SR32-1)", async () => {
     const { result } = renderHook(() => useMapArea(FILTERS));
     act(() => result.current.onBoundsChange("1,2,3,4", 15));
     await tick(MAP_DEBOUNCE_MS);
 
     expect(spy.mock.calls[0][0]).toMatchObject({
-      max_price_krw: 850_000_000,
+      budget: "mine", // 8.5억이 아니다 — 상한은 서버가 저장된 프로필로 만든다
       built_after: 2010,
     });
+  });
+
+  /**
+   * 서버가 말한 예산 기준(`budget` 블록)을 **응답마다 새로 쓴다**.
+   *
+   * 옛 값을 이어받으면(`res.budget ?? 이전값`) 서버가 말을 멈춘 뒤에도 화면이 지난
+   * 응답의 "적용됨"을 계속 말한다 — 조건이 풀렸는데 걸린 것처럼 보이는 상태다.
+   */
+  it("예산 블록을 응답마다 갈아끼운다(옛 값을 물려주지 않는다)", async () => {
+    spy.mockResolvedValueOnce({
+      ...EMPTY,
+      budget: { applied: true, basis: "target_price", reason: null },
+    });
+    const { result } = renderHook(() => useMapArea(FILTERS));
+
+    act(() => result.current.onBoundsChange("1,2,3,4", 15));
+    await tick(MAP_DEBOUNCE_MS);
+    expect(result.current.budget).toEqual({
+      applied: true,
+      basis: "target_price",
+      reason: null,
+    });
+
+    // 다음 응답에는 블록이 없다 → **모름**으로 되돌아간다("적용됨"이 남으면 안 된다)
+    act(() => result.current.onBoundsChange("5,6,7,8", 15));
+    await tick(MAP_DEBOUNCE_MS);
+    expect(result.current.budget).toBeNull();
   });
 
   it("예산 스위치를 끄면 **같은 화면 범위로 즉시 다시 조회**하고 예산이 빠진다", async () => {
@@ -76,7 +104,28 @@ describe("useMapArea", () => {
     expect(spy).toHaveBeenCalledTimes(2);
     const second = spy.mock.calls[1][0] as Record<string, unknown>;
     expect(second.bbox).toBe("1,2,3,4"); // 범위는 그대로
-    expect(second.max_price_krw).toBeUndefined();
+    expect(second.budget).toBeUndefined();
+  });
+
+  /**
+   * SR32-1 이후 생긴 함정: 쿼리에는 금액이 없고 `budget=mine` 플래그만 실린다.
+   * 그래서 **쿼리로만 변경을 감지하면** 희망가를 바꿔도 요청이 한 글자도 안 달라져
+   * 지도가 옛 결과 그대로 남는다(서버가 산출할 상한은 바뀌었는데 화면은 모른다).
+   */
+  it("희망가를 바꾸면 쿼리가 같아도 다시 조회한다(금액을 안 보내기 때문에 필요한 검사)", async () => {
+    const { result, rerender } = renderHook((f: MapFilterState) => useMapArea(f), {
+      initialProps: { ...FILTERS, targetPriceKrw: 900_000_000 },
+    });
+    act(() => result.current.onBoundsChange("1,2,3,4", 15));
+    await tick(MAP_DEBOUNCE_MS);
+    expect(spy).toHaveBeenCalledTimes(1);
+
+    rerender({ ...FILTERS, targetPriceKrw: 700_000_000 });
+    await tick(1);
+
+    expect(spy).toHaveBeenCalledTimes(2);
+    // 요청 자체는 이전과 **같다**(금액이 안 실리므로) — 그래도 다시 물어봐야 한다
+    expect(spy.mock.calls[1][0]).toEqual(spy.mock.calls[0][0]);
   });
 
   it("필터 객체가 새로 만들어져도 내용이 같으면 재조회하지 않는다(무한 루프 방지)", async () => {

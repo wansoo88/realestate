@@ -259,7 +259,17 @@ def liquidity(
     *,
     as_of: dt.date | None = None,
 ) -> Liquidity:
-    """환금성 지표. 세대수를 모르면 회전율을 만들지 않는다."""
+    """환금성 지표. 세대수를 모르면 회전율을 만들지 않는다.
+
+    ⚠️ **등급(`grade`)과 가치 축 점수는 오직 `turnover`(실거래) 로만 정해진다.**
+       `active_listing_ratio_pct` 는 참고 값이고 지금 어디에도 표시되지 않는다.
+       이 값을 화면·점수에 연결하려는 사람에게: `listings` 에는 사용자가 손으로
+       입력한 호가(migrations/016)가 섞여 들어온다. 그걸 "시장에 나와 있는 물량"으로
+       읽으면, 사용자가 자기 관심 단지를 입력할수록 그 단지의 매물이 많아 보인다
+       — 출처를 갈라 세거나(`ListingRow.is_user_entered`) 쓰지 말 것.
+       `median_days_on_market` 은 `listed_at`(포털 등록일) 기준이라 사용자 입력에는
+       구조적으로 없다(None) — 그쪽은 자동으로 안전하다.
+    """
     as_of = as_of or dt.date.today()
     recent = eligible_trades(trades, months=12, as_of=as_of)
     active = [l for l in listings if l.status == "active"]

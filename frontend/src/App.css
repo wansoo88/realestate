@@ -67,6 +67,20 @@
   font-size: var(--fs-footnote);
 }
 
+/* 예산 기준 안내 — "켰는데 아무 일도 안 일어난 것처럼 보이는" 상태를 막는 줄.
+   오류(app__error)보다 조용하되 **캡션으로 흐리지 않는다**: 조건이 안 걸렸다는 사실은
+   장식이 아니라 정보다(그래서 --text-estimated 가 아니라 본문색 --text 를 쓴다).
+   시트 안 목록 위에만 뜨고, 긴 문장이 와도 잘라내지 않고 줄바꿈으로 흘려보낸다. */
+.app__budgetnote {
+  margin: var(--sp-2) 0;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-card);
+  background: var(--badge-bg);
+  color: var(--text);
+  font-size: var(--fs-footnote);
+  line-height: 1.45;
+}
+
 /* 군집 리스트 — 박스 대신 헤어라인 + 여백. 개수가 주인공. */
 .app__clusters {
   list-style: none;

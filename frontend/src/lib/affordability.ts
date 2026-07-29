@@ -15,7 +15,8 @@
  *
  * 🔐 값은 개인 금융정보에 준해 다룬다. 로그·저장소·URL 에 쓰지 않는다.
  */
-import type { AffordabilityPlan, Preferences } from "../api/client";
+import type { AffordabilityPlan, Preferences, TargetPriceRef } from "../api/client";
+import { plainReason } from "./plainTerms";
 
 /** 슬라이더 눈금 — 500만원. 억 단위 미세조정은 슬라이더로 안 되므로 직접 입력을 함께 둔다. */
 export const TARGET_STEP_KRW = 5_000_000;
@@ -103,6 +104,187 @@ export function withTargetPrice(
   if (value === null) delete next.target_price_krw;
   else next.target_price_krw = value;
   return next;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * 단지 기준 계획의 **면적** (CR35-4)
+ *
+ * 기준가는 면적별 값이다(한 단지가 34~120㎡). 그런데 지도는 대개 면적을 모르고, 서버는
+ * 안 보내면 기본값 84㎡ 로 계산한다. 그 사실을 화면이 모르면 "이 집을 사려면"이라는
+ * 문장이 **다른 평형의 계획**에 붙는다. 그래서 화면은 항상 면적을 정해 보내고,
+ * **무슨 근거로 그 면적을 골랐는지 함께 적는다.**
+ * ───────────────────────────────────────────────────────────────────────── */
+
+/** 서버 `AffordabilityIn.area_m2` 기본값과 같은 값(국민평형). */
+export const DEFAULT_PLAN_AREA_M2 = 84;
+
+export type PlanAreaBasis =
+  /** 지도에 보인 금액이 나온 그 거래의 면적 — 화면에 보이는 숫자와 같은 평형이다. */
+  | "map_trade"
+  /** 내 조건(전용면적 범위)의 가운데 값. */
+  | "my_condition"
+  /** 아무 단서도 없어 국민평형으로 계산. **모른다는 사실을 말해야 한다.** */
+  | "default";
+
+export interface PlanArea {
+  m2: number;
+  basis: PlanAreaBasis;
+}
+
+function usableArea(v: number | null | undefined): number | null {
+  return typeof v === "number" && Number.isFinite(v) && v > 0 && v <= 1000 ? v : null;
+}
+
+export function planArea(opts: {
+  priceAreaM2?: number | null;
+  areaMinM2?: number | null;
+  areaMaxM2?: number | null;
+}): PlanArea {
+  const traded = usableArea(opts.priceAreaM2);
+  if (traded !== null) return { m2: traded, basis: "map_trade" };
+
+  const min = usableArea(opts.areaMinM2);
+  const max = usableArea(opts.areaMaxM2);
+  if (min !== null && max !== null) {
+    return { m2: Math.round(((min + max) / 2) * 100) / 100, basis: "my_condition" };
+  }
+  if (min !== null) return { m2: min, basis: "my_condition" };
+  if (max !== null) return { m2: max, basis: "my_condition" };
+
+  return { m2: DEFAULT_PLAN_AREA_M2, basis: "default" };
+}
+
+/** 왜 이 면적으로 계산했는지 한 줄. **모르면 모른다고 적는다.** */
+export function planAreaNote(area: PlanArea): string {
+  switch (area.basis) {
+    case "map_trade":
+      return `${area.m2}㎡ 기준 — 지도에 보인 체결가와 같은 면적입니다.`;
+    case "my_condition":
+      return `${area.m2}㎡ 기준 — 내 조건의 전용면적으로 계산했습니다.`;
+    default:
+      return `${area.m2}㎡ 기준 — 면적을 정하지 않아 국민평형으로 계산했습니다. 다른 평형이면 금액이 달라집니다.`;
+  }
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * 기준가 근거 (`target_price`) — **무엇을 기준으로 계산했는지 화면이 말해야 한다**
+ *
+ * 같은 단지가 화면마다 다른 금액으로 보이던 문제(CR34-3·CR35-4)의 마지막 조각이다.
+ * 서버는 `basis` 를 **기계용 코드**로 준다("프론트가 화면에 그대로 이름 붙일 수 있게
+ * 서버가 정한다" — recommend.py). 그 코드 → 사람 말 번역은 **여기 한 곳에서만** 한다.
+ * 모르는 코드는 번역하지 않고 "확인하지 못했다"고 말한다(지어내지 않는다).
+ * ───────────────────────────────────────────────────────────────────────── */
+
+export const PRICE_BASIS_TIME_ADJUSTED = "time_adjusted_band";
+export const PRICE_BASIS_TRADE_BAND = "trade_band";
+export const PRICE_BASIS_CLIENT = "client_supplied";
+
+export interface TargetPriceView {
+  /** 계획을 세울 금액이 있는가. false 면 **0 으로 채우지 말고 사유를 보인다.** */
+  known: boolean;
+  krw: number | null;
+  /** 이 금액이 무엇인가(짧은 이름) */
+  label: string;
+  /** 표본·기간·기준월 같은 근거 한 줄. 없으면 null. */
+  detail: string | null;
+  /** 실거래에서 유도한 **추정치**인가 — 그러면 "지금 살 수 있는 호가가 아니다"를 말한다. */
+  estimated: boolean;
+  /** 못 만든 사유 또는 시점 보정 실패 사유. 내부 코드는 걸러진다. */
+  reason: string | null;
+}
+
+/**
+ * 이 기준가가 **무엇과 같은 값인가**를 말할 때 필요한 맥락 (CR36-5).
+ *
+ * 예전 문구는 *"추천 카드와 같은 값입니다"* 였다. 어느 카드인지 말하지 않으니
+ * ① 추천을 한 번도 안 돌린 사용자에게는 **존재하지 않는 카드**를 가리키고,
+ * ② 추천 결과가 10건일 때는 그중 무엇과 비교하라는 건지 알 수 없다.
+ * 그래서 단지·면적을 받아 **무엇에 대한 값인지** 이름으로 말한다.
+ */
+export interface TargetPriceContext {
+  /** 어느 단지의 기준가인가. 모르면 생략(그러면 이름 없이 말한다). */
+  complexName?: string | null;
+  /** 어느 전용면적(㎡)의 기준가인가. 한 단지가 34~120㎡ 라 면적이 빠지면 값이 달라진다. */
+  areaM2?: number | null;
+}
+
+/** "AI 추천도 '가나아파트 84.97㎡' 를 같은 기준으로 계산합니다." 한 줄. */
+function sameBasisNote(ctx: TargetPriceContext): string {
+  const name = typeof ctx.complexName === "string" ? ctx.complexName.trim() : "";
+  const area =
+    typeof ctx.areaM2 === "number" && Number.isFinite(ctx.areaM2) && ctx.areaM2 > 0
+      ? `${ctx.areaM2}㎡`
+      : "";
+  const subject = [name, area].filter((s) => s !== "").join(" ");
+
+  // ⚠️ "같은 **값**" 이 아니라 "같은 **기준**" 이다. 두 숫자를 화면이 실제로 맞대어 본 적은
+  //    없고(추천을 아직 안 돌렸을 수도 있다), 서버가 같은 함수를 쓴다는 것이 우리가 아는 전부다.
+  return subject === ""
+    ? "AI 추천의 추정가와 같은 기준으로 계산한 값입니다."
+    : `AI 추천도 '${subject}' 를 같은 기준으로 계산합니다.`;
+}
+
+/** 서버가 이 블록을 안 주면(구버전) **null** — 없는 근거를 화면이 지어내지 않는다. */
+export function targetPriceView(
+  ref: TargetPriceRef | null | undefined,
+  ctx: TargetPriceContext = {},
+): TargetPriceView | null {
+  if (!ref || typeof ref !== "object") return null;
+
+  const reason = plainReason(ref.reason);
+  const krw = typeof ref.krw === "number" && Number.isFinite(ref.krw) ? ref.krw : null;
+  const n = ref.sample_size ?? 0;
+  const months = ref.period_months ?? null;
+
+  if (krw === null || krw <= 0) {
+    return {
+      known: false,
+      krw: null,
+      label: "자금계획을 세우지 못했습니다",
+      detail: null,
+      estimated: false,
+      reason,
+    };
+  }
+
+  switch (ref.basis) {
+    case PRICE_BASIS_TIME_ADJUSTED:
+      return {
+        known: true,
+        krw,
+        label: "최근 실거래를 한 시점으로 환산한 추정가",
+        detail: `최근 ${months ?? "?"}개월 실거래 ${n}건 · ${ref.as_of_ym ?? "기준월 미상"} 시점 환산 — ${sameBasisNote(ctx)}`,
+        estimated: true,
+        reason,
+      };
+    case PRICE_BASIS_TRADE_BAND:
+      return {
+        known: true,
+        krw,
+        label: "최근 실거래의 중위값 (시점 보정 못 함)",
+        detail: `최근 ${months ?? "?"}개월 실거래 ${n}건의 중위값 — 여러 시점의 거래를 섞은 값이라 특정 시점의 가격이 아닙니다.`,
+        estimated: true,
+        reason,
+      };
+    case PRICE_BASIS_CLIENT:
+      return {
+        known: true,
+        krw,
+        label: "직접 입력하신 금액",
+        detail: "서버가 근거를 확인하지 않았습니다 — 추천 카드의 추정가와 다를 수 있습니다.",
+        estimated: false,
+        reason: null, // 서버 reason 은 위 문장과 같은 말이다(두 번 적지 않는다)
+      };
+    default:
+      return {
+        known: true,
+        krw,
+        label: "기준가의 근거를 확인하지 못했습니다",
+        detail: null,
+        estimated: false,
+        reason,
+      };
+  }
 }
 
 /* ─────────────────────────────────────────────────────────────────────────

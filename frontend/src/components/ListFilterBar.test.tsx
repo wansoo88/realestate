@@ -9,7 +9,7 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { filterList, type FilterSource } from "../lib/listFilter";
+import { budgetVerdict, filterList, type FilterSource } from "../lib/listFilter";
 import type { TagFacts } from "../lib/tags";
 import { ListFilterBar } from "./ListFilterBar";
 
@@ -19,11 +19,22 @@ interface Row {
   name: string;
 }
 
-function src(name: string, priceKrw: number | null, facts: TagFacts = {}): FilterSource<Row> {
-  return { item: { name }, priceKrw, facts };
+const BUDGET = 1_000_000_000;
+
+/** 판정은 호출부가 실어 준다(`filterList` 는 판정하지 않는다 — CR38-1). */
+function src(
+  name: string,
+  priceKrw: number | null,
+  facts: TagFacts = {},
+  budgetKrw: number | null = BUDGET,
+): FilterSource<Row> {
+  return { item: { name }, budget: budgetVerdict(priceKrw, budgetKrw), facts };
 }
 
-const BUDGET = 1_000_000_000;
+/** 예산 자체를 모르는 상태 — 전부 판정 불가가 된다. */
+function unjudged(sources: FilterSource<Row>[]): FilterSource<Row>[] {
+  return sources.map((s) => ({ ...s, budget: "unknown" as const }));
+}
 
 /** 컴포넌트는 순수 함수의 결과를 받아 그리기만 한다 — 같은 계산을 두 번 하지 않는다. */
 function mount(
@@ -33,7 +44,6 @@ function mount(
 ) {
   const full = {
     budgetOnly: false,
-    budgetKrw: BUDGET,
     tags: [],
     includeUnknownTag: false,
     ...state,
@@ -82,24 +92,49 @@ describe("예산 내 토글", () => {
 
   it("**숨긴 개수를 화면에 적는다** — 조용히 사라지면 안 된다", () => {
     mount(rows, { budgetOnly: true });
-    expect(screen.getByText(/예산 초과 1건 · 가격 미상 1건 숨김/)).toBeTruthy();
+    expect(screen.getByText(/예산 초과 1건 · 예산 판정 불가 1건 숨김/)).toBeTruthy();
   });
 
-  it("가격 미상을 예산 내로 치지 않는 이유를 화면이 말한다", () => {
+  it("판정 불가를 예산 내로 치지 않는 이유를 화면이 말한다", () => {
     mount(rows, { budgetOnly: true });
-    expect(screen.getByText(/가격을 모르는 항목은 예산 내로 치지 않습니다/)).toBeTruthy();
+    expect(screen.getByText(/판정하지 못한 항목은 예산 내로 치지 않습니다/)).toBeTruthy();
   });
 
-  it("꺼져 있어도 초과·미상이 몇 건 섞여 있는지 말한다(상태를 양쪽 다 밝힌다)", () => {
+  it("꺼져 있어도 초과·판정 불가가 몇 건 섞여 있는지 말한다(상태를 양쪽 다 밝힌다)", () => {
     mount(rows);
-    expect(screen.getByText(/예산 초과 1건 · 가격 미상 1건도 함께 보는 중/)).toBeTruthy();
+    expect(screen.getByText(/예산 초과 1건 · 예산 판정 불가 1건도 함께 보는 중/)).toBeTruthy();
   });
 
-  it("예산을 모르면 토글을 켤 수 없고 그 이유를 적는다", () => {
-    mount(rows, { budgetKrw: null });
+  /**
+   * ⚠️ 사유를 **단정하지 않는다** (CR38-1). 판정이 없는 이유는 "예산을 아직 계산 못 했다"
+   *    일 수도, "서버가 이 목록을 판정하지 못했다"일 수도 있다. 그 사유는 지도 쪽
+   *    `budgetStatusView` 안내와 추천 패널 머리글이 각각 말한다.
+   */
+  it("판정된 항목이 없으면 토글을 켤 수 없고, 사유를 지어내지 않는다", () => {
+    mount(unjudged(rows));
     const sw = screen.getByRole("switch", { name: /예산 내/ }) as HTMLButtonElement;
     expect(sw.disabled).toBe(true);
-    expect(screen.getByText(/내 예산을 아직 계산하지 못해/)).toBeTruthy();
+    const note = screen.getByText(/예산 판정이 된 항목이 없어/);
+    expect(note.textContent).not.toContain("자산");
+    expect(sw.getAttribute("aria-describedby")).toBe(note.id);
+  });
+
+  /**
+   * CR37-7 — **"모른다"와 "껐다"는 다른 사실이다.**
+   * 둘 다 `budgetKnown === false` 로 보이지만, 후자는 사용자가 방금 누른 결과다.
+   * 같은 문장으로 말하면 자기가 끈 스위치를 고장으로 읽는다.
+   */
+  it("초과 표시를 껐을 때는 '판정이 없다'가 아니라 '껐다'고 말하고 되돌릴 길을 준다", () => {
+    mount(unjudged(rows), {}, { budgetDisplayOff: true });
+
+    expect(screen.queryByText(/예산 판정이 된 항목이 없어/)).toBeNull();
+    const note = screen.getByText(/예산 초과 표시를 꺼 두었습니다/);
+    expect(note.textContent).toContain("'내 조건'의 예산 칩"); // 어디를 켜면 되는지
+
+    // 못 켜는 이유가 스위치 **자신에게** 붙어 있다(비활성 버튼은 초점을 못 받는다)
+    const sw = screen.getByRole("switch", { name: /예산 내/ }) as HTMLButtonElement;
+    expect(sw.disabled).toBe(true);
+    expect(sw.getAttribute("aria-describedby")).toBe(note.id);
   });
 
   it("보이는 건수와 전체 건수를 함께 적는다", () => {

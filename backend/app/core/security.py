@@ -323,23 +323,36 @@ _ALGORITHM = "HS256"
 ACCESS_TTL_SECONDS = int(ACCESS_TTL.total_seconds())
 REFRESH_TTL_SECONDS = int(REFRESH_TTL.total_seconds())
 
-#: HS256 서명키 최소 길이(바이트). RFC 7518 §3.2 — HMAC 키는 해시 출력(256bit) 이상.
+#: HS256 서명키 최소 길이(**문자 수**). RFC 7518 §3.2 — HMAC 키는 해시 출력(256bit) 이상.
+#:
+#: ⚠️ 이름이 예전에 `MIN_JWT_SECRET_BYTES` 였다 — 재는 것은 `len(secret)`(문자 수)인데
+#:    이름은 바이트라고 말했다. **재는 쪽이 옳고 이름이 틀렸다.** 그래서 이름을 고쳤다
+#:    (SR30-1 이 잡은 것과 같은 형태의 불일치이되, 그쪽은 반대로 재는 쪽이 틀렸었다).
+#:
+#:    왜 바이트로 바꾸지 않는가: UTF-8 에서 **문자 수 ≤ 바이트 수**라, 32자를 요구하면
+#:    RFC 하한(32바이트)은 자동으로 만족된다. 반대로 바이트로 재면 오히려 **느슨해진다**
+#:    — `'가'*11` 은 11자 / 33바이트라 통과하지만 실제 엔트로피는 11자뿐이다.
+#:    `FIELD_ENCRYPTION_KEY` 가 바이트를 재는 것과 방향이 다른 이유는, 그쪽은
+#:    "정확히 32바이트"라는 알고리즘 요구(AES-256)이고 이쪽은 **하한**이기 때문이다.
+#:    같은 판단이 `app/core/config.py::validate_runtime` 에도 적혀 있다 — 두 곳이
+#:    같은 규칙을 같은 근거로 지킨다.
+#:
 #: ⚠️ PyJWT 는 짧은 키에 **경고만** 내고 서명한다. 빈 문자열도 서명·검증에 성공하며
 #:    그건 "누구나 아는 키" = 임의 user_id 위조다. 그래서 사용 지점에서 막는다
 #:    (`hash_password` 가 Argon2 하한을, `load_key` 가 32바이트를 막는 것과 같은 규약).
 #:    기동 점검(`Settings.validate_runtime`)이 1차 방어이고 이건 2차다 — 배치·스크립트처럼
 #:    `create_app()` 을 안 타는 경로가 생겨도 약한 키로는 토큰이 나가지 않는다.
-MIN_JWT_SECRET_BYTES = 32
+MIN_JWT_SECRET_CHARS = 32
 
 
 def create_token(user_id: int, *, secret: str, kind: str = "access",
                  now: dt.datetime | None = None) -> str:
     if kind not in ("access", "refresh"):
         raise ValueError("kind 는 access 또는 refresh")
-    if len(secret) < MIN_JWT_SECRET_BYTES:
+    if len(secret) < MIN_JWT_SECRET_CHARS:
         # 길이만 말한다 — 값도, 값의 일부도 메시지에 넣지 않는다.
         raise ValueError(
-            f"JWT 서명키가 너무 짧습니다({MIN_JWT_SECRET_BYTES}자 이상 필요). "
+            f"JWT 서명키가 너무 짧습니다({MIN_JWT_SECRET_CHARS}자 이상 필요). "
             "JWT_SECRET 을 확인하세요")
     now = now or dt.datetime.now(dt.timezone.utc)
     ttl = ACCESS_TTL if kind == "access" else REFRESH_TTL
@@ -374,19 +387,51 @@ def decode_token(token: str, *, secret: str, expect: str = "access") -> int:
 # 로그 마스킹
 # ---------------------------------------------------------------------------
 
-def mask_sensitive(data: Any, *, _depth: int = 0) -> Any:
-    """로그에 남기기 전에 민감 필드를 가린다.
+#: 문자열을 통째로 넘겼을 때 돌려주는 값. **가린 척하지 않고 전부 가린다.**
+FULLY_MASKED = "***"
 
-    중첩 dict/list 를 재귀적으로 훑는다. 깊이 제한을 둬 순환 참조에서 멈춘다.
+
+def mask_sensitive(data: Any) -> Any:
+    """로그에 남기기 전에 **구조(dict/list) 안의 민감 필드**를 가린다.
+
+    이 함수는 민감 정보를 **키 이름**으로 찾는다(`SENSITIVE_FIELDS`). 그래서
+    `{"password": "x"}` 는 가릴 수 있지만 `"password=x"` 라는 **문자열 하나는
+    가릴 수 없다** — 볼 키가 없다.
+
+    ⚠️ **문자열을 넘기면 통째로 `"***"` 를 돌려준다** (SR33-1, 2026-07-29)
+    -----------------------------------------------------------------
+    예전에는 문자열이 들어오면 **그대로 돌려줬다**. 이름이 "가린다"인 함수가 아무
+    일도 안 하는 형태라, 호출부(`main.unhandled` 의 500 로거)는 마스킹이 걸린 줄 알고
+    `mask_sensitive(str(request.url))` 로 **쿼리스트링을 통째로 로그에 남겼다.**
+    하필 그 줄이 앱 로거에서 운영에 실제로 나가는 **유일한 줄**이었다(root 핸들러가
+    없어 INFO 는 버려지고 ERROR 만 `lastResort` 로 stderr → `docker logs`).
+
+    "아무 일도 안 한다"와 "가렸다"가 겉보기에 같으면 다음 사람도 같은 실수를 한다.
+    그래서 가리지 못하는 입력은 **가리지 못했다고 말하는 대신 전부 가린다** —
+    로그에 `***` 가 찍히면 잘못 쓴 것이 눈에 보인다(조용히 새지 않는다).
+
+    URL 은 이 함수가 아니라 `app.main.log_target(path, query)` 를 쓴다. 그쪽은
+    **쿼리 이름만** 남기므로 운영에 필요한 정보는 유지하면서 값이 안 나간다.
+
+    ⚠️ 중첩된 문자열(예: `{"note": "hello"}` 의 값)은 **그대로 둔다.** 거기까지
+       가리면 모든 로그가 `***` 가 되어 아무도 안 본다. 구분의 근거는 자리다 —
+       구조 안의 값은 키로 판정할 수 있고, 통째로 넘어온 문자열은 판정할 수 없다.
     """
+    if isinstance(data, (str, bytes, bytearray)):
+        return FULLY_MASKED
+    return _mask_structure(data)
+
+
+def _mask_structure(data: Any, _depth: int = 0) -> Any:
+    """중첩 dict/list 를 재귀적으로 훑는다. 깊이 제한을 둬 순환 참조에서 멈춘다."""
     if _depth > 12:
-        return "***"
+        return FULLY_MASKED
     if isinstance(data, dict):
         return {
-            k: ("***" if str(k).lower() in SENSITIVE_FIELDS
-                else mask_sensitive(v, _depth=_depth + 1))
+            k: (FULLY_MASKED if str(k).lower() in SENSITIVE_FIELDS
+                else _mask_structure(v, _depth + 1))
             for k, v in data.items()
         }
     if isinstance(data, (list, tuple)):
-        return type(data)(mask_sensitive(v, _depth=_depth + 1) for v in data)
+        return type(data)(_mask_structure(v, _depth + 1) for v in data)
     return data

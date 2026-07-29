@@ -18,13 +18,22 @@ interface Row {
   name: string;
 }
 
-function src(name: string, priceKrw: number | null, facts: TagFacts = {}): FilterSource<Row> {
-  return { item: { name }, priceKrw, facts };
-}
-
 const BUDGET = 1_000_000_000; // 10억
 
-const DEFAULT = { budgetOnly: false, budgetKrw: BUDGET, tags: [], includeUnknownTag: false };
+/**
+ * 판정은 **호출부가 실어 준다**(filterList 는 판정하지 않는다). 여기서는 추천 목록과
+ * 같은 방식(금액 하나로 판정)으로 만들어 넣는다 — 지도는 서버 값을 싣는다.
+ */
+function src(
+  name: string,
+  priceKrw: number | null,
+  facts: TagFacts = {},
+  budgetKrw: number | null = BUDGET,
+): FilterSource<Row> {
+  return { item: { name }, budget: budgetVerdict(priceKrw, budgetKrw), facts };
+}
+
+const DEFAULT = { budgetOnly: false, tags: [], includeUnknownTag: false };
 
 const names = (o: { entries: Array<{ item: Row }> }) => o.entries.map((e) => e.item.name);
 
@@ -36,7 +45,7 @@ describe("budgetVerdict", () => {
   });
 
   it("가격을 모르면 **예산 내가 아니다** — unknown 이다", () => {
-    // 서버 over_budget 은 가격이 없으면 false 를 준다. 그걸 믿으면 12억짜리가 예산 내가 된다.
+    // 서버도 같은 규칙이다(api-spec §4: 가격 미상이면 `over_budget: null`).
     expect(budgetVerdict(null, BUDGET)).toBe("unknown");
     expect(budgetVerdict(undefined, BUDGET)).toBe("unknown");
     expect(budgetVerdict(0, BUDGET)).toBe("unknown");
@@ -45,6 +54,41 @@ describe("budgetVerdict", () => {
   it("예산을 모르면 아무것도 판정하지 않는다", () => {
     expect(budgetVerdict(900_000_000, null)).toBe("unknown");
     expect(budgetVerdict(900_000_000, 0)).toBe("unknown");
+  });
+});
+
+/**
+ * `filterList` 는 **판정하지 않는다** (CR38-1).
+ *
+ * 예전에는 이 모듈이 `가격 ≤ 예산` 을 직접 계산했고, 그 "예산"이 목록 전체에 한 숫자였다.
+ * 지도처럼 면적이 섞인 목록에서는 그 하나가 틀린다(취득세 구간이 85㎡ 를 가로지른다).
+ * 판정을 입력으로 받으면 목록마다 **판정한 쪽**(지도 = 서버, 추천 = 화면)이 정해진다.
+ */
+describe("판정은 입력이다 — 여기서 다시 계산하지 않는다", () => {
+  it("같은 가격이라도 실어 준 판정이 다르면 다르게 센다", () => {
+    // 지도의 실제 모습: 가격은 같은데 면적이 달라 서버 상한이 갈린 두 단지.
+    const out = filterList(
+      [
+        { item: { name: "84㎡" }, budget: "within", facts: {} },
+        { item: { name: "120㎡" }, budget: "over", facts: {} },
+      ],
+      DEFAULT,
+    );
+    expect(out.overBudget).toBe(1);
+    expect(out.budgetUnknown).toBe(0);
+  });
+
+  it("판정 불가만 있으면 토글을 켤 수 없다(켜 봐야 빈 화면이다)", () => {
+    const out = filterList(
+      [
+        { item: { name: "가" }, budget: "unknown", facts: {} },
+        { item: { name: "나" }, budget: "unknown", facts: {} },
+      ],
+      { ...DEFAULT, budgetOnly: true },
+    );
+    expect(out.budgetKnown).toBe(false);
+    expect(names(out)).toEqual(["가", "나"]);
+    expect(out.hiddenBudgetUnknown).toBe(0);
   });
 });
 
@@ -59,29 +103,39 @@ describe("예산 토글", () => {
     const out = filterList(rows, DEFAULT);
     expect(names(out)).toEqual(["싼집", "비싼집", "가격미상"]);
     expect(out.overBudget).toBe(1);
-    expect(out.priceUnknown).toBe(1);
+    expect(out.budgetUnknown).toBe(1);
     // 숨긴 게 없으므로 숨김 건수는 0 이다(사실과 숨김을 구분한다)
     expect(out.hiddenOverBudget).toBe(0);
-    expect(out.hiddenPriceUnknown).toBe(0);
+    expect(out.hiddenBudgetUnknown).toBe(0);
   });
 
   it("켜면 예산 내만 남고, **몇 건을 숨겼는지** 함께 돌려준다", () => {
     const out = filterList(rows, { ...DEFAULT, budgetOnly: true });
     expect(names(out)).toEqual(["싼집"]);
     expect(out.hiddenOverBudget).toBe(1);
-    expect(out.hiddenPriceUnknown).toBe(1);
+    expect(out.hiddenBudgetUnknown).toBe(1);
     expect(out.total).toBe(3);
   });
 
-  it("가격 미상은 예산 내로 치지 않는다(숨길 때도 초과와 따로 센다)", () => {
-    const out = filterList([src("가격미상", null)], { ...DEFAULT, budgetOnly: true });
-    expect(out.entries).toHaveLength(0);
-    expect(out.hiddenPriceUnknown).toBe(1);
-    expect(out.hiddenOverBudget).toBe(0);
+  it("판정 불가는 예산 내로 치지 않는다 — 다만 혼자 남으면 토글이 잠긴다", () => {
+    // 판정된 항목이 하나도 없으면 토글을 켤 수 없다(켜면 전부 사라진다).
+    const alone = filterList([src("가격미상", null)], { ...DEFAULT, budgetOnly: true });
+    expect(alone.budgetKnown).toBe(false);
+    expect(alone.entries).toHaveLength(1);
+
+    // 판정된 항목이 섞여 있으면 초과와 **따로** 세어 숨긴다.
+    const mixed = filterList([src("싼집", 800_000_000), src("가격미상", null)], {
+      ...DEFAULT,
+      budgetOnly: true,
+    });
+    expect(names(mixed)).toEqual(["싼집"]);
+    expect(mixed.hiddenBudgetUnknown).toBe(1);
+    expect(mixed.hiddenOverBudget).toBe(0);
   });
 
   it("예산을 모르면 토글이 켜져 있어도 아무것도 숨기지 않는다(빈 화면 방지)", () => {
-    const out = filterList(rows, { ...DEFAULT, budgetKrw: null, budgetOnly: true });
+    const unknownBudget = rows.map((r) => ({ ...r, budget: "unknown" as const }));
+    const out = filterList(unknownBudget, { ...DEFAULT, budgetOnly: true });
     expect(names(out)).toEqual(["싼집", "비싼집", "가격미상"]);
     expect(out.budgetKnown).toBe(false);
     expect(out.hiddenOverBudget).toBe(0);

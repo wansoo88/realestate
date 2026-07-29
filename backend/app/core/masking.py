@@ -212,15 +212,45 @@ def secret_safe(prefix: str = "", *, extra_secrets: Iterable[str] = ()):
 # --- 로깅 ------------------------------------------------------------------
 
 def _mask_record(record: logging.LogRecord) -> None:
-    """LogRecord 의 메시지(+ 포맷 인자)를 마스킹한 문자열로 대체한다."""
+    """LogRecord 의 메시지(+ 포맷 인자)를 마스킹한다.
+
+    ⚠️ **가능하면 인자를 제자리에서 지우고, 레코드 구조를 보존한다**(SR32-1 에서 발견).
+       예전에는 무조건 `record.msg = <완성된 문자열>; record.args = ()` 로 뭉갰다.
+       그런데 uvicorn 의 `AccessFormatter` 는 `record.args` 를 **5-튜플로 언패킹**한다:
+
+           (client_addr, method, path, http_version, status_code) = record.args
+
+       그래서 접근 로그 줄에 비밀처럼 생긴 파라미터(`?secret=…`)가 하나라도 있으면
+       그 줄이 뭉개져 언패킹이 터지고, logging 이 `--- Logging error ---` 폴백으로
+       **원본 메시지를 그대로** 찍었다(실측). 지우려던 방어가 오히려 포맷을 무너뜨려
+       가공되지 않은 줄을 내보내는 형태다. 인자만 지우면 구조가 그대로 남는다.
+    """
     try:
         message = record.getMessage()
     except Exception:                            # noqa: BLE001 - 로깅이 앱을 죽이면 안 된다
         return
-    masked = mask_secrets(message)
-    if masked != message:
-        record.msg = masked
-        record.args = ()
+    if mask_secrets(message) == message:
+        return
+
+    args = record.args
+    if isinstance(args, tuple) and args:
+        masked_args = tuple(mask_secrets(a) if isinstance(a, str) else a for a in args)
+        if masked_args != args:
+            record.args = masked_args
+            try:
+                rendered = record.getMessage()
+            except Exception:                    # noqa: BLE001
+                rendered = None
+            if rendered is not None and mask_secrets(rendered) == rendered:
+                return                           # 인자만 지워도 깨끗하다 — 구조 보존
+            args = record.args                   # 아래 폴백에서 다시 렌더한다
+
+    # 비밀이 템플릿(msg) 쪽에 있으면 구조를 지킬 방법이 없다 — 통째로 대체한다.
+    try:
+        record.msg = mask_secrets(record.getMessage())
+    except Exception:                            # noqa: BLE001
+        record.msg = mask_secrets(str(record.msg))
+    record.args = ()
 
 
 class SecretMaskingFilter(logging.Filter):
@@ -246,8 +276,94 @@ class SecretMaskingFilter(logging.Filter):
         return True
 
 
+# --- 접근 로그의 쿼리스트링 ------------------------------------------------
+#
+# ★ SR32-1. **앱이 지운 줄을 uvicorn 이 한 줄 아래에 다시 쓴다.**
+#
+# `app/main.py` 의 미들웨어는 접근 로그에서 쿼리를 지운다. 그런데 uvicorn 은
+# 자기 로거(`uvicorn.access`)로 같은 요청을 **쿼리째** 한 번 더 쓴다:
+#
+#     INFO: 127.0.0.1:51891 - "GET /api/v1/map/complexes?max_price_krw=1314310000 HTTP/1.1" 200 OK
+#
+# 이 로거는 우리 미들웨어를 지나지 않으므로 앱 쪽 규칙과 **무관하게** 동작한다.
+# 그래서 값이 아니라 **싱크**를 막는다 — `uvicorn.access` 로거에 필터를 걸어
+# 경로만 남기고 `?` 뒤를 잘라낸다.
+#
+# ⚠️ **왜 `--access-log` 를 끄지 않았나.** 끄는 것도 SR-032 가 제시한 선택지지만,
+#    그러면 그 방어가 **배포 명령줄**(docker-compose `command:`)에 살게 된다.
+#    명령줄은 서버에서 손으로 고쳐지고, 고친 사람은 이 파일을 읽지 않는다.
+#    필터는 코드에 있고 테스트가 지킨다(`tests/test_access_log.py`).
+#    로그 자체는 켜 둔다 — 어떤 요청이 몇 번 왔는지는 운영에 필요한 사실이다.
+
+#: uvicorn 이 만드는 접근 로그 레코드의 인자 형태(0.49.0 기준):
+#:     msg  = '%s - "%s %s HTTP/%s" %d'
+#:     args = (client_addr, method, path_with_query, http_version, status_code)
+#: **위치(index)에 의존하지 않는다.** uvicorn 이 인자 순서를 바꿔도 계속 듣도록
+#: "슬래시로 시작하고 `?` 를 품은 문자열"이면 자른다 — 그 모양이 곧 경로+쿼리다.
+def _strip_query(value: Any) -> Any:
+    if isinstance(value, str) and value.startswith("/") and "?" in value:
+        return value.split("?", 1)[0]
+    return value
+
+
+#: 이미 **완성된 문자열** 안에서 경로+쿼리를 찾는다.
+#: `'127.0.0.1:5189 - "GET /api/v1/map/complexes?bbox=… HTTP/1.1" 200'`
+#: 인자가 뭉개져 들어오는 경우(비밀 마스킹 폴백 등)를 대비한 두 번째 그물이다.
+_PATH_QUERY_IN_TEXT_RE = re.compile(r"(/[^\s\"'?]*)\?[^\s\"']*")
+
+
+class AccessLogQueryFilter(logging.Filter):
+    """접근 로그에서 **쿼리스트링을 지운다**(경로·상태코드는 남긴다).
+
+    지우는 쪽을 기본값으로 두는 이유는 `app/main.py` 의 미들웨어 주석과 같다:
+    민감한지 아닌지를 **경로 목록으로 관리하면 언젠가 한 줄이 빠진다**.
+    SR32-1 이 정확히 그 형태였다(`/map/complexes` 만 목록에 없었다).
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple):
+            stripped = tuple(_strip_query(a) for a in args)
+            if stripped != args:
+                record.args = stripped
+        elif isinstance(args, dict):                    # pragma: no cover - 방어
+            stripped_map = {k: _strip_query(v) for k, v in args.items()}
+            if stripped_map != args:
+                record.args = stripped_map
+        # 인자가 없어 메시지에 이미 박혀 들어온 경우(비밀 마스킹 폴백 등)도 지운다.
+        if not record.args and isinstance(record.msg, str) and "?" in record.msg:
+            record.msg = _PATH_QUERY_IN_TEXT_RE.sub(r"\1", record.msg)
+        return True
+
+
+#: 쿼리를 지울 접근 로거들. uvicorn 이 표준이고, 다른 서버로 갈아타면 여기 추가한다.
+ACCESS_LOGGER_NAMES: tuple[str, ...] = ("uvicorn.access",)
+
+
+def install_access_log_query_stripping(
+        logger_names: Iterable[str] = ACCESS_LOGGER_NAMES) -> None:
+    """접근 로거에 쿼리 제거 필터를 건다. **멱등**.
+
+    ⚠️ 로거 자체에 건다(핸들러가 아니라). uvicorn 은 `configure_logging()` 에서
+       `dictConfig` 로 핸들러를 **갈아끼우는데**, 그때 로거의 필터는 지워지지 않는다
+       (`logging.config.common_logger_config` 는 handlers 만 제거한다).
+       핸들러에 걸면 재설정 한 번에 방어가 사라진다.
+    """
+    for name in logger_names:
+        logger = logging.getLogger(name)
+        if not any(isinstance(f, AccessLogQueryFilter) for f in logger.filters):
+            logger.addFilter(AccessLogQueryFilter())
+
+
 def install_log_masking() -> None:
-    """레코드 팩토리 + 루트 로거/핸들러에 마스킹을 설치한다. **멱등**."""
+    """레코드 팩토리 + 루트 로거/핸들러에 마스킹을 설치한다. **멱등**.
+
+    접근 로그의 쿼리 제거(SR32-1)도 **여기서 함께** 건다 — 로그 싱크 방어를
+    두 곳에서 부르게 하면 한쪽만 부르는 진입점이 생긴다(`worker.py`·`scripts/_common.py`
+    도 이 함수만 부른다).
+    """
+    install_access_log_query_stripping()
+
     factory = logging.getLogRecordFactory()
     if not getattr(factory, "_secret_masking", False):
         def masking_factory(*args: Any, **kwargs: Any) -> logging.LogRecord:

@@ -30,6 +30,7 @@
 
 .rail__edit,
 .rail__money,
+.rail__listings,
 .rail__chip {
   pointer-events: auto;
   flex: 0 0 auto;
@@ -63,7 +64,8 @@
 }
 
 /* 열려 있는 동안 같은 버튼이 상태를 말한다(색 + 테두리 — 색만으로 구분하지 않는다) */
-.rail__money--on {
+.rail__money--on,
+.rail__listings--on {
   border-color: var(--accent);
   background: var(--accent-weak);
 }

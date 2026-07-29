@@ -197,6 +197,68 @@ def test_기본_차단과_프레임_방어가_들어_있다():
 
 
 # ---------------------------------------------------------------------------
+# ★ SR32-1 — nginx 접근 로그에 쿼리스트링이 남지 않는가
+#
+# 운영 로그에 `max_price_krw=1314310000`(암호화 보관하던 자산에서 계산한 최대
+# 구매가능 금액)이 148줄 쌓여 있었고 회전본은 0644 였다. 근본 수정은 앱에서 했지만
+# (금액을 URL 에 안 싣는다), 이 포맷이 마지막 그물이다 — **누가 무엇을 쿼리에
+# 실어도** 로그에는 안 남는다. 그물이 조용히 풀리는 것을 여기서 막는다.
+# ---------------------------------------------------------------------------
+
+#: 쿼리를 포함하는 nginx 변수. `$request` = "메서드 경로?쿼리 프로토콜",
+#: `$request_uri` = "경로?쿼리". 접근 로그 포맷에 있으면 그 자체가 결함이다.
+QUERY_BEARING_VARS = ("$request_uri", "$request ", "$request'", '$request"', "$args",
+                      "$query_string")
+
+
+def _log_format_body() -> str:
+    m = re.search(r"log_format\s+re_noquery\s+(.*?);", _conf(), re.DOTALL)
+    assert m, "쿼리 제외 log_format(re_noquery)을 찾지 못했습니다 (SR32-1)"
+    return m.group(1)
+
+
+def test_전용_로그포맷이_쿼리를_담지_않는다():
+    body = _log_format_body()
+    assert "$uri" in body, "경로는 남겨야 한다(어느 엔드포인트가 불렸는지는 운영 정보다)"
+    for var in QUERY_BEARING_VARS:
+        assert var not in body, (
+            f"log_format 에 {var.strip()} 이 있습니다 — 쿼리스트링이 그대로 로그에 남습니다")
+
+
+def test_모든_access_log_가_쿼리_제외_포맷을_쓴다():
+    """포맷을 정의만 하고 안 쓰면 아무것도 고친 게 아니다.
+
+    변이: `access_log ... re_noquery;` 에서 포맷 이름을 지우면(= 기본 combined)
+    여기서 깨진다.
+    """
+    lines = [ln.strip() for ln in _conf().splitlines()
+             if ln.strip().startswith("access_log")]
+    assert lines, "access_log 지시어가 없습니다"
+    for line in lines:
+        if line.startswith("access_log off"):
+            continue
+        assert line.rstrip(";").split()[-1] == "re_noquery", (
+            f"이 access_log 가 기본(combined) 포맷을 씁니다 → 쿼리가 남습니다: {line}")
+
+
+def test_로그포맷은_이_사이트에만_적용된다():
+    """⚠️ 동거 서비스 3개가 같은 호스트에 있다(SR-027 이 gzip 에서 건 조건과 같다).
+
+    `log_format` **정의**는 부작용이 없지만, 전역 기본 로그를 바꾸는 지시어
+    (`http` 블록의 access_log 를 재정의하는 형태)가 이 파일에 있으면 안 된다.
+    이 파일의 access_log 는 전부 우리 서버블록 안에 있고 우리 파일만 가리켜야 한다.
+    """
+    for line in _conf().splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("access_log"):
+            continue
+        assert "/var/log/nginx/realestate." in stripped, (
+            f"이 사이트 밖의 로그 파일을 건드립니다: {stripped}")
+    # 정의는 한 번만 — 두 번 정의하면 나중 것이 이깁니다(조용히 다른 포맷이 됩니다).
+    assert _conf().count("log_format re_noquery") == 1
+
+
+# ---------------------------------------------------------------------------
 # 절차 — 문서가 실제로 검증하게 되어 있는가
 # ---------------------------------------------------------------------------
 
@@ -214,6 +276,200 @@ def test_배포문서에_report_only_선행_절차가_있다():
     doc = DEPLOY_DOC.read_text(encoding="utf-8")
     assert "Content-Security-Policy-Report-Only" in doc
     assert "강제 전환" in doc
+
+
+# ---------------------------------------------------------------------------
+# ★ SR33-4 — `<APP_ROOT>` 함정: `nginx -t` 는 **미치환·없는 경로를 전부 통과시킨다**
+#
+# 운영 실측(2026-07-29): `<APP_ROOT>` 를 그대로 두거나 `/nonexistent/...` 로 바꿔도
+# `nginx -t` 는 `syntax is ok / test is successful` 이다 — 문법만 보기 때문이다.
+# 그리고 이 함정으로 **운영 메인이 404 가 된 적이 있다**(realestate.error.log.2.gz 에
+# `stat() "/tmp/tmp.BrOsTCkDTX/dist/" failed` 가 남아 있다).
+# 예전 가드는 `grep … && echo "진행 금지"` 한 줄이라 **중단하지 않았다.**
+# ---------------------------------------------------------------------------
+
+#: DEPLOY.md 의 ```bash 펜스 블록들.
+_BASH_BLOCK_RE = re.compile(r"```bash\n(.*?)```", re.DOTALL)
+
+#: 설정 템플릿의 자리표시자. 이 파일이 검사 대상 이름을 조립해 쓰는 이유는,
+#: 아래 "치환 누락" 검사가 이 테스트 파일 자신을 잡지 않게 하려는 게 아니라
+#: (여기는 nginx conf 를 안 읽는다) **한 곳에서만 정의**하기 위해서다.
+APP_ROOT_TOKEN = "<APP_ROOT>"
+
+
+def _bash_blocks(text: str) -> list[str]:
+    return _BASH_BLOCK_RE.findall(text)
+
+
+def test_배포문서에_치환_경로_가드_함수가_있다():
+    """`guard_site()` 가 **세 가지**를 본다: 치환 누락 · index.html 존재 · root 경로 존재.
+
+    `nginx -t` 는 셋 다 안 본다. 하나라도 빠지면 '검사했다'는 착각만 남는다.
+    변이: 함수 본문에서 `-f ...index.html` 검사를 지우면 여기서 깨진다.
+    """
+    doc = DEPLOY_DOC.read_text(encoding="utf-8")
+    m = re.search(r"guard_site\(\) \{.*?\n\}", doc, re.DOTALL)
+    assert m, "DEPLOY.md 에서 guard_site() 정의를 찾지 못했습니다 (SR33-4)"
+    body = m.group(0)
+
+    assert APP_ROOT_TOKEN in body, "치환 누락 검사가 없습니다"
+    assert "index.html" in body and "-f " in body, (
+        "root 경로의 index.html 존재 검사가 없습니다 — 없으면 메인이 404 인데 "
+        "`nginx -t` 는 통과합니다")
+    # 설정 파일에서 `root <경로>` 를 뽑아 **디렉터리 존재**를 확인하는 단계.
+    # (certbot webroot 처럼 index.html 이 없는 root 도 있으므로 -f 와 별개로 필요하다.)
+    assert re.search(r"grep[^\n]*root[^\n]*\"\$site\"", body), (
+        "설정에 적힌 root 경로를 뽑는 단계가 없습니다")
+    assert "-d " in body, "root 디렉터리 존재 검사(-d)가 없습니다"
+    # 실패하면 **돌려주는** 함수여야 한다(echo 만 하고 넘어가면 예전 가드와 같다).
+    assert body.count("return 1") >= 4, (
+        "guard_site 가 실패를 return 1 로 알리지 않습니다 — 호출부의 `&&` 가 끊기지 않습니다")
+
+
+def test_가드가_그_파일이_활성_사이트인지도_본다():
+    """★ SR34-1. 가드는 파일의 **내용**만 봤다 — nginx 가 읽는 파일인지는 안 봤다.
+
+    실측(2026-07-29, 운영): 활성은 `sites-enabled/realestate.utilverse.info` 인데
+    §5-5(3)·(5) 는 `sites-available/realestate.conf` 에 썼다. 그대로 따르면
+    **가드 통과 · `nginx -t` 통과 · reload 성공 · 새 설정은 안 걸림**이다.
+    `<APP_ROOT>` 함정과 같은 종류다(전부 통과하는데 동작만 안 함).
+
+    변이: `sites-enabled` 순회 블록을 지우면 여기서 깨진다.
+    """
+    doc = DEPLOY_DOC.read_text(encoding="utf-8")
+    body = re.search(r"guard_site\(\) \{.*?\n\}", doc, re.DOTALL).group(0)
+
+    assert "sites-enabled" in body, (
+        "guard_site 가 '이 파일이 활성 사이트인가'를 보지 않습니다 (SR34-1)")
+    # 링크를 **해석해서** 비교해야 한다 — 이름만 비교하면 심볼릭 링크에서 어긋난다.
+    assert body.count("readlink -f") >= 2, (
+        "링크를 해석하지 않고 이름만 비교하면 sites-enabled 의 심볼릭 링크를 못 따라갑니다")
+
+
+def test_가드의_root_경로_순회가_공백을_견딘다():
+    """CR38-5. `for d in $(…)` 는 공백이 든 경로를 단어로 쪼갠다.
+
+    실측: root 가 `/srv/web root/dist` 면 옛 방식은 `/srv/web` 을 '없는 경로'라고
+    보고해 **정상 설정에서 배포를 막는다**(fail-closed 라 위험하진 않지만 틀린 판정이다).
+    """
+    doc = DEPLOY_DOC.read_text(encoding="utf-8")
+    body = re.search(r"guard_site\(\) \{.*?\n\}", doc, re.DOTALL).group(0)
+
+    assert "while IFS= read -r" in body, (
+        "root 경로를 줄 단위로 읽지 않습니다 — 공백이 든 경로가 쪼개집니다 (CR38-5)")
+    # 주석은 뺀다 — 가드 안에 *옛 방식을 쓰지 말라*는 설명이 그 모양으로 적혀 있다.
+    code = "\n".join(ln for ln in body.split("\n") if not ln.lstrip().startswith("#"))
+    assert not re.search(r"for\s+\w+\s+in\s+\$\(", code), (
+        "명령 치환을 `for … in $(…)` 로 순회하면 단어 분리가 일어납니다 (CR38-5)")
+
+
+#: nginx 가 실제로 읽는 사이트 파일 이름(운영 실측). 문서 전체가 이 하나만 쓴다.
+ACTIVE_SITE_NAME = "realestate.utilverse.info"
+
+
+def test_배포문서가_한_사이트_파일만_가리킨다():
+    """★ SR34-1 의 본체. 이름이 갈리면 가드가 **옳은 검사를 틀린 파일에** 한다.
+
+    `/etc/nginx/sites-{available,enabled}/` 아래를 가리키는 모든 경로가 같은 이름이어야
+    한다. (저장소 원본 `deploy/nginx-realestate.conf` 나 §5-5(0) 의 임시 사본
+    `$T/realestate.conf` 는 `/etc/nginx` 밑이 아니므로 대상이 아니다.)
+
+    변이: 어느 한 블록의 `SITE=` 를 `realestate.conf` 로 되돌리면 여기서 깨진다.
+    """
+    doc = DEPLOY_DOC.read_text(encoding="utf-8")
+    refs = re.findall(r"/etc/nginx/sites-(?:available|enabled)/([A-Za-z0-9._-]+)", doc)
+    assert refs, "배포 문서에서 사이트 파일 경로를 찾지 못했습니다(검사가 비면 늘 통과합니다)"
+
+    wrong = sorted({r for r in refs if r != ACTIVE_SITE_NAME})
+    assert not wrong, (
+        f"활성 사이트가 아닌 이름이 문서에 남아 있습니다: {wrong} — "
+        f"운영에서 nginx 가 읽는 파일은 `{ACTIVE_SITE_NAME}` 하나입니다 (SR34-1). "
+        "그 이름이 아니면 가드·nginx -t·reload 가 전부 성공하고 설정만 안 걸립니다.")
+    # 설치·활성화·롤백이 모두 그 이름을 쓰는지(한 곳만 남고 나머지가 사라지지 않았는지).
+    assert refs.count(ACTIVE_SITE_NAME) >= 5, refs
+
+
+def test_배포_직후_활성_파일에_새_로그포맷이_들어갔는지_센다():
+    """SR34-1 통과 조건의 '한 줄'. 링크를 되짚어 **그 파일**에서 `re_noquery` 를 센다.
+
+    변이: 이 확인을 지우면 파일을 잘못 써도 §5-6(5) 의 grep 0건을 "방어가 걸렸다"로
+    오독할 여지가 남는다(실제 SR-034 의 우려가 그것이었다).
+    """
+    doc = DEPLOY_DOC.read_text(encoding="utf-8")
+    assert re.search(
+        r"grep -c 're_noquery'[^\n]*\n?[^\n]*readlink -f /etc/nginx/sites-enabled/", doc), (
+        "배포 후 **활성 파일**에서 re_noquery 개수를 세는 확인이 없습니다 (SR34-1)")
+    conf_count = NGINX_CONF.read_text(encoding="utf-8").count("re_noquery")
+    assert f"→ {conf_count} 기대" in doc, (
+        f"기대 개수가 저장소 설정({conf_count}개)과 다릅니다 — 문서를 갱신하세요")
+
+
+def test_설정을_설치하는_모든_블록이_가드를_거쳐_reload_한다():
+    """★ 핵심. 치환하는 블록마다 **가드 → nginx -t → reload 가 `&&` 로 묶여** 있어야 한다.
+
+    예전 문서는 `grep … && echo "진행 금지"` 뒤에 곧바로 `nginx -t && reload` 가 왔다.
+    grep 이 무엇을 찍든 다음 줄은 그대로 실행된다 — **중단하지 않는 가드**다.
+
+    변이: 어느 한 블록에서 `guard_site` 호출을 지우거나 `&&` 를 `;` 로 바꾸면 깨진다.
+    """
+    doc = DEPLOY_DOC.read_text(encoding="utf-8")
+    # "설치하는 블록" = `<APP_ROOT>` 를 **sed 로 치환해서** /etc/nginx 에 까는 블록.
+    # ⚠️ `APP_ROOT_TOKEN in b and "sed" in b` 만으로 고르면 **가드 정의 블록 자신**이
+    #    걸린다(가드도 `<APP_ROOT>` 를 grep 하고 root 경로를 sed 로 다듬으며
+    #    sites-enabled 를 본다) — 가드가 자기를 호출하지 않는다고 실패하게 된다.
+    #    치환하는 sed 인지로 가른다: 그것이 '설치'의 정의다.
+    installing = [b for b in _bash_blocks(doc)
+                  if re.search(rf"sed[^\n]*{re.escape(APP_ROOT_TOKEN)}", b)
+                  and "/etc/nginx" in b]
+    assert len(installing) >= 3, (
+        f"`<APP_ROOT>` 를 치환해 /etc/nginx 에 까는 블록을 {len(installing)}개만 찾았습니다 — "
+        "§5-5(3)·§5-5(5)·§5-5c 세 곳이 있어야 합니다(검사가 비면 늘 통과합니다)")
+
+    for block in installing:
+        assert "guard_site " in block, (
+            "치환 후 가드 없이 설치하는 블록이 있습니다 (SR33-4):\n" + block)
+        # 가드가 실패하면 reload 가 **실행되지 않아야** 한다.
+        assert re.search(r"guard_site [^\n]*&&[^\n]*nginx -t[^\n]*&&[^\n]*reload", block), (
+            "가드·문법검사·reload 가 `&&` 로 묶여 있지 않습니다 — 가드가 실패해도 "
+            "reload 가 그대로 돕니다:\n" + block)
+
+
+def test_배포_후_메인_상태코드를_실제로_잰다():
+    """`curl -sI` 는 200 과 404 를 구분하지 않는다 — 404 여도 헤더는 다 붙는다.
+
+    `<APP_ROOT>` 오치환의 증상이 정확히 그것이었다(헤더 검사 전부 [OK], 화면은 404).
+    """
+    doc = DEPLOY_DOC.read_text(encoding="utf-8")
+    assert re.search(r"curl[^\n]*-w\s*'%\{http_code\}'[^\n]*\"\$BASE/\"", doc), (
+        "배포 후 메인(`$BASE/`)의 상태코드를 재는 단계가 없습니다 (SR33-4)")
+    assert '[ "$MAIN_CODE" = "200" ]' in doc, "상태코드를 재고 200 인지 판정해야 합니다"
+
+
+def test_로그_권한_글롭이_error_로그까지_덮는다():
+    """★ SR33-2. `realestate.access.log*` 만 잡으면 `error.log.2.gz` 가 0644 로 남는다.
+
+    실측(2026-07-29): 그 파일이 월드 리더블이었고 `/var/log/nginx/` 는 0755 다.
+    """
+    doc = DEPLOY_DOC.read_text(encoding="utf-8")
+    chmods = re.findall(r"chmod\s+640\s+(\S+)", doc)
+    assert chmods, "로그 권한을 잠그는 chmod 640 명령이 없습니다"
+    assert any(g.endswith("/realestate.*") for g in chmods), (
+        f"chmod 글롭이 error 로그를 덮지 않습니다: {chmods} — "
+        "`/var/log/nginx/realestate.*` 로 access·error 를 함께 잠가야 합니다")
+
+
+def test_error_log_가_쿼리_제외_밖이라는_사실이_적혀_있다():
+    """`error_log` 는 `log_format` 대상이 아니다(구조적). **모르면 다음 사람이 착각한다.**
+
+    "3싱크를 다 막았다"고 적어 두고 error_log 가 그 밖에 있으면, 그 문장이 곧 거짓이다.
+    """
+    conf = _conf()
+    block = conf[conf.index("error_log"):] if "error_log" in conf else ""
+    assert "error_log" in conf, "error_log 지시어가 없습니다"
+    around = conf[max(0, conf.index("error_log") - 1200):conf.index("error_log") + 200]
+    assert "log_format" in around and "밖" in around, (
+        "error_log 가 re_noquery 밖이라는 사실이 설정에 적혀 있지 않습니다 (SR33-2)")
+    assert block  # 위 슬라이스가 비지 않았다(검사가 비면 늘 통과한다)
 
 
 # ---------------------------------------------------------------------------
@@ -297,6 +553,52 @@ def test_절차서가_모든_마이그레이션을_언급한다():
     latest = migrations[-1]
     assert latest.name in referenced, (
         f"최신 마이그레이션 {latest.name} 이 DEPLOY.md 손수 적용 목록에 없습니다.")
+
+
+#: `ALTER TABLE listing ADD CONSTRAINT listing_user_*` 에서 제약 이름을 뽑는다.
+_USER_CHECK_RE = re.compile(r"ADD CONSTRAINT\s+(listing_user_[A-Za-z0-9_]+)")
+
+#: DEPLOY.md 의 **기대 목록 블록**. 본문 아무 데나 이름이 있으면 통과하는 형태로
+#: 만들면 안 된다 — 설명 문단에 이름을 한 번 언급했다는 이유로 목록에서 빠진 것이
+#: 통과한다(이 테스트를 처음 썼을 때 실제로 그 변이가 살아남았다).
+#: 그래서 `# 기대 …:` 바로 뒤에 **한 줄에 하나씩** 적힌 이름만 목록으로 본다.
+_EXPECT_BLOCK_RE = re.compile(
+    r"^# 기대 [^\n]*?\*\*(?P<count>\d+)건\*\*[^\n]*:\n"
+    r"(?P<body>(?:^#\s+listing_user_[A-Za-z0-9_]+\s*\n)+)", re.M)
+
+
+def test_절차서의_제약_확인_목록이_마이그레이션과_일치한다():
+    """★ CR35-5. 확인 목록이 **실제로 생기는 제약**과 같아야 한다.
+
+    §5-3b (4)는 016 적용 후 `pg_constraint` 를 조회해 눈으로 대조하라고 시킨다.
+    그 기대 목록에 `listing_user_floor_range` 가 빠져 "6건"이라 적혀 있었는데
+    실제로는 **7건**이 생긴다(2026-07-29 운영 실측). 운영자는 두 갈래로 실패한다 —
+    "7건이 나왔는데 6건이라니 뭐가 잘못됐나"로 멈추거나, 세어 보지 않고 넘어간다.
+    어느 쪽이든 **확인 절차가 확인이 아니게 된다.**
+
+    그래서 기대 목록을 문서에 손으로 적힌 숫자가 아니라 **마이그레이션 파일**에서
+    끌어온다. 제약이 늘거나 이름이 바뀌면 이 테스트가 먼저 깨진다.
+    """
+    md = _deploy_md()
+    sql_files = sorted((REPO_ROOT / "backend" / "migrations").glob("[0-9]*.sql"))
+    names: set[str] = set()
+    for p in sql_files:
+        names |= set(_USER_CHECK_RE.findall(p.read_text(encoding="utf-8")))
+    assert names, "마이그레이션에서 listing_user_* CHECK 제약을 찾지 못했습니다"
+
+    m = _EXPECT_BLOCK_RE.search(md)
+    assert m, ("DEPLOY.md §5-3b (4) 에서 제약 기대 목록 블록을 찾지 못했습니다 — "
+               "`# 기대 … **N건** …:` 다음에 한 줄에 하나씩 적어야 합니다.")
+    listed = set(re.findall(r"listing_user_[A-Za-z0-9_]+", m.group("body")))
+
+    assert listed == names, (
+        f"DEPLOY.md 확인 목록이 마이그레이션과 다릅니다. "
+        f"목록에 없음: {sorted(names - listed)} · 실재하지 않음: {sorted(listed - names)}. "
+        "목록대로 대조하면 실제 결과와 어긋나 확인이 무의미해집니다.")
+    # 개수도 함께 적는다 — 사람은 목록보다 숫자로 먼저 대조한다.
+    assert int(m.group("count")) == len(names), (
+        f"DEPLOY.md 가 제약을 {m.group('count')}건이라 적었지만 마이그레이션 기준은 "
+        f"{len(names)}건입니다: {sorted(names)}.")
 
 
 def test_절차서가_마이그레이션이_코드보다_먼저임을_명시한다():

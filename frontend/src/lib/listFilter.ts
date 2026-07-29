@@ -5,7 +5,7 @@
  * ------------------------------
  *  ① **조용히 사라지지 않는다.** 무엇을 몇 건 숨겼는지 항상 숫자로 돌려준다.
  *     화면은 그 숫자를 반드시 적는다("예산 초과 7건 숨김").
- *  ② **모름을 아님으로 접지 않는다.** 가격을 모르면 "예산 내"도 "예산 초과"도 아니고,
+ *  ② **모름을 아님으로 접지 않는다.** 예산 판정을 못 하면 "예산 내"도 "예산 초과"도 아니고,
  *     세대수를 모르면 "대단지 아님"이 아니다. 판정 불가는 판정 불가로 세어 돌려준다.
  *  ③ **순위를 다시 매기지 않는다.** 걸러내되 순서와 원본(rank)은 건드리지 않는다 —
  *     필터 결과에 1,2,3 을 새로 붙이면 그건 새 순위처럼 읽히는 거짓 정보다.
@@ -13,6 +13,12 @@
  * 계산 순서(중요): **예산 → 태그 개수 → 태그 필터**.
  * 칩의 개수는 "예산 필터가 걸린 뒤" 기준이어야 한다. 그러지 않으면 칩이 5라고 적혀
  * 있는데 눌러보면 2건이 나오는, 화면이 거짓말하는 상태가 된다.
+ *
+ * ⚠️ **이 모듈은 예산을 판정하지 않는다** (CR38-1). 판정(`BudgetVerdict`)은 호출부가
+ *    실어 준다. 예전에는 여기서 `가격 ≤ 예산` 을 계산했는데, 그 "예산"이 목록 전체에
+ *    **한 숫자**여서 지도처럼 면적이 섞인 목록에서 틀렸다 — 취득세 구간이 85㎡ 를
+ *    가로지르면 같은 가격이라도 단지마다 상한이 다르다(실측 차이 198만원).
+ *    누가 판정하는지는 목록마다 다르므로(지도 = 서버, 추천 = 화면) **입력으로 받는다.**
  */
 import { tagVerdict, TAG_DEFS, tagsOf, type TagFacts, type TagId } from "./tags";
 
@@ -24,12 +30,19 @@ function positive(v: number | null | undefined): v is number {
 }
 
 /**
- * 이 가격이 예산 안인가.
+ * **금액 하나**로 판정한다 — 서버가 판정을 주지 않는 목록에서만 쓴다.
  *
- * ⚠️ **가격 미상은 "예산 내"가 아니다.** 서버의 `over_budget` 은 가격을 모르면 false 를
- *    주는데(파이썬 `bool(max and price and price > max)`), 그걸 그대로 믿으면
- *    12억짜리일 수도 있는 단지가 "예산 내"로 둔갑한다. 그래서 여기서 다시 판정한다.
- *    예산 자체를 모를 때(자산 미입력)도 마찬가지로 판정하지 않는다.
+ * ⚠️ **가격 미상은 "예산 내"가 아니다.** 예산 자체를 모를 때(자산 미입력)도 마찬가지로
+ *    판정하지 않는다. 서버도 같은 규칙을 쓴다(api-spec §4 — `over_budget: null`).
+ *
+ * ⚠️ **지도·목록에는 쓰지 않는다** (CR38-1). 실구매 한도는 취득세 구간(85㎡) 때문에
+ *    **면적별로 다른 숫자**인데 이 함수는 하나만 받는다. 지도처럼 면적이 섞인 목록에
+ *    쓰면 120㎡ 단지의 배지가 84㎡ 한도로 서게 된다. 그런 목록은 항목마다 그 면적의
+ *    한도로 판정한 서버 값(`over_budget`)을 쓴다 — `lib/screenBudget.ts`.
+ *
+ *    지금 이 함수가 남아 있는 자리는 **AI 추천 목록** 하나다. 추천 응답에는 항목별
+ *    판정이 없고, 카드가 보여주는 금액(`est_price_krw`)도 지도와 다른 양이라
+ *    화면이 그 카드의 금액으로 판정하는 수밖에 없다(근거는 `lib/budgetStatus` 머리말).
  */
 export function budgetVerdict(
   priceKrw: number | null | undefined,
@@ -40,19 +53,22 @@ export function budgetVerdict(
   return priceKrw <= budgetKrw ? "within" : "over";
 }
 
-/** 필터에 넣을 항목 하나. 화면 타입(T)과 판정에 필요한 사실을 분리해 둔다. */
+/**
+ * 필터에 넣을 항목 하나. 화면 타입(T)과 판정에 필요한 사실을 분리해 둔다.
+ *
+ * `budget` 은 **이미 내려진 판정**이다(이 모듈은 판정하지 않는다 — 머리말).
+ * 지도·목록은 서버 `over_budget` 을 옮겨 담고(`lib/screenBudget.serverBudgetVerdict`),
+ * 추천은 화면이 `budgetVerdict(est_price_krw, …)` 로 만든다.
+ */
 export interface FilterSource<T> {
   item: T;
-  /** 비교에 쓸 가격(원). 모르면 null. */
-  priceKrw: number | null;
+  budget: BudgetVerdict;
   facts: TagFacts;
 }
 
 export interface FilterState {
   /** 예산 내만 보기. */
   budgetOnly: boolean;
-  /** 실효 예산(희망가 우선, 없으면 실구매 한도). 모르면 null → 판정 불가. */
-  budgetKrw: number | null;
   /** 고른 특성 칩. 2개 이상이면 **교집합**이다. */
   tags: TagId[];
   /** 판정 불가 항목을 함께 볼 것인가(기본 false — 확실한 것만 보여준다). */
@@ -87,15 +103,20 @@ export interface FilterOutcome<T> {
   entries: FilteredEntry<T>[];
   /** 필터 전 전체 건수. */
   total: number;
-  /** 예산 판정이 가능한가(예산을 알고 있는가). false 면 예산 토글은 켤 수 없다. */
+  /**
+   * 이 목록에서 예산 판정이 **실제로 하나라도 내려졌는가**. false 면 토글은 켤 수 없다.
+   *
+   * 입력이 아니라 판정 결과에서 센다 — 예산을 알아도 아무도 판정되지 않았으면(서버가
+   * 기준을 못 세웠거나 가격을 다 모르면) 토글을 켜 봐야 **빈 화면**만 나온다.
+   */
   budgetKnown: boolean;
   /** 전체 중 예산 초과 건수(토글 상태와 무관한 사실). */
   overBudget: number;
-  /** 전체 중 가격을 몰라 판정 불가인 건수. */
-  priceUnknown: number;
+  /** 전체 중 예산 판정을 못 한 건수(가격 미상·면적 미상·서버가 기준을 못 세움). */
+  budgetUnknown: number;
   /** 예산 토글이 **실제로 숨긴** 건수. */
   hiddenOverBudget: number;
-  hiddenPriceUnknown: number;
+  hiddenBudgetUnknown: number;
   chips: TagChip[];
   /** 고른 태그를 판정할 수 없어 빠진 건수. */
   hiddenTagUnknown: number;
@@ -128,19 +149,16 @@ export function filterList<T>(
   sources: FilterSource<T>[],
   state: FilterState,
 ): FilterOutcome<T> {
-  const budgetKnown = positive(state.budgetKrw);
   const selected = TAG_DEFS.filter((t) => state.tags.includes(t.id)).map((t) => t.id);
 
-  // ① 예산 — 판정은 항상 하고, 숨기는 건 토글이 켜졌을 때만.
-  const withBudget = sources.map((s) => ({
-    ...s,
-    budget: budgetVerdict(s.priceKrw, state.budgetKrw),
-  }));
+  // ① 예산 — 판정은 호출부가 실어 준다. 여기서는 세고, 토글이 켜졌을 때만 숨긴다.
+  const withBudget = sources;
 
   const overBudget = withBudget.filter((s) => s.budget === "over").length;
-  const priceUnknown = withBudget.filter((s) => s.budget === "unknown").length;
+  const budgetUnknown = withBudget.filter((s) => s.budget === "unknown").length;
+  /** 판정이 하나라도 있어야 토글이 할 일이 있다(없으면 켜 봐야 전부 사라진다). */
+  const budgetKnown = withBudget.length > budgetUnknown;
 
-  // 예산을 모르면 토글이 아무것도 못 한다 — 전부 숨겨서 빈 화면을 만들지 않는다.
   const budgetActive = state.budgetOnly && budgetKnown;
   const afterBudget = budgetActive
     ? withBudget.filter((s) => s.budget === "within")
@@ -197,9 +215,9 @@ export function filterList<T>(
     total: sources.length,
     budgetKnown,
     overBudget,
-    priceUnknown,
+    budgetUnknown,
     hiddenOverBudget: budgetActive ? overBudget : 0,
-    hiddenPriceUnknown: budgetActive ? priceUnknown : 0,
+    hiddenBudgetUnknown: budgetActive ? budgetUnknown : 0,
     chips,
     hiddenTagUnknown,
     shownTagUnknown,
@@ -234,22 +252,26 @@ export function missingFactLabels(chips: TagChip[]): string[] {
  */
 export function budgetNotice<T>(o: FilterOutcome<T>, budgetOnly: boolean): string | null {
   if (!o.budgetKnown) {
-    return "내 예산을 아직 계산하지 못해 예산 내 여부를 판정할 수 없습니다.";
+    // ⚠️ 사유를 여기서 단정하지 않는다. "예산을 아직 계산 못 했다"일 수도 있고
+    //    "서버가 이 목록을 판정하지 못했다"일 수도 있는데, 그 사유는 각각
+    //    `budgetStatusView`(지도)·추천 패널 머리글이 이미 말한다. 여기서 한 가지로
+    //    적으면 나머지 경우에 화면이 거짓말을 한다.
+    return "예산 판정이 된 항목이 없어 '예산 내'만 보기를 켤 수 없습니다.";
   }
 
   if (budgetOnly) {
     const parts: string[] = [];
     if (o.hiddenOverBudget > 0) parts.push(`예산 초과 ${o.hiddenOverBudget}건`);
-    if (o.hiddenPriceUnknown > 0) parts.push(`가격 미상 ${o.hiddenPriceUnknown}건`);
+    if (o.hiddenBudgetUnknown > 0) parts.push(`예산 판정 불가 ${o.hiddenBudgetUnknown}건`);
     if (parts.length === 0) return "예산을 넘는 항목이 없습니다 — 숨긴 항목 없음.";
     const tail =
-      o.hiddenPriceUnknown > 0 ? " — 가격을 모르는 항목은 예산 내로 치지 않습니다." : "";
+      o.hiddenBudgetUnknown > 0 ? " — 판정하지 못한 항목은 예산 내로 치지 않습니다." : "";
     return `${parts.join(" · ")} 숨김${tail}`;
   }
 
   const parts: string[] = [];
   if (o.overBudget > 0) parts.push(`예산 초과 ${o.overBudget}건`);
-  if (o.priceUnknown > 0) parts.push(`가격 미상 ${o.priceUnknown}건`);
+  if (o.budgetUnknown > 0) parts.push(`예산 판정 불가 ${o.budgetUnknown}건`);
   if (parts.length === 0) return null;
   return `${parts.join(" · ")}도 함께 보는 중`;
 }

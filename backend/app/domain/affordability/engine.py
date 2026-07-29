@@ -121,6 +121,49 @@ def dti_limit(borrower: Borrower, terms: LoanTerms, dti_pct: float) -> int:
 # 취득 부대비용
 # ---------------------------------------------------------------------------
 
+#: 취득세 규칙이 면적을 볼 때 쓰는 사실 이름. `engine` 이 `area=prop.area_m2` 로 넘긴다.
+_AREA_FACT = "area"
+
+
+def acquisition_area_class(rules: RuleSet, area_m2: float) -> tuple[Any, ...]:
+    """**세율이 같아지는 면적끼리 묶는 키.**
+
+    최대 구매가능 금액이 면적에 의존하는 경로는 취득세 하나뿐이다
+    (`acquisition_cost` 만 `prop.area_m2` 를 쓴다 — 대출 한도는 면적을 안 본다).
+    그리고 취득세 구간은 `when` 의 `area`·`area_max`·`area_min` 으로만 면적을 본다.
+    따라서 **모든 구간에서 같은 판정을 받는 두 면적**은 어떤 가격·주택수·규제
+    조합에서도 같은 구간이 잡히고, 한도도 같다.
+
+    쓰는 곳: 지도(`/map/complexes`)는 한 화면에서 최대 500단지의 한도를 **면적별로**
+    계산해야 한다. 면적마다 이분탐색을 새로 돌리면 실측 0.75ms × 500 = 375ms 로
+    지도 응답(SQL 125~157ms)보다 오래 걸린다. 이 키로 묶으면 운영 세율에서는
+    계산이 **2회**(85㎡ 이하 / 초과)로 줄어든다.
+
+    ⚠️ **모르면 묶지 않는다.** 다음 두 경우에는 면적 자체를 키에 넣어 캐시를 끈다 —
+       ① 누진 산식의 기준(`progressive.basis`)이 면적인 규칙이 있다(세율이 면적에
+          **연속으로** 달라져 구간 판정이 같아도 세율이 다르다),
+       ② `when` 에 우리가 모르는 면적 조건 문법(`area_*`)이 있다(로더가 문법을
+          늘리면 이 함수가 조용히 낡는다 — 낡은 채 묶는 것보다 안 묶는 게 낫다).
+    """
+    flags: list[Any] = []
+    unbucketable = False
+    for bracket in rules.acquisition_tax:
+        for key, expected in bracket.when.items():
+            if key == _AREA_FACT:
+                flags.append(area_m2 == expected)
+            elif key == f"{_AREA_FACT}_max":
+                flags.append(area_m2 <= expected)
+            elif key == f"{_AREA_FACT}_min":
+                flags.append(area_m2 >= expected)
+            elif key.startswith(_AREA_FACT):
+                unbucketable = True
+        if bracket.progressive is not None and bracket.progressive.basis == _AREA_FACT:
+            unbucketable = True
+    if unbucketable:
+        flags.append(("exact", area_m2))
+    return tuple(flags)
+
+
 def acquisition_cost(price_krw: int, rules: RuleSet, borrower: Borrower,
                      prop: PropertyFacts) -> CostBreakdown:
     """취득세 + 중개보수 + 등기·법무. 구간을 못 찾으면 추정하지 않고 예외를 던진다."""

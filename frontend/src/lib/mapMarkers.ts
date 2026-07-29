@@ -68,7 +68,10 @@ export function complexMarkerLabel(
   opts: { rank?: number; selected?: boolean } = {},
 ): string {
   const parts = [item.name, complexMarkerText(item)];
-  if (item.over_budget) parts.push("예산 초과");
+  // ⚠️ `=== true` — `over_budget` 은 3값이다(true·false·**null=판정 못 함**).
+  //    falsy 검사로 두면 "모른다"가 "예산 내"와 같은 취급이 되고, 나중에 "예산 내"
+  //    표시를 붙이는 날 모르는 단지에 그 표시가 달린다(api-spec §4).
+  if (item.over_budget === true) parts.push("예산 초과");
   if (opts.rank) parts.push(`추천 ${opts.rank}위`);
   if (opts.selected) parts.push("선택됨");
   return parts.join(" ");
@@ -362,7 +365,9 @@ export class MarkerLayer {
             (selected ? " map-pill--selected" : "") +
             (hovered && !selected ? " map-pill--hover" : "") +
             (rank ? " map-pill--rank" : "") +
-            (item.over_budget ? " map-pill--over" : "") +
+            // 3값이다 — 흐리게 죽이는 건 **확실히 초과일 때만**(모르는 단지를 흐리게
+            // 만들면 "못 사는 집"이라고 말해 버린다).
+            (item.over_budget === true ? " map-pill--over" : "") +
             (hasPrice ? "" : " map-pill--nodata") +
             (muted ? " map-pill--muted" : ""),
           ariaLabel: complexMarkerLabel(item, { rank, selected }),

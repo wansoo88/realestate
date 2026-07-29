@@ -27,9 +27,15 @@ interface Props {
   /** 필터를 걸었는데 판정할 수 없어 함께 보인 특성. "판정 불가"로 표시한다. */
   unknownTags?: TagId[];
   /**
-   * 예산 판정. 주면 이 값이 배지의 근거가 된다.
-   * 주지 않으면 서버의 `over_budget` 으로 폴백한다 — 다만 서버 값은 **가격을 모를 때도
-   * false** 라서(가격 미상 ≠ 예산 내), 목록에서는 항상 계산된 값을 넘긴다.
+   * 예산 판정. 주면 이 값이 배지의 근거가 된다(목록은 **항상** 넘긴다).
+   *
+   * ⚠️ 그 값은 **서버가 항목별로 내린 판정**을 옮긴 것이다(CR38-1 · `lib/budgetStatus`
+   *    머리말). 화면이 아는 한도는 하나뿐인데 실제 상한은 면적별로 다르기 때문이다 —
+   *    카드가 자기 가격으로 다시 판정하면 120㎡ 단지가 84㎡ 한도로 판정된다.
+   *
+   * 안 주면 서버의 `over_budget` 을 직접 읽되 **`=== true` 일 때만** 배지를 단다.
+   * 그 값은 3값이고(true·false·`null`=판정 못 함), `null` 을 falsy 로 흘려보내면
+   * "모른다"가 "예산 내"와 같은 취급이 된다(api-spec §4).
    */
   budget?: BudgetVerdict;
   onSelect?: (id: number) => void;
@@ -48,7 +54,7 @@ export function ComplexCard({
   onHover,
 }: Props) {
   const estimated = item.price_confidence === "estimated";
-  const overBudget = budget !== undefined ? budget === "over" : item.over_budget;
+  const overBudget = budget !== undefined ? budget === "over" : item.over_budget === true;
   const ref = useRef<HTMLButtonElement>(null);
 
   // 지도 마커로 선택되면 목록에서 해당 카드가 보이도록 스크롤한다(양방향 동기화, ux §3).
@@ -87,6 +93,14 @@ export function ComplexCard({
             <>
               {formatKrw(item.recent_price_krw)}
               {estimated && <span className="badge badge--estimated card__conf">추정</span>}
+              {/* **어느 면적의 체결가인가** (CR35-4).
+                  한 단지가 34~120㎡ 인데 면적을 말하지 않으면 사용자는 이 금액을 자기가
+                  보는 평형의 값으로 읽는다(실측: 서울 단지 절반이 조건 밖 면적, 평균 22.2%
+                  어긋남). 금액 **바로 옆**에 두는 이유는 이게 금액의 단위이기 때문이다.
+                  서버가 안 주면(구버전) 아무 말도 하지 않는다 — 모르는 걸 지어내지 않는다. */}
+              {item.price_area_m2 != null && (
+                <span className="card__pricearea">전용 {item.price_area_m2}㎡</span>
+              )}
             </>
           )}
         </p>

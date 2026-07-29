@@ -1,0 +1,237 @@
+/* 내 매물 — 사용자가 손으로 친 호가.
+   ⚠️ 이 화면의 금액은 **공공 데이터와 같은 모양으로 그리지 않는다.**
+      ComplexCard 의 금액은 굵은 검정(`--text`, 26px)이다. 여기는:
+        · 점선 왼쪽 테두리(색을 지워도 남는 단서)
+        · 캡션보다 한 칸 흐린 농도(--text-estimated 는 쓰지 않고 --text-secondary 로 두되
+          크기·굵기를 낮춘다 — '모른다'가 아니라 '내가 적은 값'이라 다른 축의 약함이다)
+        · 서버가 준 출처 배지가 **항상** 옆에 붙는다
+   색은 기존 토큰만 쓴다(tokens.contrast.test.ts 가 지키는 팔레트를 넓히지 않는다). */
+
+.mlist {
+  padding-bottom: var(--sp-6);
+}
+
+.mlist__back {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--touch-min);
+  margin-bottom: var(--sp-2);
+  padding: 0 var(--sp-2) 0 0;
+  color: var(--accent-text);
+  font-size: var(--fs-footnote);
+}
+
+.mlist__title {
+  margin: 0 0 var(--sp-2);
+  font-size: var(--fs-title);
+  font-weight: 600;
+}
+
+.mlist__notes {
+  margin: 0 0 var(--sp-2);
+  padding-left: var(--sp-4);
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.mlist__summary {
+  margin: 0 0 var(--sp-2);
+  font-size: var(--fs-footnote);
+  font-weight: 600;
+}
+
+.mlist__scope {
+  min-height: var(--touch-min);
+  margin-bottom: var(--sp-2);
+  padding: 0;
+  color: var(--accent-text);
+  font-size: var(--fs-caption);
+}
+
+.mlist__hint,
+.mlist__empty {
+  margin: var(--sp-2) 0;
+  padding: var(--sp-3);
+  border-radius: var(--r-card);
+  background: var(--bg-grouped);
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.mlist__loading {
+  margin: var(--sp-2) 0;
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+}
+
+.mlist__error {
+  margin: var(--sp-2) 0;
+  font-size: var(--fs-caption);
+  color: var(--danger-text);
+  line-height: 1.6;
+}
+
+/* 저장은 됐지만 알아야 하는 것들 — 경고 톤이되 소리치지 않는다 */
+.mlist__problems {
+  margin: var(--sp-2) 0;
+  padding: var(--sp-3);
+  border-radius: var(--r-card);
+  border-left: 3px solid var(--warn);
+  background: var(--bg-grouped);
+}
+
+.mlist__problems-head {
+  margin: 0 0 var(--sp-1);
+  font-size: var(--fs-caption);
+  font-weight: 600;
+  color: var(--warn-text);
+}
+
+.mlist__problems-list {
+  margin: 0;
+  padding-left: var(--sp-4);
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.mlist__items {
+  list-style: none;
+  margin: var(--sp-3) 0 0;
+  padding: 0;
+}
+
+/* 점선 = "이건 내가 적은 값". 색을 다 지워도 남는 단서다.
+   ⚠️ 배경을 깔지 않는다(투명 = 시트의 --material). 이 안에 `.badge` 가 들어가는데,
+      대비 회귀 테스트가 검증하는 표면은 `--bg`·`--material`·`--bg-grouped` 위의 조합이다.
+      카드에 별도 채움을 주면 검증되지 않은 실효 배경이 하나 더 생긴다. */
+.mlist__item {
+  margin-bottom: var(--sp-3);
+  padding: var(--sp-3);
+  border-radius: var(--r-card);
+  border: 1px dashed var(--hairline-strong);
+}
+
+/* 계산에서 빠진 항목은 테두리를 눌러 한 겹 물러나게 한다.
+   (글자를 흐리게 하지 않는다 — 제외됐다는 **정보**를 읽기 어렵게 만들면 안 된다) */
+.mlist__item--out {
+  border-color: var(--hairline);
+}
+
+.mlist__price {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  /* 공공 데이터 금액(--fs-price 26px · 검정 600)보다 작고 약하다 */
+  font-size: var(--fs-title);
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.mlist__source {
+  font-weight: 400;
+}
+
+.mlist__source--unknown {
+  color: var(--text-estimated);
+}
+
+.mlist__complex {
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-footnote);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.mlist__meta,
+.mlist__asof {
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+}
+
+.mlist__ppm {
+  color: var(--text-estimated);
+}
+
+.mlist__usage {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.mlist__usage--out {
+  color: var(--warn-text);
+}
+
+.mlist__usage-badge {
+  flex: none;
+}
+
+.mlist__note {
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-caption);
+  color: var(--text-estimated);
+}
+
+.mlist__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+}
+
+.mlist__act {
+  min-height: var(--touch-min);
+  padding: 0 var(--sp-3);
+  border-radius: var(--r-btn);
+  border: 0.5px solid var(--hairline);
+  color: var(--accent-text);
+  font-size: var(--fs-caption);
+}
+
+.mlist__act--danger {
+  color: var(--danger-text);
+}
+
+.mlist__statuswrap {
+  display: inline-flex;
+}
+
+.mlist__status {
+  min-height: var(--touch-min);
+  padding: 0 var(--sp-2);
+  border-radius: var(--r-btn);
+  border: 0.5px solid var(--hairline);
+  background: var(--bg);
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--fs-caption);
+}
+
+/* 삭제 확인 — 되돌릴 수 없는 조작이므로 대안(상태 변경)을 같은 자리에서 말한다 */
+.mlist__confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  padding: var(--sp-2);
+  border-radius: var(--r-btn);
+  background: var(--bg-grouped);
+}
+
+.mlist__confirm-text {
+  flex: 1 1 100%;
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+  line-height: 1.5;
+}

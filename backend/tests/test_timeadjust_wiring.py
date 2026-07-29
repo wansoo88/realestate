@@ -297,7 +297,10 @@ class _SeededRepo(_CountingRepo):
     def recommendation_candidates(self, **_kw):
         return [self._complex]
 
-    def listings_for_complex(self, _cid):
+    def listings_for_complex(self, _cid, user_id=None):
+        # ⚠️ `user_id` 를 받는 것이 계약이다(base.py · migrations/016). 스텁이 예전
+        #    시그니처로 남아 있으면 러너가 소유자를 넘기는 순간 TypeError 로 죽는다 —
+        #    isinstance(Protocol) 는 메서드 **존재**만 보지 인자를 보지 않는다.
         return []
 
     def trades_for_complex(self, _cid):

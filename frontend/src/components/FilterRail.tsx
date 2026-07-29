@@ -37,6 +37,13 @@ interface Props {
    * 아직 계산 전이면 null 이고, 그때는 숫자를 지어내지 않고 라벨만 남긴다.
    */
   maxPurchaseKrw?: number | null;
+  /**
+   * "내 매물"(직접 입력한 호가) 진입점. 여기 두는 이유는 "내 자금"과 같다 —
+   * 이것도 **내가 넣는 값**이고, 지도를 보는 내내 닿을 수 있어야 낡은 호가를
+   * 갱신하러 돌아올 수 있다(90일이 지나면 추천 계산에서 빠진다).
+   */
+  onOpenListings?: () => void;
+  listingsOpen?: boolean;
 }
 
 export function FilterRail({
@@ -46,6 +53,8 @@ export function FilterRail({
   onOpenMoney,
   moneyOpen,
   maxPurchaseKrw,
+  onOpenListings,
+  listingsOpen,
 }: Props) {
   return (
     <aside className="rail" aria-label="내 조건">
@@ -84,6 +93,20 @@ export function FilterRail({
               // 아직 모르는 값을 0 으로 그리지 않는다 — 계산 전이라는 사실만 조용히 남긴다
               <span className="rail__money-amount rail__money-amount--none">계산 전</span>
             )}
+          </button>
+        )}
+
+        {/* 내 매물 — 공공 데이터에 없는 **호가**가 들어오는 유일한 입구.
+            숫자를 붙이지 않는 이유: 몇 건인지는 열어 봐야 알고(요청을 미리 보내지 않는다),
+            모르는 값을 0 으로 그리면 "없다"는 거짓이 된다. */}
+        {onOpenListings && (
+          <button
+            type="button"
+            className={`rail__listings${listingsOpen ? " rail__listings--on" : ""}`}
+            aria-pressed={listingsOpen ?? false}
+            onClick={onOpenListings}
+          >
+            내 매물
           </button>
         )}
 

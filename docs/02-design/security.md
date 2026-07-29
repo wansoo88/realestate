@@ -177,6 +177,34 @@ SENSITIVE_FIELDS = {"cash_krw", "income_krw", "existing_loan_krw", "password",
 >   문장에 넣으면 그대로 되돌아간다. 검증기는 **값 대신 위치(`loc`·index)로 지목**하고,
 >   핸들러는 `msg` 길이에 상한(200자)을 둔다(SR25-2).
 
+> ### ⛔ **URL 은 네 번째 로그다** (3단계에서 발견 · SR32-1 · CWE-532)
+> 위 규칙은 **본문**을 지켰다. 그런데 정작 새 나간 것은 본문이 아니라 **쿼리스트링**이었다:
+>
+> ```
+> GET /api/v1/map/complexes?bbox=…&max_price_krw=1314310000
+>                                  └ /affordability 가 암호문을 복호화해 계산한 최대 구매가능액
+> ```
+>
+> 운영 nginx 로그에 **148줄**, 그중 101줄이 **0644(월드 리더블)** 이었고 같은 호스트의
+> 다른 서비스 계정으로 실제로 읽혔다. `SENSITIVE_FIELDS` 도, "본문 로그 금지"도 이 값을
+> 막지 못했다 — **이름이 `cash`·`income` 이 아니었고, 본문이 아니었기 때문이다.**
+>
+> 그래서 규칙을 세 줄 더한다.
+> 1. **개인·민감정보와 그 파생값을 URL 파라미터·쿼리스트링에 넣지 않는다.**
+>    파생값이 더 위험하다 — 원본이 아니라서 눈에 안 띄는데, 한도는 자산의 단조 함수라
+>    몇 건만 모여도 원본이 좁혀진다. 필요하면 **본문(POST)** 으로 보내거나,
+>    **인증된 경로에서는 아예 보내지 않고 서버가 저장된 프로필로 만든다**
+>    (`GET /map/complexes?budget=mine` — api-spec.md §4).
+> 2. **접근 로그의 쿼리 값은 기본이 '지운다'** 이다. 예전에는 민감 경로 목록
+>    (`SENSITIVE_PATHS`)에 실린 경로만 지웠는데, 목록은 새 엔드포인트가 생길 때마다
+>    사람이 기억해야 하고 **기억은 언젠가 빠진다**(이 사고가 바로 그것이다).
+>    지금은 경로와 **파라미터 이름만** 남긴다(`/map/complexes [q: bbox,budget,zoom]`).
+> 3. **싱크는 하나가 아니다.** 앱 미들웨어가 지운 줄을 uvicorn 이 한 줄 아래에 다시 쓰고,
+>    nginx 가 또 쓴다. 셋 다 막아야 막힌 것이다:
+>    ① 앱 미들웨어(`main.log_target`) ② `uvicorn.access` 필터
+>    (`masking.install_access_log_query_stripping`, `install_log_masking` 이 함께 건다)
+>    ③ nginx 전용 `log_format re_noquery`(`$request` 금지 · `$uri` 사용, **이 사이트 블록에만**).
+
 ### 3.4 백업 (T3)
 - `pg_dump` 결과물은 **암호화된 컬럼 상태 그대로** 저장됨 (앱단 암호화의 이점)
 - 백업 파일은 **웹 루트 밖** + 권한 `600`
@@ -282,6 +310,20 @@ Docker Compose에서도 `db`·`redis`에 `ports:`를 **쓰지 않는다**
 - [ ] `user_id` 조건 없는 사용자 자원 쿼리가 없는가
 - [ ] 자산 3종이 암호화되어 저장되는가 (평문 컬럼 0개)
 - [ ] `/me/profile`·`/affordability` 본문이 로그에서 제외되는가
+- [ ] **자산 금액과 그 파생값(`max_purchase_krw` 등)이 URL 쿼리에 실리는 곳이 없는가**
+      — GET 라우트의 쿼리 파라미터를 **전수로** 훑는다(SR32-1). 파생값은 이름에
+      `cash`·`income` 이 없어 눈에 띄지 않는다. 회귀 그물:
+      `backend/tests/test_api.py::test_모든_GET_쿼리_값은_로그에_남지_않는다`(앱 라우터를
+      순회해 카나리를 심는다 — ⚠️ SR33-5: 예전에 이 줄이 `test_access_log.py` 를 가리켰다.
+      문장과 코드가 어긋나면 다음 사람은 코드가 아니라 문장을 믿는다) ·
+      프론트 `src/test/urlPrivacy.test.tsx`
+- [ ] **접근 로그 세 싱크(앱·uvicorn·nginx)가 모두 쿼리를 지우는가**
+      — 하나만 막으면 나머지가 계속 쓴다. 코드 확인으로 끝내지 말고 **실제로 띄워서**
+      로그를 읽는다(`backend/tests/test_access_log.py::test_실제_uvicorn_접근로그에_…`).
+      ⚠️ 앱 계층은 **운영에서 INFO 가 출력되지 않는다**(root 핸들러 0개 · `lastResort`
+      임계 WARNING — SR33-3). 실제로 도는 싱크는 uvicorn·nginx 둘이고, 앱 로거에서
+      나가는 줄은 500 핸들러의 ERROR 다 → 그 줄도 `log_target` 을 쓴다(SR33-1,
+      회귀 그물 `test_api.py::test_500_이_나도_쿼리_값은_로그에_남지_않는다`)
 - [ ] Claude API 프롬프트에 원본 금액이 포함되지 않는가
 - [ ] 원시 SQL 문자열 조합이 없는가
 - [ ] `docker-compose.yml`의 `db`·`redis`에 `ports:`가 없는가

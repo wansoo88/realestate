@@ -28,19 +28,33 @@ import { ConditionsScreen } from "./components/ConditionsScreen";
 import { FilterRail } from "./components/FilterRail";
 import { MapView } from "./components/MapView";
 import { RecommendPanel } from "./components/RecommendPanel";
+import { MyListingsScreen } from "./components/MyListingsScreen";
 import { useAdminUsers } from "./hooks/useAdminUsers";
-import { useAffordability, type AffordabilityState, type Purpose } from "./hooks/useAffordability";
+import {
+  useAffordability,
+  type AffordabilityState,
+  type PlanTarget,
+} from "./hooks/useAffordability";
 import { useAuth } from "./hooks/useAuth";
 import { useMapArea } from "./hooks/useMapArea";
+import { useMyListings } from "./hooks/useMyListings";
 import { useProfile } from "./hooks/useProfile";
 import { useRecommendation } from "./hooks/useRecommendation";
 import { useTagFilter } from "./hooks/useTagFilter";
-import { readTargetPrice } from "./lib/affordability";
+import { planArea, readTargetPrice, type PlanArea } from "./lib/affordability";
+import { budgetStatusView } from "./lib/budgetStatus";
 import { SORT_OPTIONS, isSortKey, sortComplexes, type SortKey } from "./lib/complexSort";
 import { formatKrwShort } from "./lib/format";
 import { filterList } from "./lib/listFilter";
-import { effectiveBudgetKrw, filterChips, type MapFilterState } from "./lib/mapFilters";
+import {
+  budgetRequested,
+  displayBudget,
+  filterChips,
+  type MapFilterState,
+} from "./lib/mapFilters";
+import { applyScreenBudget, serverBudgetVerdict } from "./lib/screenBudget";
 import { NOTICE_NOT_ADVICE, NOTICE_TRADE_DELAY } from "./lib/notices";
+import { DEFAULT_PURPOSE } from "./lib/purpose";
 import { conditionFields, conditionPlan, type ConditionPlan } from "./lib/recommendConditions";
 import { appliedScope, scopeFields, type SearchScope } from "./lib/searchScope";
 import { complexTagFacts } from "./lib/tags";
@@ -59,8 +73,18 @@ const TABS: Array<{ id: Tab; label: string }> = [
   { id: "advice", label: "AI 추천" },
 ];
 
-/** 실거주 기준 고정. 투자 목적(`invest`)은 세율·한도가 달라 별도 화면이 필요하다(2차). */
-const PURPOSE: Purpose = "live";
+/**
+ * 이 화면이 쓰는 한도 산정 가정. **정의는 `lib/purpose.ts` 한 곳**에 있다.
+ *
+ * 여기서 다시 `"live"` 라고 적지 않는 이유: 이 값은 `/affordability`(자금계획),
+ * `/recommendations`(추천), `/map/complexes`(지도 배지) **세 곳으로 동시에** 나가는데,
+ * 목적에 따라 대출 절대한도·스트레스 가산이 **달라질 수 있다.** 리터럴을 여러 번 적으면
+ * 투자 모드를 켜는 날 한 곳이 남고, 그 화면만 다른 한도로 조용히 계산한다.
+ *
+ * ⚠️ 오늘은 두 목적의 한도가 **같다** (CR38-4) — 운영 데이터에 `purpose` 조건 규칙이
+ *    0개다. 그래도 배선을 지금 갖춰 두는 이유는 `lib/purpose.ts` 머리말에 있다.
+ */
+const PURPOSE = DEFAULT_PURPOSE;
 
 interface HomeProps {
   preferences: Preferences;
@@ -76,10 +100,26 @@ interface HomeProps {
   /** 조건에 저장된 희망 매매가(원). null = 정하지 않음 — **0 과 다르다**. */
   targetPriceKrw: number | null;
   /**
-   * 지금 고른 단지의 가격을 위로 올린다(자금계획의 what-if 기준).
-   * 숫자만 올리는 이유: 훅의 의존성이 객체 정체성이면 지도 재조회마다 요청이 새로 나간다.
+   * 지금 고른 단지를 위로 올린다(자금계획의 what-if 기준).
+   *
+   * ⚠️ **금액이 아니라 단지 id 를 올린다**(CR35-4). 지도의 `recent_price_krw` 는 "최근 체결
+   *    1건"이고 추천 카드는 "창 중위를 기준월로 환산한 추정가"다 — 화면이 지도 값을 실어
+   *    보내면 같은 단지의 자금계획과 추천 카드가 다른 금액으로 선다(부족액 최대 −3.19억).
+   *    금액은 서버가 **추천과 같은 함수**로 정한다.
    */
-  onPlanTargetChange: (krw: number | null) => void;
+  onPlanComplexChange: (basis: PlanComplex | null) => void;
+}
+
+/** 자금계획을 세울 단지. 금액은 없다 — 서버가 정한다. */
+export interface PlanComplex {
+  id: number;
+  name: string;
+  /** 어느 면적으로 물어볼 것인가 + 그 면적을 **왜 골랐는지**(화면이 말해야 한다). */
+  area: PlanArea;
+  /** 지도가 말한 기준일(추정 표기용). */
+  asOf: string | null;
+  /** 지도에 시세가 아예 없었는가 — 서버가 기준가를 못 만들 때 문장이 갈린다. */
+  noMapPrice: boolean;
 }
 
 export function Home({
@@ -88,11 +128,20 @@ export function Home({
   adminEntry,
   afford,
   targetPriceKrw,
-  onPlanTargetChange,
+  onPlanComplexChange,
 }: HomeProps) {
   const [tab, setTab] = useState<Tab>("map");
   /** 자금계획 화면을 띄웠는가. 탭이 아니라 **내 조건에서 열고 닫는 화면**이다. */
   const [moneyOpen, setMoneyOpen] = useState(false);
+  /**
+   * 내 매물(직접 입력한 호가) 화면. 자금 화면과 같은 규칙으로 열고 닫는다.
+   * `listingComplex` 가 있으면 그 단지로 좁혀서 열린다 — 단지 없이 열면 목록만 본다
+   * (단지를 모르는 호가는 어디에도 붙일 수 없어 입력 폼을 열지 않는다).
+   */
+  const [listingsOpen, setListingsOpen] = useState(false);
+  const [listingComplex, setListingComplex] = useState<{ id: number; name: string } | null>(
+    null,
+  );
   const [snap, setSnap] = useState<SnapPoint>("peek");
   const [selected, setSelected] = useState<number | null>(null);
   /** 목록에서 가리키는 중인 단지 — 지도 마커를 들어올린다(선택과 다르다: 지도를 움직이지 않는다). */
@@ -135,12 +184,17 @@ export function Home({
       targetPriceKrw,
       prefer: preferences.prefer ?? null,
       preferApplied,
+      // 지도도 자금계획과 **같은 가정**으로 물어본다. 안 보내면 서버가 live 로 계산하는데
+      // 자금 패널이 invest 로 계산하고 있으면 같은 단지가 "지도: 초과 / 자금: 가능"이 된다.
+      purpose: PURPOSE,
     }),
     [budgetKrw, budgetApplied, targetPriceKrw, preferences.prefer, preferApplied],
   );
 
   const map = useMapArea(filters);
   const rec = useRecommendation();
+  /** 화면을 열었을 때만 조회한다 — 지도만 보는 사용자에게 매 로딩마다 요청을 하나 더 얹지 않는다. */
+  const listings = useMyListings(listingsOpen, listingComplex?.id ?? null);
 
   // 추천 순위를 지도 마커에 얹는다 — 리스트와 지도가 같은 사실을 말하게.
   const rankById = useMemo(() => {
@@ -151,34 +205,87 @@ export function Home({
     return out;
   }, [rec.job]);
 
+  /**
+   * 화면이 "지금 무엇을 기준으로 삼고 있다고 말하는가". **판정에는 쓰지 않는다**(CR38-1).
+   *
+   * ⚠️ `displayBudget` 이다(`effectiveBudget` 이 아니다). **예산 칩을 끄면 `null`** 이 되어
+   *    칩 문구·추천 목록의 초과 집계가 함께 사라진다(CR37-7: 예전엔 켜도 꺼도 똑같았다).
+   *
+   * 이 값의 쓰임은 셋뿐이다:
+   *   ① `basis` — 서버가 말한 기준과 대조(`budgetStatusView.basisMismatch`).
+   *   ② `krw`   — **AI 추천 목록**의 예산 판정. 그쪽은 서버가 항목별 판정을 주지 않는다.
+   *   ③ 칩이 꺼졌는지(`budgetDisplayOff`) — "모른다"와 "껐다"를 구분해 말하려고.
+   * 지도·목록 배지는 여기서 오지 않는다 — 서버가 항목마다 그 면적의 한도로 판정한다.
+   */
+  const listBudget = useMemo(() => displayBudget(filters), [filters]);
+  const listBudgetKrw = listBudget.krw;
+  /** 초과 표시가 지금 꺼져 있는가 — "예산을 모른다"와 **다른 사실**이라 따로 들고 다닌다. */
+  const budgetDisplayOff = !budgetApplied;
+
+  /**
+   * 지도·목록이 **함께 쓰는** 항목. 예산 판정은 서버가 항목마다 그 항목 면적의 한도로
+   * 내린 값(`over_budget`)이고, 화면은 예산 칩이 꺼져 있으면 그걸 비우기만 한다.
+   *
+   * 왜 화면이 다시 판정하지 않나 (CR38-1)
+   * -------------------------------------
+   * 실구매 한도는 취득세 구간(85㎡) 때문에 **면적별로 다른 숫자**다. 화면이 아는 숫자는
+   * `/affordability` 가 준 하나뿐이고(선택 단지 면적, 없으면 84㎡), 그 하나로 지도 전체를
+   * 판정하면 120㎡ 단지의 배지가 84㎡ 한도로 선다. 리뷰가 세 상태(단지 미선택 · 85㎡
+   * 이하 선택 · 85㎡ 초과 선택) 전부에서 서버와 2건씩 갈리는 것을 재현했다.
+   *
+   * ⚠️ 판정 불가는 **`null` 로 남긴다**(false 로 접지 않는다). 그 접힘은 화면에 흔적이
+   *    남지 않으므로(배지는 `=== true` 일 때만 붙는다) 여기서 손으로 만들지 않고
+   *    `applyScreenBudget` 하나만 쓴다 — `MapView` 는 그 함수가 만든 브랜드 타입
+   *    (`ScreenComplexItem`)만 받으므로 인라인으로 우회하면 tsc 가 죽는다.
+   */
+  const mapItems = useMemo(
+    () => applyScreenBudget(map.items, budgetApplied),
+    [map.items, budgetApplied],
+  );
+
   /** 목록에 실제로 그릴 순서. 지도 범위 안에서만 도는 클라이언트 정렬이다(서버 계약에 정렬이 없다). */
   const listItems = useMemo(
-    () => sortComplexes(map.items, sort, rankById),
-    [map.items, sort, rankById],
+    () => sortComplexes(mapItems, sort, rankById),
+    [mapItems, sort, rankById],
   );
 
   /**
    * 예산·특성 필터를 적용한 결과. **정렬 뒤에** 건다 — 순서를 바꾸지 않고 걸러내기만 한다.
-   * 예산 기준은 지도 조회에 쓴 값과 **같은 숫자**(희망가 우선, 없으면 한도)여야
-   * "지도엔 있는데 목록엔 없는 단지"가 생기지 않는다.
+   *
+   * 판정은 마커와 **같은 값**을 쓴다(`over_budget` → `serverBudgetVerdict`). 목록과 지도는
+   * 같은 응답을 그리는 두 화면이라, 여기서 다른 규칙을 쓰면 같은 단지가 카드에서는
+   * "예산 초과", 마커에서는 아무 표시 없이 서게 된다.
    */
-  const listBudgetKrw = effectiveBudgetKrw(filters);
   const mapOutcome = useMemo(
     () =>
       filterList(
         listItems.map((item) => ({
           item,
-          priceKrw: item.recent_price_krw,
+          budget: serverBudgetVerdict(item.over_budget),
           facts: complexTagFacts(item),
         })),
         {
           budgetOnly,
-          budgetKrw: listBudgetKrw,
           tags: mapTags.tags,
           includeUnknownTag: mapTags.includeUnknown,
         },
       ),
-    [listItems, budgetOnly, listBudgetKrw, mapTags.tags, mapTags.includeUnknown],
+    [listItems, budgetOnly, mapTags.tags, mapTags.includeUnknown],
+  );
+
+  /**
+   * 서버가 말한 예산 기준(`budget` 블록) → 화면 문장.
+   * 켰는데 `applied:false` 로 오면 **사유를 그대로 보여준다** — 아무 일도 안 일어난 것처럼
+   * 보이면 사용자는 조건이 걸린 줄 알고 예산 밖 단지를 본다.
+   */
+  const budgetStatus = useMemo(
+    () =>
+      budgetStatusView({
+        budget: map.budget,
+        requested: budgetRequested(filters),
+        screenBasis: listBudget.basis,
+      }),
+    [map.budget, filters, listBudget.basis],
   );
 
   const onBoundsChange = useCallback(
@@ -198,14 +305,28 @@ export function Home({
   const showOnMap = useCallback((id: number) => {
     setTab("map");
     setMoneyOpen(false); // 지도를 보러 가는데 자금 화면이 덮고 있으면 안 된다
+    setListingsOpen(false);
     setSelected(id);
     setSnap("half");
   }, []);
 
   const openMoney = useCallback(() => {
     setMoneyOpen(true);
+    setListingsOpen(false);
     // 폰에서는 시트가 접혀 있을 수 있다 — 열었는데 안 보이면 아무 일도 안 일어난 것처럼 읽힌다.
     setSnap((s) => (s === "peek" ? "half" : s));
+  }, []);
+
+  /**
+   * 내 매물 열기. **단지를 함께 받으면** 그 단지의 호가 입력 폼이 바로 열린다 —
+   * 추천 결과가 "'내 매물'에서 직접 입력하시면 가격 축이 반영됩니다"라고 말하는 그 자리로
+   * 곧장 데려가는 길이다(CR35-2: 예전에는 그 안내만 있고 화면이 없었다).
+   */
+  const openListings = useCallback((complex: { id: number; name: string } | null) => {
+    setListingComplex(complex);
+    setListingsOpen(true);
+    setMoneyOpen(false);
+    setSnap((s) => (s === "peek" ? "full" : s));
   }, []);
 
   const startRecommendation = useCallback(() => {
@@ -240,56 +361,100 @@ export function Home({
     else setPreferApplied((v) => !v);
   }, []);
 
-  /* ── 단지 기준 자금계획 ─────────────────────────────────────────────────
-     지도·목록에서 고른 단지의 가격으로 "이 집을 사려면 뭐가 필요한가"를 계산한다.
-     그 값은 `recent_price_krw` = **최근 실거래 기반 추정치**지 호가가 아니다 —
-     `price_confidence` 를 그대로 물려 화면이 추정임을 말한다. */
+  /* ── 단지 기준 자금계획 (CR35-4) ────────────────────────────────────────
+     지도·목록에서 고른 단지로 "이 집을 사려면 뭐가 필요한가"를 계산한다.
+
+     ⚠️ **금액을 보내지 않는다.** 예전에는 지도의 `recent_price_krw`(최근 체결 1건)를
+        그대로 `/affordability` 에 실어 보냈는데, 추천 카드는 같은 단지를 "창 중위를
+        기준월로 환산한 추정가"로 말한다. 두 화면이 다른 금액으로 서면 사용자는 어느 쪽이
+        맞는지 알 길이 없다(실측 부족액 차이 최대 3.19억). 이제 `complex_id`+`area_m2` 만
+        보내고 **금액은 서버가 추천과 같은 함수로** 정한다. */
   const planComplex = useMemo(
     () => map.items.find((c) => c.id === selected) ?? null,
     [map.items, selected],
   );
-  const planComplexPrice = planComplex?.recent_price_krw ?? null;
 
-  // 숫자만 위로 올린다. 지도를 다시 조회하면 같은 단지라도 객체가 새로 오는데,
-  // 객체를 올리면 가격이 그대로여도 요청이 한 번 더 나간다.
+  /** 어느 면적으로 물어볼 것인가 — 그리고 그 면적을 왜 골랐는지(화면이 말한다). */
+  const planAreaChoice = useMemo(
+    () =>
+      planComplex
+        ? planArea({
+            priceAreaM2: planComplex.price_area_m2,
+            areaMinM2: preferences.prefer?.area_min_m2,
+            areaMaxM2: preferences.prefer?.area_max_m2,
+          })
+        : null,
+    [planComplex, preferences.prefer?.area_min_m2, preferences.prefer?.area_max_m2],
+  );
+
+  /**
+   * 위로 올릴 값은 **원시값으로 만든 키**로 비교한다. 지도를 다시 조회하면 같은 단지라도
+   * 객체가 새로 오는데, 객체 정체성으로 비교하면 조회 때마다 자금계산이 한 번 더 나간다.
+   */
+  const planKey =
+    planComplex && planAreaChoice
+      ? `${planComplex.id}|${planAreaChoice.m2}|${planAreaChoice.basis}|${planComplex.name}|${planComplex.price_as_of ?? ""}|${planComplex.recent_price_krw === null ? "nomap" : "map"}`
+      : null;
+
   useEffect(() => {
-    onPlanTargetChange(planComplexPrice);
-    return () => onPlanTargetChange(null);
-  }, [planComplexPrice, onPlanTargetChange]);
+    if (!planKey || !planComplex || !planAreaChoice) {
+      onPlanComplexChange(null);
+      return;
+    }
+    onPlanComplexChange({
+      id: planComplex.id,
+      name: planComplex.name,
+      area: planAreaChoice,
+      asOf: planComplex.price_as_of,
+      noMapPrice: planComplex.recent_price_krw === null,
+    });
+    return () => onPlanComplexChange(null);
+    // planComplex·planAreaChoice 는 키가 같으면 내용도 같다(위 주석).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [planKey, onPlanComplexChange]);
 
-  const planBasis: PlanBasis | null =
-    planComplex && planComplexPrice !== null
-      ? {
-          kind: "complex",
-          name: planComplex.name,
-          // `/map/complexes` 는 확정가를 주지 않는다 — `price_confidence` 는 `estimated`
-          // 아니면 `unknown` 뿐이다(api-spec §4). 둘 다 "지금 살 수 있는 호가"가 아니므로
-          // 추정으로 표기한다. 모르는 쪽을 확정으로 올리는 일은 하지 않는다.
-          estimated: true,
-          asOf: planComplex.price_as_of,
-        }
-      : targetPriceKrw !== null
-        ? { kind: "manual" }
-        : null;
+  const planBasis: PlanBasis | null = planComplex
+    ? {
+        kind: "complex",
+        name: planComplex.name,
+        // `/map/complexes` 도 `/affordability` 도 확정가를 주지 않는다 — 실거래에서
+        // 유도한 값이다. 모르는 쪽을 확정으로 올리는 일은 하지 않는다.
+        estimated: true,
+        asOf: planComplex.price_as_of,
+      }
+    : targetPriceKrw !== null
+      ? { kind: "manual" }
+      : null;
 
-  /** 고른 단지에 시세 근거가 없으면 그 사실을 말한다(내 희망가 계획으로 조용히 되돌아가지 않게). */
+  /**
+   * 지도에 시세가 없는 단지 — **그래도 서버에는 물어본다**(실거래는 있는데 최근 1건이
+   * 조건 밖일 수 있다). 서버까지 기준가를 못 만들면 그 사유는 자금계획 화면이 말한다.
+   * 여기서는 서버가 계획을 만들어 주지 못했을 때만(구버전 응답 포함) 안내를 남긴다.
+   */
   const planComplexNoPrice =
-    planComplex && planComplexPrice === null ? planComplex.name : null;
+    planComplex &&
+    planComplex.recent_price_krw === null &&
+    !afford.data?.target_price &&
+    !afford.data?.plan
+      ? planComplex.name
+      : null;
 
   const clearPlanComplex = useCallback(() => setSelected(null), []);
 
   const title = moneyOpen
     ? "내 자금"
-    : tab === "map"
-      ? map.level === "cluster"
-        ? `지역 ${map.clusters.length}곳`
-        : `단지 ${map.items.length}건`
-      : "AI 추천";
+    : listingsOpen
+      ? "내 매물"
+      : tab === "map"
+        ? map.level === "cluster"
+          ? `지역 ${map.clusters.length}곳`
+          : `단지 ${map.items.length}건`
+        : "AI 추천";
 
   /* 정렬은 목록 바로 위에 둔다. 네이티브 select 를 쓰는 이유: 키보드·스크린리더·모바일
      기본 피커가 전부 공짜로 따라오고, 직접 만든 드롭다운은 그 셋을 대개 못 만든다. */
   const sortControl =
-    !moneyOpen && tab === "map" && map.level === "complex" && listItems.length > 0 ? (
+    !moneyOpen && !listingsOpen && tab === "map" && map.level === "complex" && listItems.length > 0 ? (
       <label className="app__sort">
         <span className="sr-only">목록 정렬</span>
         <select
@@ -319,11 +484,16 @@ export function Home({
         onOpenMoney={openMoney}
         moneyOpen={moneyOpen}
         maxPurchaseKrw={afford.data?.max_purchase_krw ?? null}
+        // 내 매물도 여기서 연다 — 조건과 같은 성격(내가 넣는 값)이고, 지도를 보는 내내
+        // 접근할 수 있어야 낡은 호가를 갱신하러 돌아올 수 있다.
+        onOpenListings={() => openListings(null)}
+        listingsOpen={listingsOpen}
       />
 
       <MapView
         onBoundsChange={onBoundsChange}
-        items={map.items}
+        // 마커의 예산 판정은 서버가 항목별로 내린 값이다(위 mapItems 주석) — 목록 카드와 같은 값.
+        items={mapItems}
         clusters={map.clusters}
         selectedId={selected}
         hoveredId={hovered}
@@ -352,8 +522,17 @@ export function Home({
               noPriceComplexName={planComplexNoPrice}
               onClearComplex={clearPlanComplex}
               targetPriceKrw={targetPriceKrw}
+              // 기준가는 면적별 값이다 — 어느 면적으로 물었는지 화면이 말한다(CR35-4).
+              planArea={planBasis?.kind === "complex" ? planAreaChoice : null}
             />
           </div>
+        ) : listingsOpen ? (
+          <MyListingsScreen
+            listings={listings}
+            complex={listingComplex}
+            onClearComplex={listingComplex ? () => setListingComplex(null) : undefined}
+            onClose={() => setListingsOpen(false)}
+          />
         ) : (
           <>
             <div className="app__tabs" role="tablist" aria-label="화면 전환">
@@ -381,6 +560,16 @@ export function Home({
                   {map.error && (
                     <p className="app__error" role="alert">
                       {map.error}
+                    </p>
+                  )}
+
+                  {/* 예산 기준이 **걸리지 않았거나 다른 기준으로 걸렸을 때** 말한다.
+                      군집·단지 어느 단계에서도 보이도록 분기 위에 둔다(줌아웃했다고
+                      조건이 사라진 것처럼 보이면 안 된다 — 서버도 군집 응답에 이 블록을
+                      싣는 이유가 그것이다). 문자열은 서버가 준 사유를 손질만 해서 쓴다. */}
+                  {budgetStatus.notice && (
+                    <p className="app__budgetnote" role="status">
+                      {budgetStatus.notice}
                     </p>
                   )}
                   {map.loading && <p className="app__status">불러오는 중…</p>}
@@ -425,6 +614,8 @@ export function Home({
                           onClearTags={mapTags.clear}
                           includeUnknownTag={mapTags.includeUnknown}
                           onIncludeUnknownChange={mapTags.setIncludeUnknown}
+                          // 칩을 껐을 때 "예산을 못 구했다"가 아니라 "표시를 껐다"고 말한다
+                          budgetDisplayOff={budgetDisplayOff}
                         />
                       )}
                       {/* 필터로 0건이 됐으면 "없다"가 아니라 "걸러졌다"고 말한다 */}
@@ -439,6 +630,19 @@ export function Home({
                       {planComplex && (
                         <button type="button" className="app__planjump" onClick={openMoney}>
                           {planComplex.name} 자금계획 보기
+                        </button>
+                      )}
+                      {/* 호가는 공공 데이터에 없다 — 사용자가 직접 본 값을 넣는 유일한 입구.
+                          자금계획 바로 옆에 두는 이유: 단지를 고른 그 순간이 호가를 봤을 때다. */}
+                      {planComplex && (
+                        <button
+                          type="button"
+                          className="app__planjump"
+                          onClick={() =>
+                            openListings({ id: planComplex.id, name: planComplex.name })
+                          }
+                        >
+                          {planComplex.name} 호가 입력
                         </button>
                       )}
                       {mapOutcome.entries.map((entry) => (
@@ -466,7 +670,10 @@ export function Home({
                   error={rec.error}
                   budgetKrw={budgetKrw}
                   // 목록 필터가 쓰는 예산은 지도와 **같은 숫자**여야 한다(희망가 우선).
+                  // 예산 칩을 끄면 여기도 null 이 되어 추천 목록의 초과 표시도 함께 꺼진다 —
+                  // 한 화면에서 지도는 안 붙는데 추천만 배지가 붙으면 그게 더 헷갈린다.
                   listBudgetKrw={listBudgetKrw}
+                  budgetDisplayOff={budgetDisplayOff}
                   budgetOnly={budgetOnly}
                   onBudgetOnlyChange={setBudgetOnly}
                   regionCodes={regionCodes}
@@ -484,6 +691,9 @@ export function Home({
                   onCancel={rec.cancel}
                   onShowOnMap={showOnMap}
                   onEditConditions={onEditConditions}
+                  // 결과가 "'내 매물'에서 직접 입력하시면 가격 축이 반영됩니다"라고 말하는
+                  // 바로 그 자리에서 그 화면으로 간다(CR35-2).
+                  onAddListing={openListings}
                 />
               )}
             </div>
@@ -525,19 +735,29 @@ export function Authenticated() {
    */
   const targetPriceKrw = readTargetPrice(preferences.prefer);
 
-  /** 지도에서 고른 단지의 가격(what-if). 있으면 자금계획은 이쪽을 기준으로 선다. */
-  const [complexTargetKrw, setComplexTargetKrw] = useState<number | null>(null);
+  /**
+   * 지도에서 고른 단지(what-if). 있으면 자금계획은 이쪽을 기준으로 선다.
+   * **금액이 아니라 단지**다 — 금액은 서버가 추천과 같은 함수로 정한다(CR35-4).
+   */
+  const [planComplex, setPlanComplex] = useState<PlanComplex | null>(null);
+
+  /** 이번 요청의 기준. 단지가 이기고, 없으면 내가 정한 희망가, 그것도 없으면 한도만 본다. */
+  const planTarget: PlanTarget | null = useMemo(
+    () =>
+      planComplex
+        ? { kind: "complex", complexId: planComplex.id, areaM2: planComplex.area.m2 }
+        : targetPriceKrw !== null
+          ? { kind: "target", krw: targetPriceKrw }
+          : null,
+    [planComplex, targetPriceKrw],
+  );
 
   /**
    * 자산이 없으면 계산 자체가 성립하지 않으므로 요청하지 않는다(422 를 일부러 받지 않는다).
    * 조건 화면(희망가 슬라이더 범위)도 이 결과의 `max_purchase_krw` 를 쓰기 때문에
    * 훅이 여기 있어야 한다 — Home 안에 있으면 조건 화면이 한도를 볼 수 없다.
    */
-  const afford = useAffordability(
-    status === "ready",
-    PURPOSE,
-    complexTargetKrw ?? targetPriceKrw,
-  );
+  const afford = useAffordability(status === "ready", PURPOSE, planTarget);
   const maxPurchaseKrw = afford.data?.max_purchase_krw ?? null;
 
   // 관리자인지는 **서버만 안다** — 이 훅이 /admin/users 를 한 번 물어보고,
@@ -627,7 +847,7 @@ export function Authenticated() {
       adminEntry={adminEntry}
       afford={afford}
       targetPriceKrw={targetPriceKrw}
-      onPlanTargetChange={setComplexTargetKrw}
+      onPlanComplexChange={setPlanComplex}
     />
   );
 }

@@ -1,0 +1,132 @@
+/* 호가 입력 폼 — 한 손 조작 기준.
+   · 세로 한 줄 배치(폰에서 가로 2열은 엄지로 못 짚는다). 층·동만 짧아서 2열.
+   · 모든 입력 44px 이상, 제출 버튼은 맨 아래 full-width.
+   · 색은 기존 토큰만 쓴다(tokens.contrast.test.ts 가 지키는 팔레트를 넓히지 않는다). */
+
+.lform {
+  margin: var(--sp-2) 0 var(--sp-4);
+  padding: var(--sp-3);
+  border-radius: var(--r-card);
+  background: var(--bg-elev);
+  border: 0.5px solid var(--hairline);
+}
+
+.lform__title {
+  margin: 0 0 var(--sp-1);
+  font-size: var(--fs-footnote);
+  font-weight: 600;
+}
+
+.lform__complex {
+  margin: 0 0 var(--sp-2);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.lform__complex-name {
+  font-size: var(--fs-body);
+  font-weight: 600;
+}
+
+/* 이 값이 무엇인지 — 캡션 농도. 금액보다 튀지 않는다. */
+.lform__complex-what {
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.lform__row {
+  padding: var(--sp-3) 0;
+  border-bottom: 0.5px solid var(--hairline);
+}
+
+.lform__row--split {
+  display: flex;
+  gap: var(--sp-3);
+}
+
+.lform__col {
+  flex: 1;
+  min-width: 0;
+}
+
+.lform__label {
+  display: block;
+  margin-bottom: var(--sp-1);
+  font-size: var(--fs-footnote);
+  color: var(--text-secondary);
+}
+
+.lform__opt {
+  font-size: var(--fs-caption);
+  color: var(--text-estimated);
+}
+
+.lform__input {
+  width: 100%;
+  min-height: var(--touch-min);
+  padding: 0 var(--sp-2);
+  border: 0.5px solid var(--hairline-strong);
+  border-radius: var(--r-btn);
+  background: var(--bg);
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--fs-body);
+}
+
+.lform__input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.lform__hint {
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.lform__error {
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-caption);
+  color: var(--danger-text);
+  line-height: 1.5;
+}
+
+/* 되읽기 — "0 하나 더 쳤다"를 저장 전에 스스로 잡는 자리 */
+.lform__readback {
+  margin: var(--sp-3) 0 0;
+  text-align: right;
+  font-size: var(--fs-footnote);
+  color: var(--text-secondary);
+}
+
+.lform__actions {
+  display: flex;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+}
+
+.lform__submit {
+  flex: 1;
+  min-height: var(--touch-min);
+  border-radius: var(--r-btn);
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: var(--fs-footnote);
+  font-weight: 600;
+}
+
+.lform__submit:disabled {
+  opacity: 0.5;
+}
+
+.lform__cancel {
+  min-height: var(--touch-min);
+  padding: 0 var(--sp-4);
+  border-radius: var(--r-btn);
+  border: 0.5px solid var(--hairline);
+  color: var(--accent-text);
+  font-size: var(--fs-footnote);
+}

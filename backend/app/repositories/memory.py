@@ -5,6 +5,7 @@ PostGIS 구현이 준비되기 전까지 API 계약을 검증하는 데 쓴다.
 """
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import itertools
 from typing import Any
@@ -13,12 +14,15 @@ from app.domain.location.models import BuildingLocationFact, LocationFacts
 from app.domain.redevelopment.models import RedevProject
 from app.domain.valuation.models import ListingRow, TradeRow
 from app.repositories.base import (
+    LISTING_SOURCE_USER,
+    MAX_USER_LISTINGS,
     STATUS_APPROVED,
     BBox,
     ComplexSummary,
     JobRecord,
     LastAdminError,
     ProfileRecord,
+    UserListingRecord,
     UserRecord,
 )
 
@@ -52,7 +56,15 @@ class InMemoryRepository:
         self._listings: dict[int, list[ListingRow]] = {}
         self._trades: dict[int, list[TradeRow]] = {}
         self._redev: dict[int, RedevProject] = {}
+        #: 시장 가격지수 (migrations/015 · 시점 보정). (region_code, scope) → MarketIndex.
+        self._market_indexes: dict[tuple[str, str], Any] = {}
+        #: 사용자 수동 입력 호가 (migrations/016). id → 레코드.
+        #: 수집 호가(`_listings`)와 **따로 보관한다** — 한 통에 넣으면 소유자 필터를
+        #: 한 번만 잊어도 남의 입력이 섞여 나간다. 저장소 수준에서 분리해 둔다.
+        self._user_listings: dict[int, UserListingRecord] = {}
         self._ids = itertools.count(1)
+        #: 호가 id 시퀀스. 단지·사용자 id 와 겹치지 않게 별도로 센다.
+        self._listing_ids = itertools.count(1)
 
     # -- 사용자 -----------------------------------------------------------
     def create_user(self, email: str, password_hash: str) -> UserRecord:
@@ -378,8 +390,162 @@ class InMemoryRepository:
                 with_geom += 1
         return with_geom, total
 
-    def listings_for_complex(self, complex_id: int) -> list[ListingRow]:
-        return list(self._listings.get(complex_id, ()))
+    def listings_for_complex(self, complex_id: int,
+                             user_id: int | None = None) -> list[ListingRow]:
+        """수집 호가 + (user_id 를 주면) **그 사용자의** 수동 입력 호가.
+
+        ⚠️ `user_id` 가 없으면 사용자 입력은 **한 건도** 나오지 않는다. PostGIS 구현과
+        같은 규칙이어야 인메모리 테스트가 프로덕션을 대표한다(base.py 의 계약 주석).
+        낡은 입력(as_of > LISTING_STALE_DAYS)·비활성 상태도 여기서 빠진다 —
+        호출부가 거르기를 기대하지 않는다.
+        """
+        rows = list(self._listings.get(complex_id, ()))
+        if user_id is None:
+            return rows
+        rows += [
+            _to_listing_row(rec)
+            for rec in self._user_listings.values()
+            if rec.user_id == user_id and rec.complex_id == complex_id and rec.usable()
+        ]
+        return rows
 
     def trades_for_complex(self, complex_id: int) -> list[TradeRow]:
         return list(self._trades.get(complex_id, ()))
+
+    # -- 시장 가격지수(시점 보정) ------------------------------------------
+    #
+    # ★ CR36-2 의 나머지 절반. `complex_region_code` 만 채워도 지수를 조회할 **함수가
+    #   없으면**(`load_market_indexes` → `getattr(repo, "market_index", None)` → None)
+    #   시점 보정은 여전히 한 번도 돌지 않는다. 두 메서드가 다 있어야 API 경로가
+    #   PostGIS 와 같은 분기를 밟는다.
+    #
+    # ⚠️ 값을 **지어내지 않는다.** 테스트가 `set_market_index` 로 넣어준 것만 돌려주고,
+    #    넣은 적이 없으면 PostGIS 와 같은 모양의 **빈 지수**(points={})다 —
+    #    "조회했는데 없었다"와 "조회조차 못 했다"의 구분을 인메모리에서도 유지한다.
+
+    def set_market_index(self, index: Any) -> Any:
+        self._market_indexes[(index.region_code, index.scope)] = index
+        return index
+
+    def market_index(self, region_code: str, scope: str) -> Any:
+        from app.domain.valuation.timeadjust import MarketIndex
+
+        found = self._market_indexes.get((region_code, scope))
+        if found is not None:
+            return found
+        return MarketIndex(region_code=region_code, scope=scope, points={})
+
+    def complex_region_code(self, complex_id: int) -> str | None:
+        """이 단지의 법정동코드. 없거나 미상이면 **None** (PostGIS 구현과 같은 계약).
+
+        ★ CR36-2. **이 메서드가 없어서 API 경로 전체가 다른 분기를 밟고 있었다.**
+        `complex_reference_price` 는 이 값이 있어야 시장지수를 찾아 밴드를 시점
+        보정한다(`recommend._complex_region_code` 는 메서드가 없으면 조용히 None 을
+        쓴다 — 추천을 죽이지 않으려는 설계다). 그래서 인메모리를 쓰는 **모든 API
+        테스트에서 자금계획은 언제나 `trade_band`(보정 없음)로 떨어졌고**, "추천 카드와
+        자금계획이 같은 값"이라는 명제(CR35-4)는 API 경로에서 한 번도 실행되지 않았다.
+        실측 격차: 529,699,059(추천) vs 500,000,000(자금계획) — 5.6%.
+
+        빈 문자열은 돌려주지 않는다(PostGIS 와 같은 규칙) — 빈 코드로 지수를 찾으면
+        엉뚱한 지역이 걸린다.
+        """
+        for c in self._complexes:
+            if c.id == complex_id:
+                return (str(c.region_code or "").strip() or None)
+        return None
+
+    # -- 사용자 수동 입력 호가 (migrations/016) ----------------------------
+    #
+    # 소유자 스코프를 **저장소 안에서** 강제한다. 라우터가 한 번 잊어도 남의 입력이
+    # 나가지 않도록, 모든 읽기/쓰기가 user_id 로 먼저 걸러진다(security.md §2.2).
+
+    def complex_name(self, complex_id: int) -> str | None:
+        for c in self._complexes:
+            if c.id == complex_id:
+                return c.name
+        return None
+
+    def add_user_listing(self, user_id: int, *, complex_id: int,
+                         ask_price_krw: int, area_m2: float, as_of: dt.date,
+                         floor: int | None = None, apt_dong: str | None = None,
+                         note: str | None = None) -> UserListingRecord:
+        now = dt.datetime.now(dt.timezone.utc)
+        rec = UserListingRecord(
+            id=next(self._listing_ids), user_id=user_id, complex_id=complex_id,
+            ask_price_krw=int(ask_price_krw), area_m2=float(area_m2), as_of=as_of,
+            floor=floor, apt_dong=apt_dong, note=note, status="active",
+            source=LISTING_SOURCE_USER, complex_name=self.complex_name(complex_id),
+            created_at=now, updated_at=now,
+        )
+        self._user_listings[rec.id] = rec
+        return rec
+
+    def list_user_listings(self, user_id: int, *, complex_id: int | None = None,
+                           limit: int = MAX_USER_LISTINGS) -> list[UserListingRecord]:
+        rows = [r for r in self._user_listings.values()
+                if r.user_id == user_id
+                and (complex_id is None or r.complex_id == complex_id)]
+        # 최근에 본 것부터. PostGIS 구현과 같은 정렬이어야 한다.
+        rows.sort(key=lambda r: (r.as_of, r.id), reverse=True)
+        return rows[:limit]
+
+    def get_user_listing(self, listing_id: int,
+                         user_id: int) -> UserListingRecord | None:
+        rec = self._user_listings.get(listing_id)
+        # 남의 것과 없는 것은 **같은 None** 이다 — 구분하면 그 차이가 정보가 된다.
+        if rec is None or rec.user_id != user_id:
+            return None
+        return rec
+
+    #: 수정 가능한 필드. 여기 없는 키는 조용히 무시하지 않고 **거절**한다 —
+    #: 오타(`price_krw`)가 조용히 무시되면 사용자는 고쳤다고 믿는다.
+    _UPDATABLE = ("ask_price_krw", "area_m2", "floor", "apt_dong",
+                  "as_of", "note", "status")
+
+    def update_user_listing(self, listing_id: int, user_id: int,
+                            **fields: Any) -> UserListingRecord | None:
+        unknown = [k for k in fields if k not in self._UPDATABLE]
+        if unknown:
+            raise ValueError(f"수정할 수 없는 필드입니다: {', '.join(sorted(unknown))}")
+        rec = self.get_user_listing(listing_id, user_id)
+        if rec is None:
+            return None
+        updated = dataclasses.replace(
+            rec, **fields, updated_at=dt.datetime.now(dt.timezone.utc))
+        self._user_listings[listing_id] = updated
+        return updated
+
+    def delete_user_listing(self, listing_id: int, user_id: int) -> bool:
+        if self.get_user_listing(listing_id, user_id) is None:
+            return False
+        del self._user_listings[listing_id]
+        return True
+
+
+def _to_listing_row(rec: UserListingRecord) -> ListingRow:
+    """사용자 입력 → 분석 계층이 읽는 `ListingRow`.
+
+    ⚠️ **`listed_at` 에 as_of 를 넣지 않는다.** `listed_at` 은 '매물이 포털에 올라온 날'
+       이고 사용자는 그걸 모른다. 거기에 '내가 본 날'을 넣으면 `dedup.trust_score` 가
+       "등록 N일 경과"라며 감점하는데, 그건 매물이 안 팔린 기간이 아니라 **사용자가
+       입력을 미룬 기간**이다. 없는 값은 None 으로 둔다.
+    ⚠️ `collected_at` 에는 as_of 를 넣는다 — 우리가 이 호가의 존재를 **확인한 시점**이
+       맞고, 낡은 정도를 하류에서 다시 셀 수 있는 유일한 값이다.
+
+    ⚠️ `source`·`as_of` 를 **반드시 싣는다.** 이게 빠지면 분석 계층에서 출처 구분이
+       끊기고, 사용자가 적은 한 건이 `dedup.trust_score` 만점(= 리스크 축 100점)을
+       받는다 — 비싼 매물을 입력할수록 총점이 오르는 형태다(차단 ①).
+    """
+    return ListingRow(
+        id=rec.id,
+        ask_price_krw=rec.ask_price_krw,
+        area_m2=rec.area_m2,
+        floor=rec.floor,
+        listed_at=None,
+        collected_at=rec.as_of,
+        building_id=None,
+        agency=None,
+        status=rec.status,
+        source=rec.source,
+        as_of=rec.as_of,
+    )

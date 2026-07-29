@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any, NamedTuple, Protocol, runtime_checkable
 
 from app.domain.location.models import BuildingLocationFact, LocationFacts
+from app.domain.valuation.models import LISTING_SOURCE_USER as _LISTING_SOURCE_USER
 
 # ---------------------------------------------------------------------------
 # 조회 범위 (지도 · 추천 공용)
@@ -97,6 +98,126 @@ STATUS_PENDING = "pending"
 STATUS_APPROVED = "approved"
 STATUS_REJECTED = "rejected"
 USER_STATUSES = (STATUS_PENDING, STATUS_APPROVED, STATUS_REJECTED)
+
+
+# ---------------------------------------------------------------------------
+# 사용자 수동 입력 호가 (migrations/016)
+#
+# 공공 오픈API 에는 호가가 없고 포털 자동수집은 약관·판례상 하지 않는다. 그래서
+# `listing` 테이블은 운영에서 **0행**이었고(2026-07-29 실측), 가격·리스크 축이
+# 통째로 죽어 있었다. 남은 합법적인 경로가 **사용자가 손으로 옮겨 적는 것**이다.
+#
+# 이 데이터는 수집 데이터와 성질이 완전히 다르다:
+#   · 출처가 사람이라 **누구 것인지**가 있다(공공 데이터에는 소유자가 없다)
+#   · 확인 시점이 사람의 기억에 달려 있어 **언제 본 값인지**를 반드시 받아야 한다
+#   · 자동 갱신되지 않는다 — 아무도 안 고치면 그 값은 **영원히 그날의 값**이다
+# 그래서 아래 세 상수가 이 기능의 성격을 결정한다.
+# ---------------------------------------------------------------------------
+
+#: `listing.source` 값. DB CHECK(`listing_user_source_pair`)가 `created_by_user_id`
+#: 와 짝을 강제한다 — 이 문자열을 바꾸면 마이그레이션 016 도 함께 바꿔야 한다.
+#:
+#: ⚠️ **정본은 `app/domain/valuation/models.py` 에 있다**(여기서는 재수출한다).
+#:    분석 계층이 이 값으로 신뢰도 산정 여부를 가르기 때문이다 — 두 곳에 같은 리터럴을
+#:    두면 한쪽만 바뀌는 날 사용자 입력이 조용히 수집 데이터로 분류되고, 그 순간
+#:    가짜 신뢰도 100점이 되살아난다. 이름은 그대로 두어 기존 import 를 깨지 않는다.
+LISTING_SOURCE_USER = _LISTING_SOURCE_USER
+#: 화면·근거 문자열에 그대로 나가는 출처 표기. **서버가 붙인다.**
+#: 프론트가 각자 만들면 어느 화면에선가 빠지고, 빠진 화면에서는 사용자 입력이
+#: 공공 데이터처럼 보인다 — 그 순간 "무엇이 근거였나"에 답할 수 없게 된다(G2).
+LISTING_SOURCE_USER_LABEL = "사용자 입력"
+
+# --- 낡음 판정 -------------------------------------------------------------
+#
+# 근거 (운영 DB 실측, 2026-07-29 · `market_price_index` scope='sido')
+# -------------------------------------------------------------------
+# 완결월(is_complete)만으로 최근 구간을 재면 월평균 상승률은
+#     서울(11) 2025-10 1.038446 → 2026-05 1.112226 : 7개월 +7.10% → **+0.99%/월**
+#     경기(41) 2025-10 1.003529 → 2026-05 1.034474 : 7개월 +3.08% → +0.43%/월
+#     인천(28) 2025-10 1.006645 → 2026-05 1.011518 : 7개월 +0.48% → +0.07%/월
+# 서울의 실측 최대 3개월 구간 이동은 +3.3%(2026-02→2026-05), 6개월은 +7.1%다.
+#
+# 이 숫자가 왜 중요한가: 가격 축 점수는 `100 - |호가갭%| * 5` 이고 판정이 ±10% 에서
+# 뒤집힌다(`orchestrator.valuation_finding`). 즉 호가가 X% 낡으면 점수가 5X 점
+# 어긋난다. 90일(서울 최대 +3.3%)이면 약 17점, 180일(+7.1%)이면 약 35점이고
+# 판정 경계 ±10% 에 육박한다 — 그때는 "적정가 범위"가 "급매"로 뒤집힌다.
+#
+# 그래서 세 구간으로 나눈다. 자르기만 하지 않고 **말한다**:
+#   fresh (≤30일)  그대로 쓴다. 서울 기준 예상 이동 ≈1.0%(점수 ≈5점).
+#   aging (≤90일)  쓰되 며칠 된 값인지 고지한다. 최대 ≈3.3%(점수 ≈17점).
+#   stale (>90일)  **추천 계산에서 뺀다.** 목록에는 남기고 갱신을 유도한다.
+#
+# 왜 30일을 하한으로 두지 않는가: 비교 대상인 실거래도 신고까지 최대 30일 걸린다
+# (`orchestrator.DELAY_RISK`). 호가에만 30일 미만을 요구하면 밴드보다 엄격한 잣대다.
+# 참고: `domain/listings/dedup.STALE_DAYS` 도 90일이지만 **다른 뜻**이다(등록 후
+# 90일간 안 팔림 = 의심 신호). 우연히 같은 값이며 서로 묶지 않는다.
+LISTING_FRESH_DAYS = 30
+LISTING_STALE_DAYS = 90
+#: 이보다 오래된 날짜는 입력 자체를 거절한다(422). 서울 기준 1년이면 +12% 이동이라
+#: 어떤 해석으로도 "지금 호가"가 아니고, 실제로는 날짜 오타일 확률이 더 높다.
+LISTING_MAX_AGE_DAYS = 365
+
+#: ★ 사용자 1명이 만들 수 있는 호가 행 수 상한 (SR31-3 · CR35-8).
+#:
+#: 왜 두는가 — `POST /me/listings` 는 **행을 무제한 만드는 첫 엔드포인트**다
+#: (프로필·선호는 1행 upsert). nginx `re_api` 10r/s 면 승인 계정 하나가 하루 ~86만 행,
+#: 행+인덱스 ~600B 기준 하루 ~500MB 다. 운영 `/` 는 **92% 사용 · 여유 2.2GB** 이고
+#: db 컨테이너는 `mem_limit 192m` · 스왑 없음이다. 악의가 아니라 **클라이언트 재시도
+#: 루프 하나**로도 도달한다. 상한이 없으면 그때 디스크가 먼저 죽고, 같은 호스트의
+#: 다른 서비스까지 함께 죽는다.
+#:
+#: 왜 하필 목록 상한과 **같은 값**인가 — `list_user_listings` 가 200건에서 자르는데
+#: 그보다 많이 만들 수 있으면 `summary.total` 과 중복 경고(`siblings`)가 **조용히**
+#: 틀린다(201건째부터 "이미 N건 등록돼 있습니다"가 거짓이 된다 — CR35-8).
+#: 두 숫자를 하나로 묶으면 그 상태가 아예 만들어지지 않는다. 나눠 두면 언젠가
+#: 한쪽만 바뀐다.
+#:
+#: 200 이면 충분한가 — 이 도구의 사용 맥락은 "관심 단지 5~10곳"이고, 가격이 바뀐
+#: 경우는 새로 넣는 게 아니라 **PATCH** 하도록 서버가 안내한다(`problems`).
+#: 모자라면 사용자가 지우거나 상태를 바꿀 수 있고, 상한에 닿으면 서버가 **그렇게
+#: 말한다**(조용히 거절하지 않는다).
+MAX_USER_LISTINGS = 200
+
+STALENESS_FRESH = "fresh"
+STALENESS_AGING = "aging"
+STALENESS_STALE = "stale"
+
+
+def listing_staleness(as_of: dt.date | None,
+                      today: dt.date | None = None) -> tuple[str, int | None]:
+    """호가의 낡음 등급과 경과일수. `as_of` 가 없으면 **stale** 로 본다.
+
+    시점을 모르는 호가를 신선하다고 가정하지 않는다 — 모름은 통과가 아니다.
+    미래 날짜(입력 검증을 우회해 들어온 값)는 경과일수 0 의 fresh 로 접는다.
+    """
+    if as_of is None:
+        return STALENESS_STALE, None
+    days = max(0, ((today or dt.date.today()) - as_of).days)
+    if days <= LISTING_FRESH_DAYS:
+        return STALENESS_FRESH, days
+    if days <= LISTING_STALE_DAYS:
+        return STALENESS_AGING, days
+    return STALENESS_STALE, days
+
+
+def listing_usable(as_of: dt.date | None, status: str,
+                   today: dt.date | None = None) -> bool:
+    """이 호가를 **추천 계산에 넣어도 되는가**(= 이 호가 자체의 자격).
+
+    리포지토리 읽기 경로(`listings_for_complex`)와 API 표시
+    (`eligible_for_recommendation`)가 **같은 함수**를 본다. 두 곳이 따로 판정하면
+    화면은 "반영됨"이라 적어 놓고 계산에는 안 들어간 상태가 생기고, 그건 사용자가
+    알아챌 방법이 없다.
+
+    ⚠️ **이 함수는 "실제로 반영됐는가"를 답하지 않는다.** 반영되려면 그 단지가
+       추천 요청의 지역·예산·평수 조건과 후보 조회 상한까지 통과해야 하고, 그건
+       이 함수가 볼 수 있는 범위 밖이다. API 필드 이름이 `used_…` 가 아니라
+       `eligible_…` 인 이유다(CR35-7 · SR31-2).
+    """
+    if status != "active":
+        return False
+    grade, _ = listing_staleness(as_of, today)
+    return grade != STALENESS_STALE
 
 
 class LastAdminError(Exception):
@@ -203,8 +324,14 @@ class ComplexSummary:
     region_code: str
     built_year: int | None = None
     total_households: int | None = None
+    #: **최근 체결가**(원). 시점 보정된 추정치가 아니라 실제로 체결된 1건이다 —
+    #: 추천 카드의 `est_price_krw`(창 중위를 기준월로 환산한 추정가)와 **다른 양**이고,
+    #: 운영 실측 226단지에서 중위 −2.4%·p10 −13.3% 어긋난다(CR34-3). 덮어쓰지 말 것.
     recent_price_krw: int | None = None
     price_as_of: str | None = None
+    #: 그 체결가가 **어느 면적**의 거래인가(㎡). 지도 조회에서만 채워진다.
+    #: 면적을 안 말하면 34㎡ 체결가가 84㎡ 를 찾는 사용자의 화면에서 그 단지 가격이 된다.
+    price_area_m2: float | None = None
     active_listings: int = 0
     #: 지도 화면의 특성 태그(🚇역세권·🔨재건축)용 사실. **지도 조회에만** 채워진다
     #: (`complexes_in_bbox`). 추천 경로는 같은 값을 입지·정비사업 분석에서 얻으므로
@@ -212,6 +339,43 @@ class ComplexSummary:
     #: `None` 은 **모름**이다. 0·False 로 접지 않는다.
     nearest_station: NearestStationFact | None = None
     redevelopment: RedevelopmentFact | None = None
+
+
+@dataclass(frozen=True)
+class UserListingRecord:
+    """사용자가 손으로 옮겨 적은 호가 1건 (migrations/016).
+
+    ⚠️ **소유자(`user_id`)가 없는 이 레코드는 존재할 수 없다.** DB CHECK
+       (`listing_user_source_pair`)가 그것을 강제하고, 이 dataclass 도 필수 필드로 둔다.
+       소유자 없는 사용자 데이터가 만들어질 수 있으면 언젠가 그게 남에게 보인다.
+
+    ⚠️ `source` 는 항상 `LISTING_SOURCE_USER` 다. 필드로 들고 다니는 이유는 응답·근거
+       문자열에 **그대로 실어 보내기 위해서**다 — "이 숫자는 사용자 입력"이라는 사실은
+       화면에서 지워지면 안 된다.
+    """
+
+    id: int
+    user_id: int
+    complex_id: int
+    ask_price_krw: int
+    area_m2: float
+    as_of: dt.date
+    floor: int | None = None
+    apt_dong: str | None = None
+    note: str | None = None
+    status: str = "active"
+    source: str = LISTING_SOURCE_USER
+    #: 표시용 단지명(조인). 없으면 화면이 "단지 #1234" 밖에 못 쓴다.
+    complex_name: str | None = None
+    created_at: dt.datetime | None = None
+    updated_at: dt.datetime | None = None
+
+    def staleness(self, today: dt.date | None = None) -> tuple[str, int | None]:
+        return listing_staleness(self.as_of, today)
+
+    def usable(self, today: dt.date | None = None) -> bool:
+        """추천 계산에 실제로 들어가는가. 표시와 계산이 **같은 판정**을 보게 한다."""
+        return listing_usable(self.as_of, self.status, today)
 
 
 @dataclass
@@ -335,7 +499,18 @@ class RecommendationRepository(Protocol):
         self, *, region_codes: list[str] | None = None) -> tuple[int, int]: ...
 
     #: 활성 호가. **중복 포함** — 대표건 선정은 러너의 group_duplicates 몫이다.
-    def listings_for_complex(self, complex_id: int) -> list[Any]: ...
+    #:
+    #: ⚠️ **`user_id` 를 주지 않으면 사용자 입력 호가는 한 건도 나오지 않는다**
+    #:    (migrations/016). 기본값을 "전부 보여줌"이 아니라 "하나도 안 보여줌"으로 둔
+    #:    이유는 fail-closed 다 — 배선을 잊은 호출부에서 **남의 호가가 새는 쪽**이 아니라
+    #:    **아무것도 안 보이는 쪽**으로 실패하게 만든다(security.md §2.2 IDOR 규약).
+    #:    조용한 누출보다 조용한 결측이 낫다. 결측은 사용자가 "내 매물이 왜 안 보이지"로
+    #:    알아채지만, 누출은 아무도 알아채지 못한다.
+    #: ⚠️ 낡은 사용자 호가(as_of 가 `LISTING_STALE_DAYS` 초과)는 **여기서 빠진다.**
+    #:    호출부가 거르기를 기대하지 않는다 — 한 곳이라도 잊으면 3개월 전 호가가
+    #:    현재 호가로 계산에 들어간다.
+    def listings_for_complex(self, complex_id: int,
+                             user_id: int | None = None) -> list[Any]: ...
 
     #: 실거래. **해제건 포함** — 제외 여부는 통계 계층이 정한다.
     def trades_for_complex(self, complex_id: int) -> list[Any]: ...
@@ -350,6 +525,52 @@ class RecommendationRepository(Protocol):
                         items: list[dict[str, Any]],
                         excluded: list[dict[str, Any]] | None = None,
                         notes: list[str] | None = None) -> None: ...
+
+
+@runtime_checkable
+class UserListingRepository(Protocol):
+    """사용자 수동 입력 호가 CRUD (migrations/016 · `POST /me/listings`).
+
+    IDOR 규약 (security.md §2.2)
+    ---------------------------
+    **읽기·수정·삭제 모두 `user_id` 를 필수 인자로 받는다.** `get_user_listing(id)`
+    같은 시그니처는 만들지 않는다 — 만들 수 있으면 언젠가 쓰이고, 그 순간 남의
+    관심 단지·호가(= 그 사람이 어디를 사려는지)가 새어나간다. 자산 금액만큼은
+    아니어도 이것 역시 **개인의 매수 의사**를 그대로 드러내는 정보다.
+
+    없는 id 와 남의 id 는 **같은 결과**(None/False)를 낸다. 구분하면 그 차이가
+    "그 id 는 존재한다"는 정보가 된다(라우터가 둘 다 404 로 옮긴다).
+    """
+
+    #: 단지 존재 확인 + 표시용 이름. 없으면 None → 라우터가 404.
+    #: 존재하지 않는 complex_id 로 저장하면 FK 위반이 500 으로 튀거나(PostGIS),
+    #: 조용히 들어가 영영 조회되지 않는다(인메모리) — 둘 다 나쁘다.
+    def complex_name(self, complex_id: int) -> str | None: ...
+
+    def add_user_listing(self, user_id: int, *, complex_id: int,
+                         ask_price_krw: int, area_m2: float, as_of: dt.date,
+                         floor: int | None = None, apt_dong: str | None = None,
+                         note: str | None = None) -> UserListingRecord: ...
+
+    #: 내 호가 목록. **낡은 것도 함께** 돌려준다 — 목록은 고치라고 보여주는 화면이라
+    #: 낡은 건을 숨기면 사용자가 갱신할 대상을 볼 수 없다(계산 경로와 다르다).
+    #:
+    #: ⚠️ 기본 상한은 `MAX_USER_LISTINGS` 와 **같은 상수**여야 한다(CR36-4). 여기만
+    #:    리터럴 `200` 이면 상한을 300 으로 올리는 날 목록이 200에서 잘리고, 그 순간
+    #:    `summary.total` 과 중복 경고(`siblings`)가 조용히 틀린다(CR35-8 이 막은 상태).
+    def list_user_listings(self, user_id: int, *, complex_id: int | None = None,
+                           limit: int = MAX_USER_LISTINGS) -> list[UserListingRecord]: ...
+
+    def get_user_listing(self, listing_id: int,
+                         user_id: int) -> UserListingRecord | None: ...
+
+    #: 부분 수정. `fields` 에 준 키만 바꾼다(None 을 "지우기"로 오해하지 않는다).
+    #: 대상이 없거나 남의 것이면 None.
+    def update_user_listing(self, listing_id: int, user_id: int,
+                            **fields: Any) -> UserListingRecord | None: ...
+
+    #: 지웠으면 True, 없거나 남의 것이면 False.
+    def delete_user_listing(self, listing_id: int, user_id: int) -> bool: ...
 
 
 @runtime_checkable

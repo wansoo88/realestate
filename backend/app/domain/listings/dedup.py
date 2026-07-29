@@ -15,6 +15,26 @@ trust_score 규약
 **신뢰도**다. 1.0 = 신뢰할 만함, 0.0 = 매우 의심스러움. (의심도가 아니다 — 부호 주의)
 그리고 이건 **판정이 아니라 의심도**다. 급매(진짜 싼 물건)와 미끼는 데이터만으로
 구분되지 않는다. "허위매물입니다" 라고 단정하면 안 된다.
+
+⚠️ 이 함수는 **수집 호가에만** 쓸 수 있다 (2026-07-29)
+------------------------------------------------------
+trust_score 가 세는 네 신호는 전부 **제3자(중개사·포털)가 만든 흔적**이다.
+사용자가 손으로 옮겨 적은 호가(migrations/016)에는 그 흔적이 없다:
+
+  | 신호                    | 수집 호가        | 사용자 입력                              |
+  |-------------------------|------------------|------------------------------------------|
+  | 시세 대비 −15/−25%      | 미끼 의심        | **가격 축과 같은 양**을 다른 이름으로 재계산 |
+  | 등록 후 장기 미거래     | 안 팔리는 물건   | 포털 등록일을 사용자는 모름 → 언제나 신호 없음 |
+  | 여러 중개사 중복 등록   | 미끼 가능성      | **해당 없음**(사람이 한 건 적었을 뿐)      |
+  | 최근 확인됨(+0.05)      | 우리가 확인      | "사용자가 그렇게 적었다"를 근거로 가산      |
+
+그래서 사용자 입력만 있는 그룹은 셋이 침묵하고 넷째만 가산돼 **만점(1.0)** 이 나왔다.
+실측(같은 후보 · 호가가 적정가보다 +9.3% 비쌈): 리스크 축 100.0점(실효비중 25%)이
+붙어 총점 67.0 — 채우지 않으면 56.0. **비싼 매물을 입력할수록 점수가 올라갔다.**
+
+지금은 `trust_score` 가 그런 그룹에 **점수를 만들지 않고 `(None, [사유])`** 를 준다.
+0.0(= 매우 의심스러움)이 아니다. 모르는 것은 나쁜 것이 아니다.
+수집 호가는 예전과 **완전히 같게** 동작한다 — 갈림길은 오직 `ListingRow.source` 다.
 """
 from __future__ import annotations
 
@@ -31,6 +51,15 @@ AREA_TOLERANCE_M2 = 0.5
 #: 이 기간 이상 안 팔리면 의심 신호
 STALE_DAYS = 90
 
+#: 사용자 입력만 있는 그룹에 신뢰도를 매기지 않는 **이유**. 그대로 사용자에게 나간다
+#: (`insufficient` 의 missing → 리스크 축 `missing`). 막다른 문장이 되지 않게,
+#: 대신 무엇으로 판단하면 되는지까지 적는다.
+USER_ENTERED_NO_TRUST_REASON = (
+    "직접 입력하신 호가라 매물 신뢰도(허위·미끼·중복 등록)를 판정할 근거가 없습니다 "
+    "— 이 판정은 여러 중개사의 중복 등록·포털 등록 경과일처럼 제3자가 남긴 흔적을 "
+    "세는 것인데, 손으로 적은 호가에는 그 흔적이 없습니다. "
+    "가격이 적정한지는 '가격' 축(호가–적정가 갭)이 그대로 판정합니다.")
+
 
 @dataclass(frozen=True)
 class ListingGroup:
@@ -40,13 +69,32 @@ class ListingGroup:
     duplicates: tuple[ListingRow, ...] = ()
 
     @property
+    def members(self) -> tuple[ListingRow, ...]:
+        """대표건 + 중복건 전부."""
+        return (self.representative, *self.duplicates)
+
+    @property
     def duplicate_count(self) -> int:
         """대표건 포함 등록 건수. 1이면 중복 없음."""
         return 1 + len(self.duplicates)
 
     @property
+    def collected(self) -> tuple[ListingRow, ...]:
+        """**수집 출처**인 구성원만. 신뢰도 신호는 여기서만 나온다."""
+        return tuple(row for row in self.members if not row.is_user_entered)
+
+    @property
+    def user_entered_only(self) -> bool:
+        """이 그룹이 통째로 사용자 수동 입력인가.
+
+        `True` 면 `trust_score` 가 셀 제3자 신호가 하나도 없다 — 점수를 만들면
+        그건 측정이 아니라 **사용자가 적었다는 사실에 붙인 가산점**이다.
+        """
+        return not self.collected
+
+    @property
     def agencies(self) -> tuple[str, ...]:
-        names = [l.agency for l in (self.representative, *self.duplicates) if l.agency]
+        names = [l.agency for l in self.members if l.agency]
         return tuple(sorted(set(names)))
 
 
@@ -109,14 +157,31 @@ def trust_score(
     *,
     median_price_krw: int | None,
     as_of: dt.date | None = None,
-) -> tuple[float, list[str]]:
+) -> tuple[float | None, list[str]]:
     """신뢰도(1.0 = 신뢰할 만함)와 그 근거 신호 목록.
 
     시세를 모르면(`median_price_krw is None`) 가격 관련 감점은 하지 않는다.
     모르는 걸 근거로 감점하면 그것도 환각이다.
+
+    반환
+    ----
+    `(score, signals)`. **`score` 가 `None` 이면 판정하지 않았다는 뜻이다** — 그때
+    `signals` 에는 왜 못 했는지가 들어 있고, 호출부는 그 사유를 그대로 사용자에게
+    내야 한다(0.0 으로 접으면 '매우 의심스러움'이라는 없는 판정이 생긴다).
+
+    ⚠️ **여기가 출처를 가르는 유일한 자리다.** 호출부에서 다시 가르지 않는다 —
+       분기가 두 곳이면 한 곳만 고쳐지는 날 가짜 점수가 되살아난다(모듈 머리말 참조).
     """
     as_of = as_of or dt.date.today()
-    rep = group.representative
+    # 사용자가 손으로 적은 호가만 있는 그룹 → 셀 신호가 없다. **점수를 만들지 않는다.**
+    if group.user_entered_only:
+        return None, [USER_ENTERED_NO_TRUST_REASON]
+
+    # 신호는 **수집 구성원**에서만 센다. 사용자 입력이 섞여 있어도(같은 유닛·같은 가격이면
+    # group_duplicates 가 한 덩어리로 묶는다) 그 한 건이 "중개사 하나 더"로 세어지면
+    # 사용자가 자기 입력으로 자기 매물의 중복 등록 신호를 만든 꼴이 된다.
+    collected = group.collected
+    rep = collected[0]
     score = 1.0
     signals: list[str] = []
 
@@ -140,8 +205,8 @@ def trust_score(
             score -= 0.10
             signals.append(f"등록 {days}일 경과")
 
-    # 3) 중복 등록 과다
-    n = group.duplicate_count
+    # 3) 중복 등록 과다 — **수집 건수만** 센다(위 주석 참조).
+    n = len(collected)
     if n >= 8:
         score -= 0.20
         signals.append(f"{n}개 중개사 중복 등록")

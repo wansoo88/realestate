@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ComplexItem } from "../api/client";
 import { DENSITY_LIMIT } from "../lib/markerTiers";
 import { forgetCamera, lastCamera } from "../lib/mapCamera";
+import { applyScreenBudget, type ScreenComplexItem } from "../lib/screenBudget";
 import { installKakaoStub, type KakaoStubHandle } from "../test/kakaoStub";
 import { MapView } from "./MapView";
 
@@ -28,20 +29,30 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
-function complex(id: number, over: Partial<ComplexItem> = {}): ComplexItem {
-  return {
-    id,
-    name: `단지${id}`,
-    point: [127 + id * 0.001, 37.5],
-    households: 500,
-    built_year: 2005,
-    recent_price_krw: 840_000_000,
-    price_as_of: "2026-06-30",
-    price_confidence: "estimated",
-    active_listings: 1,
-    over_budget: false,
-    ...over,
-  };
+/**
+ * ⚠️ 목도 **화면이 쓰는 길로** 만든다(`applyScreenBudget`). 지도는 서버 항목을 그대로
+ *    받지 않기 때문이다 — 예산 칩 상태를 반영한 값만 들어온다(CR37-2 · CR38-1).
+ *    여기서는 표시를 꺼 둔다(전부 `null`)—이 파일의 관심사(표현 단계)와 섞이지 않게.
+ */
+function complex(id: number, over: Partial<ComplexItem> = {}): ScreenComplexItem {
+  return applyScreenBudget(
+    [
+      {
+        id,
+        name: `단지${id}`,
+        point: [127 + id * 0.001, 37.5],
+        households: 500,
+        built_year: 2005,
+        recent_price_krw: 840_000_000,
+        price_as_of: "2026-06-30",
+        price_confidence: "estimated",
+        active_listings: 1,
+        over_budget: null,
+        ...over,
+      },
+    ],
+    false,
+  )[0];
 }
 
 const range = (n: number) => Array.from({ length: n }, (_, i) => complex(i + 1));

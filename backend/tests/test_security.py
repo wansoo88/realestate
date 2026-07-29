@@ -518,6 +518,53 @@ def test_치명적_설정이면_앱이_아예_뜨지_않는다(monkeypatch, env,
     assert "k" * 31 not in str(exc.value)
 
 
+@pytest.mark.parametrize("key,byte_len", [
+    ("가" * 32, 96),         # 32자인데 96바이트 — 예전 게이트를 그대로 통과했다
+    ("x" * 31 + "가", 34),   # 32자인데 34바이트
+    ("가" * 10, 30),         # 10자 30바이트 — 자 수로 재면 여기서 걸리고, 바이트로도 걸린다
+])
+def test_FEK_게이트는_문자가_아니라_바이트를_잰다(monkeypatch, key, byte_len):
+    """★ SR30-1. **재는 것과 말하는 것을 일치시킨다.**
+
+    예전에는 `len(str)`(문자 수)를 재면서 메시지는 "32바이트"라고 말했다. 그래서
+    비ASCII 32자 키는 기동을 통과한 뒤 `security.load_key`(바이트를 잰다)에서 걸려
+    **사용자가 자산을 저장하는 순간 503** 이 됐다 — 이 게이트가 막겠다고 내건
+    바로 그 상황이다.
+
+    변이: `self.field_encryption_key.encode()` 에서 `.encode()` 를 지우면 앞의 두
+    케이스가 기동을 통과해 여기서 잡힌다.
+    """
+    from app.core.config import RuntimeConfigError
+
+    assert len(key.encode()) == byte_len
+    with pytest.raises(RuntimeConfigError) as exc:
+        _app_with_env(monkeypatch, FIELD_ENCRYPTION_KEY=key)
+    assert "FIELD_ENCRYPTION_KEY" in str(exc.value)
+    # 길이는 말하되 **값은 말하지 않는다.**
+    assert f"{byte_len}바이트" in str(exc.value)
+    assert key not in str(exc.value)
+
+
+def test_FEK_게이트와_사용지점이_같은_기준으로_판정한다(monkeypatch):
+    """★ 두 방어선이 어긋나면 한쪽만 통과하는 값이 생긴다 — 그게 SR30-1 이었다.
+
+    변이: 어느 한쪽의 측정 단위를 바꾸면 여기서 불일치가 드러난다.
+    """
+    from app.core.config import Settings
+    from app.core.security import load_key
+
+    for key in ("k" * 32, "가" * 32, "x" * 31 + "가", "k" * 31, "가" * 10):
+        gate_ok = not any("FIELD_ENCRYPTION_KEY" in p for p in
+                          Settings(jwt_secret="x" * 40, field_encryption_key=key,
+                                   postgres_password="pw").fatal_runtime_problems())
+        try:
+            load_key(key)
+            use_ok = True
+        except ValueError:
+            use_ok = False
+        assert gate_ok == use_ok, f"기동 게이트와 load_key 의 판정이 다르다: {key!r}"
+
+
 def test_기동을_막는_문제와_경고만_하는_문제를_구분한다(monkeypatch):
     """⚠️ 기동 차단은 **서비스를 죽이는 조치**다. 운영에서 효력조차 없는 설정으로
     앱을 못 뜨게 하면 안 된다.
@@ -556,12 +603,34 @@ def test_약한_서명키로는_토큰_발급_자체가_거부된다():
     PyJWT 는 빈 키로도 **서명에 성공한다**(경고만 낸다). 그래서 라이브러리에 기대지 않고
     사용 지점에서 막는다. 메시지에 값은 담지 않는다.
     """
-    from app.core.security import MIN_JWT_SECRET_BYTES, create_token
+    from app.core.security import MIN_JWT_SECRET_CHARS, create_token
 
-    for weak in ("", "short", "x" * (MIN_JWT_SECRET_BYTES - 1)):
+    for weak in ("", "short", "x" * (MIN_JWT_SECRET_CHARS - 1)):
         with pytest.raises(ValueError, match="서명키"):
             create_token(1, secret=weak)
-        assert create_token(1, secret="y" * MIN_JWT_SECRET_BYTES)   # 경계는 통과
+        assert create_token(1, secret="y" * MIN_JWT_SECRET_CHARS)   # 경계는 통과
+
+
+def test_서명키_하한은_바이트가_아니라_문자를_잰다():
+    """이름과 측정이 어긋나지 않는지 못 박는다(이월 SR30-1 계열).
+
+    UTF-8 에서 문자 수 ≤ 바이트 수라, **문자를 재는 쪽이 더 엄격하다**. 바이트로
+    바꾸면 `'가'*11`(11자 · 33바이트)이 통과해 오히려 느슨해진다 — 이름을 바이트로
+    되돌리거나 측정을 바이트로 바꾸면 여기서 깨진다.
+    """
+    from app.core import security
+    from app.core.security import MIN_JWT_SECRET_CHARS, create_token
+
+    assert not hasattr(security, "MIN_JWT_SECRET_BYTES"), (
+        "이름을 되돌렸다 — 재는 것은 문자 수다")
+
+    loose = "가" * 11                      # 11자 / 33바이트
+    assert len(loose.encode()) >= MIN_JWT_SECRET_CHARS      # 바이트로는 통과할 값이고
+    with pytest.raises(ValueError, match="서명키"):          # 문자로는 막힌다
+        create_token(1, secret=loose)
+
+    # 비ASCII 라도 문자 수만 채우면 통과한다(하한이지 정확한 길이가 아니다).
+    assert create_token(1, secret="가" * MIN_JWT_SECRET_CHARS)
 
 
 def test_정상_설정이면_기동_점검이_아무것도_남기지_않는다(monkeypatch, caplog):
@@ -689,3 +758,39 @@ def test_순환_깊이에서_멈춘다():
         cur["next"] = {}
         cur = cur["next"]
     mask_sensitive(d)   # 예외 없이 끝나야 한다
+
+
+def test_문자열을_통째로_넘기면_전부_가린다():
+    """★ SR33-1. **이름이 하는 일과 맞아야 한다.**
+
+    이 함수는 dict 의 **키 이름**으로 민감 필드를 찾는 구조 마스커다. 문자열 하나에는
+    볼 키가 없어 가릴 수 없는데, 예전에는 **그대로 돌려줬다.** 그래서 호출부
+    (`main.unhandled` 의 500 로거)가 마스킹이 걸린 줄 알고 URL 을 통째로 넘겼고,
+    쿼리스트링이 `docker logs` 로 나갔다(SR33-1).
+
+    "아무 일도 안 함"과 "가림"이 겉보기에 같으면 다음 사람도 같은 실수를 한다.
+    가리지 못하는 입력은 **전부 가린다** — 로그에 `***` 가 찍히면 잘못 쓴 게 보인다.
+
+    변이: `mask_sensitive` 의 문자열 분기를 지우면(= 옛 동작) 여기서 깨진다.
+    """
+    url = "http://x/api/v1/map/complexes?complex_id=1234&max_price_krw=1314310000"
+    assert mask_sensitive(url) == "***"
+    assert mask_sensitive(b"secret-bytes") == "***"
+    # 오해 방지: 값이 **구조 안**에 있으면 키로 판정할 수 있으므로 그대로 둔다.
+    # (여기까지 가리면 모든 로그가 `***` 가 되어 아무도 안 본다.)
+    assert mask_sensitive({"note": "hello"})["note"] == "hello"
+
+
+def test_문자열_마스킹이_URL_대체수단을_가리킨다():
+    """가리지 못하는 입력에는 **대신 무엇을 쓸지**가 적혀 있어야 한다.
+
+    `"***"` 만 돌려주고 끝나면 다음 사람은 "왜 로그가 비었지"에서 멈춘다.
+    URL 의 정답은 `log_target(path, query)`(쿼리 **이름만** 남긴다)이고,
+    그 사실은 함수 문서에 있어야 한다 — 문서가 없으면 다음 사람은 함수 이름을 믿는다.
+    """
+    from app.main import log_target
+
+    assert "log_target" in (mask_sensitive.__doc__ or ""), (
+        "mask_sensitive 문서가 URL 대체수단을 알려주지 않는다")
+    assert log_target("/api/v1/map/complexes", "bbox=126.9&max_price_krw=1") == (
+        "/api/v1/map/complexes [q: bbox,max_price_krw]")

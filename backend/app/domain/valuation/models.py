@@ -15,6 +15,17 @@ FLOOR_BANDS: tuple[tuple[str, int, int], ...] = (
 #: 표본이 이보다 적으면 밴드를 산출하지 않는다. 적은 표본의 통계는 근거가 아니라 착시다.
 MIN_SAMPLE = 5
 
+#: `ListingRow.source` 값 — 사용자가 **손으로 옮겨 적은** 호가(migrations/016).
+#:
+#: 왜 도메인 최하위 계층에 두는가
+#: ------------------------------
+#: 이 문자열이 분석 계층의 **분기 기준**이기 때문이다. 리포지토리 상수를 도메인이
+#: 가져다 쓰면 의존 방향이 뒤집히고(도메인 → 리포지토리), 그렇다고 양쪽에 같은
+#: 리터럴을 두면 한쪽만 바뀌는 날 **모든 사용자 입력이 조용히 수집 데이터로 분류된다.**
+#: 그 순간 신뢰도 점수가 다시 붙는다(차단 ①). 그래서 정본은 여기 하나다 —
+#: `app/repositories/base.LISTING_SOURCE_USER` 는 이 값을 import 해서 쓴다.
+LISTING_SOURCE_USER = "user_entered"
+
 #: 동(棟)별 실측에 필요한 최소 표본. 층대(3)와 같은 관대함이되, 동은 **상대 비율**이라
 #: 이보다 적으면 한두 건의 우연이 편차로 둔갑한다. 미달 동은 실측하지 않고 폴백으로 넘긴다.
 MIN_SAMPLE_DONG = 3
@@ -61,7 +72,29 @@ class TradeRow:
 
 @dataclass(frozen=True)
 class ListingRow:
-    """호가 매물 한 건."""
+    """호가 매물 한 건.
+
+    ⚠️ **출처가 이 행의 성질을 결정한다** (migrations/016)
+    ------------------------------------------------------
+    호가는 두 갈래로 들어온다. 둘은 같은 숫자처럼 보이지만 **뒤에 붙은 신호가 다르다**:
+
+      · 수집(`source` 가 `LISTING_SOURCE_USER` 가 아님) — 여러 중개사가 각각 올린 값이라
+        "중복 등록 수"·"등록 후 경과일"·"최근 수집으로 살아있음 확인" 같은 **제3자 신호**가 있다.
+        `dedup.trust_score` 는 그 신호들을 세는 함수다.
+      · 사용자 수동 입력(`LISTING_SOURCE_USER`) — 사람이 하나 적은 값이다. 위 신호가
+        **셋 중 셋 다 성립하지 않는다**(중개사 중복 없음 · 포털 등록일 모름 ·
+        "확인됨"의 근거가 사용자 자신). 그래서 신뢰도를 매기면 안 된다.
+
+    이 필드가 없던 동안 분석 계층은 두 갈래를 구분할 수 없었고, 사용자가 적은 한 건이
+    `trust_score` 만점(=리스크 축 100점)을 받았다 — **비싼 매물을 입력할수록 총점이
+    올라가는** 형태다. `source` 는 그 구분을 도메인까지 **끊기지 않게** 나르는 칸이다.
+
+    ⚠️ 소유자(`created_by_user_id`)는 일부러 담지 않는다. 분기에 필요한 정보는
+       "누가 적었나"가 아니라 "사람이 적었나"이고, 이 객체는 근거 문자열·LLM 프롬프트
+       경로로 흘러간다 — 개인 식별자를 그 경로에 얹지 않는다(security.md §2.2).
+       DB CHECK(`listing_user_source_pair`)가 `source='user_entered'` ⟺ 소유자 있음을
+       강제하므로 두 값은 **같은 사실**이며, 그중 덜 위험한 쪽을 든다.
+    """
 
     id: int
     ask_price_krw: int
@@ -72,6 +105,17 @@ class ListingRow:
     building_id: int | None = None
     agency: str | None = None
     status: str = "active"
+    #: 출처. `None` = 미상(구형 호출부·수집 스텁) → **수집으로 취급한다.**
+    #: 사용자 입력만 명시적으로 표시되며, 그 표시는 리포지토리가 붙인다.
+    source: str | None = None
+    #: 사용자가 이 호가를 **직접 확인한 날**. 수집분에는 없다(None).
+    #: `collected_at` 과 값이 같을 수 있지만 뜻이 다르다 — 이쪽은 사람의 확인이다.
+    as_of: dt.date | None = None
+
+    @property
+    def is_user_entered(self) -> bool:
+        """사람이 손으로 적은 호가인가. **신뢰도 신호 유무의 유일한 판정식이다.**"""
+        return self.source == LISTING_SOURCE_USER
 
 
 @dataclass(frozen=True)
@@ -113,12 +157,18 @@ class PriceBand:
             return []
         adj = self.time_adjustment
         claim = f"중위 실거래가 {self.median_krw:,}원"
+        source_label = source
         if self.is_time_adjusted:
             # 보정된 숫자를 원본 실거래 중위처럼 내보내면 안 된다 — 다른 값이다.
             claim = f"{adj.reference_ym} 시점 환산 중위 {self.median_krw:,}원"
+            # ⚠️ **출처 문자열도 바꾼다**(CR34-5). 이 숫자는 국토부가 발표한 값이
+            #    아니라 그 값에 **우리 지수를 곱한 결과**다. 꼬리표가 앞에 붙는다는
+            #    이유로 출처를 원본 그대로 두면, 근거 목록만 따로 인용되는 자리
+            #    (LLM 프롬프트·리포트 발췌)에서 우리 계산이 국토부 발표로 둔갑한다.
+            source_label = f"{source} + 자체 시장지수 환산"
         return [{
             "claim": claim,
-            "source": source,
+            "source": source_label,
             "as_of": (as_of or dt.date.today()).isoformat(),
             "data_rows": self.sample_size,
             "period_months": self.period_months,

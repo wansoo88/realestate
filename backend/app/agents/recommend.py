@@ -30,6 +30,7 @@
 """
 from __future__ import annotations
 
+import datetime as dt
 import logging
 from dataclasses import dataclass, field
 from typing import Any
@@ -43,6 +44,7 @@ from app.agents.orchestrator import (
     AnalysisContext,
     Candidate,
     excluded_record,
+    reference_band,
     region_index_keys,
     run_mvp_pipeline,
 )
@@ -149,7 +151,7 @@ def _analyze(repo: Any, settings: Any, user_id: int, criteria: dict[str, Any],
                       "내 정보에서 보유 현금·연소득을 입력하면 후보를 좁혀 드립니다."],
         }
 
-    borrower, forbidden = _borrower_from_profile(profile, user_id, key)
+    borrower, forbidden = borrower_from_profile(profile, user_id, key)
     prop = PropertyFacts(purpose=str(criteria.get("purpose") or "live"))
     afford = compute_affordability(borrower, rules, prop=prop)
 
@@ -174,7 +176,12 @@ def _analyze(repo: Any, settings: Any, user_id: int, criteria: dict[str, Any],
     #    빼고 재정규화하되 그 사실을 응답에 남긴다(app/agents/scoring.py).
     weights = (prefs or {}).get("weights") or {}
 
-    assembly = _assemble_candidates(repo, criteria, budget, conditions)
+    # ⚠️ `user_id` 를 빠뜨리면 사용자가 손으로 입력한 호가가 **한 건도** 조회되지 않는다
+    #    (리포지토리가 fail-closed 다 — base.py `listings_for_complex` 계약).
+    #    조용히 "호가 없음"으로 떨어져 가격 축이 죽고, 사용자는 자기가 입력한 값이
+    #    어디로 갔는지 알 수 없다.
+    assembly = _assemble_candidates(repo, criteria, budget, conditions,
+                                    user_id=user_id)
     candidates = assembly.candidates
     # 적정가 밴드의 **시점 보정**용 지역 지수. 후보 루프 밖에서 지역당 한 번만 읽는다.
     # ⚠️ 이 한 줄이 빠지면 아무 오류 없이 밴드가 예전 값(시점 혼합)으로 돌아간다 —
@@ -338,12 +345,16 @@ def _strip_asset_amounts(excluded: list[dict[str, Any]],
     return out
 
 
-def _borrower_from_profile(profile: Any, user_id: int, key: bytes) -> tuple[Borrower, list[int]]:
+def borrower_from_profile(profile: Any, user_id: int, key: bytes) -> tuple[Borrower, list[int]]:
     """암호문 프로필 → Borrower + tripwire 검사값(원본 자산).
 
     기존 대출의 **연 상환액/이자**는 프로필에 없으므로 0 으로 둔다(추정하지 않는다,
     routes.py::/affordability 와 동일). 원본 금액은 forbidden 으로만 넘기고
     프롬프트에는 절대 싣지 않는다(security.md §6).
+
+    ⚠️ 이름 앞의 `_` 를 뗀 이유(SR32-1): `/map/complexes` 의 예산 기준도 이 함수를
+       쓴다. 지도가 자기 방식으로 복호화·조립하면 추천과 다른 상한이 생기고,
+       그러면 같은 화면의 두 숫자가 서로 다른 말을 한다.
     """
     amounts: dict[str, int] = {}
     for plain, enc_attr in _AMOUNT_FIELDS:
@@ -516,6 +527,111 @@ def load_market_indexes(repo: Any, candidates: list[Candidate]) -> dict[str, Any
     return out
 
 
+# ---------------------------------------------------------------------------
+# 단지 하나의 기준가 — **자금계획(`POST /affordability`)이 추천 카드와 같은 값을 쓰게 한다**
+#
+# CR34-3 이 지적한 것: 같은 단지가 화면마다 다른 금액으로 보인다.
+# 운영 DB 로 격차를 분해했다(2026-07-28, 226단지, 같은 단지·같은 면적):
+#     A 정의 차이(지도의 '최근 체결 1건' vs 추천의 '창 중위')  |중위| 5.8%
+#     B 시점 보정(창 중위를 기준월로 환산)                     |중위| 3.4%
+#     67% 의 단지에서 |A| > |B| — 즉 **지도를 보정해도 두 값은 안 맞는다.**
+# 지도는 면적을 모르는 채 500단지를 그리므로 밴드 중위를 낼 수도 없다(밴드는 면적별 값이다).
+# 그래서 지도는 자기가 무엇인지 말하게 두고(`MAP_PRICE_BASIS_NOTE`), **자금계획은
+# 여기서 추천과 같은 함수로 값을 만든다** — 단지 1건·면적 1개라 정의도 비용도 문제없다.
+#
+# ⚠️ 이 함수가 추천과 **다른 값을 내면 안 된다.** 그래서 밴드를 다시 구현하지 않고
+#    `reference_band`(추천이 부르는 바로 그 함수)를 부른다. 정책(창 사다리·커버리지
+#    문턱·지수 선택)이 바뀌면 두 화면이 함께 바뀐다.
+# ---------------------------------------------------------------------------
+
+#: 자금계획이 쓴 금액의 근거. 프론트가 화면에 그대로 이름 붙일 수 있게 서버가 정한다.
+PRICE_BASIS_TIME_ADJUSTED = "time_adjusted_band"   # 기준월로 환산한 창 중위(= 추천 카드)
+PRICE_BASIS_TRADE_BAND = "trade_band"              # 창 중위이되 시점 보정은 못 했다
+PRICE_BASIS_CLIENT = "client_supplied"             # 클라이언트가 준 숫자 — 서버는 검증 못 한다
+
+
+@dataclass(frozen=True)
+class ReferencePrice:
+    """단지·면적 하나의 기준가와 **그 값이 무엇인지**.
+
+    `krw is None` 이면 값을 만들지 못한 것이고 `reason` 에 왜인지 남는다 —
+    0 이나 근사치로 채우지 않는다. 자금계획은 이 값을 사용자 자산으로 나누므로
+    지어낸 숫자가 들어가면 "얼마나 더 필요한가"가 통째로 틀린다.
+    """
+
+    krw: int | None
+    basis: str | None = None
+    #: 시점 보정을 했으면 환산 기준월('YYYY-MM'). 안 했으면 None.
+    as_of_ym: str | None = None
+    sample_size: int = 0
+    period_months: int | None = None
+    reason: str | None = None
+
+    def to_api(self) -> dict[str, Any]:
+        return {
+            "krw": self.krw,
+            "basis": self.basis,
+            "as_of_ym": self.as_of_ym,
+            "sample_size": self.sample_size,
+            "period_months": self.period_months,
+            "reason": self.reason,
+        }
+
+
+def complex_reference_price(repo: Any, complex_id: int, area_m2: float, *,
+                            as_of: dt.date | None = None) -> ReferencePrice:
+    """한 단지·한 면적의 적정가 밴드 중위. **추천 카드와 같은 경로**로 만든다.
+
+    실패해도 예외를 밖으로 내지 않는다 — 자금계획은 이 값 없이도(사용자가 희망가를
+    직접 넣으면) 성립하므로, 여기서 500 을 내면 기능 하나 때문에 화면 전체가 죽는다.
+    대신 **조용히 넘어가지 않는다**: 못 만들었으면 `reason` 이 남고 응답에 실린다.
+    """
+    as_of = as_of or dt.date.today()
+    try:
+        trades = repo.trades_for_complex(complex_id)
+    except Exception:  # noqa: BLE001
+        logger.exception("기준가 산출: 실거래 조회 실패 (complex_id=%s)", complex_id)
+        return ReferencePrice(krw=None, reason="실거래를 조회하지 못했습니다")
+    if not trades:
+        return ReferencePrice(krw=None, reason="이 단지의 실거래 자료가 없습니다")
+
+    region_code = _complex_region_code(repo, complex_id)
+    cand = Candidate(complex_id=complex_id, complex_name="", unit_type_id=None,
+                     area_m2=area_m2, region_code=region_code, trades=list(trades))
+    indexes = load_market_indexes(repo, [cand])
+    band = reference_band(cand, as_of, indexes=indexes)
+    if not band.available:
+        return ReferencePrice(krw=None, sample_size=band.sample_size,
+                              period_months=band.period_months, reason=band.reason)
+
+    adj = band.time_adjustment
+    applied = bool(adj is not None and adj.applied)
+    return ReferencePrice(
+        krw=band.median_krw,
+        basis=PRICE_BASIS_TIME_ADJUSTED if applied else PRICE_BASIS_TRADE_BAND,
+        as_of_ym=adj.reference_ym if applied else None,
+        sample_size=band.sample_size,
+        period_months=band.period_months,
+        # 보정을 못 했으면 **왜 못 했는지**가 그대로 화면까지 간다.
+        # 그 경우 이 값은 6~36개월을 시점 구분 없이 섞은 값이라 어느 시점도 아니다.
+        reason=(None if applied
+                else (adj.reason if adj is not None
+                      else "시장지수를 조회하지 않아 시점 보정을 시도하지 않았습니다")),
+    )
+
+
+def _complex_region_code(repo: Any, complex_id: int) -> str | None:
+    """시점 보정에 필요한 법정동코드. 못 얻으면 **None** — 지수 없이(사유가 남는 채로) 간다."""
+    getter = getattr(repo, "complex_region_code", None)
+    if getter is None:
+        return None
+    try:
+        return getter(complex_id)
+    except Exception:  # noqa: BLE001
+        logger.exception("기준가 산출: 지역코드 조회 실패 (complex_id=%s)", complex_id)
+        return None
+
+
 @dataclass
 class Assembly:
     """후보 조립 결과.
@@ -566,7 +682,16 @@ def _query_candidates(query: Any, *, region_codes: list[str], budget: int | None
 _SCOPE_AREA_NOTE = (
     "{label} 조건으로 범위 내 단지 {total:,}개 중 {dropped:,}개를 제외했습니다 — "
     "해당 면적대의 실거래·매물·타입 근거가 없거나 면적 정보가 확인되지 않은 단지입니다"
-    "(확인되지 않은 것은 통과시키지 않습니다 — 모름 ≠ 조건 충족).")
+    "(확인되지 않은 것은 통과시키지 않습니다 — 모름 ≠ 조건 충족). "
+    # ★ 이 한 문장이 없으면 위 문장이 **사용자에게는 거짓으로 보인다** — 방금 그
+    #   단지에 84㎡ 호가를 넣었는데 "그 면적대 매물 근거가 없다"고 읽히기 때문이다.
+    #   실제로는 이 조회(`candidate_scope_stats`·`recommendation_candidates`)가
+    #   소유자 인자를 받지 않아 사용자 입력을 근거로 세지 않는 것이고, 그 선택의
+    #   이유는 A 의 입력이 B 의 조건 통과 여부를 바꾸는 것을 막기 위해서다.
+    #   ⚠️ 조건부로 붙이지 않는다 — 이 화면은 그 사용자가 그 단지에 호가를 넣었는지
+    #      모른다(알려면 같은 누출 경로를 다시 열어야 한다).
+    "⚠️ 이 판정에는 **직접 입력하신 호가를 세지 않습니다** — 남의 입력이 내 결과를 "
+    "바꾸지 않게 하기 위해서입니다. 그래서 내 호가만 있는 면적대는 여기서 빠집니다.")
 _SCOPE_BUILT_NOTE = (
     "{year}년 이후 준공 조건으로 {dropped:,}개 단지를 제외했습니다"
     "{unknown}.")
@@ -660,8 +785,16 @@ def _applied_condition_notes(conditions: FilterConditions,
 
 def _assemble_candidates(repo: Any, criteria: dict[str, Any],
                          budget: int | None,
-                         conditions: FilterConditions | None = None) -> Assembly:
+                         conditions: FilterConditions | None = None,
+                         *, user_id: int | None = None) -> Assembly:
     """repo 조회 결과를 orchestrator 의 Candidate 로 조립.
+
+    ⚠️ `user_id` 는 **선택 인자처럼 보이지만 계약의 일부다** (migrations/016)
+    ----------------------------------------------------------------------
+    사용자 수동 입력 호가는 소유자 스코프로만 나온다(`listings_for_complex(id, user_id)`).
+    이 인자를 안 넘기면 리포지토리는 오류가 아니라 **0건**을 준다(fail-closed) —
+    그 후보는 조용히 "호가 없음"이 되고 가격 축이 죽는다. 기본값을 None 으로 둔 것은
+    소유자 없이 도는 옛 호출부(스크립트·단위 테스트) 때문이지 "안 넘겨도 된다"가 아니다.
 
     ⚠️ **내 조건(평수·연식·세대수)의 마지막 문이 여기다** (2026-07-27)
     ------------------------------------------------------------------
@@ -688,6 +821,16 @@ def _assemble_candidates(repo: Any, criteria: dict[str, Any],
       · 호가 있음 → 매물 그룹 단위 후보 (price_basis=listing)
       · 호가 없음 → 실거래 면적대 단위 후보 (price_basis=trade, group=None)
     가짜 대표 호가를 만들어 끼우지 않는다 — 그러면 하류가 그걸 호가로 믿는다.
+
+    ⚠️ 두 경로는 **한 단지 안에서 공존한다** (2026-07-29)
+    -----------------------------------------------------
+    예전에는 `if listings: … continue` 라 호가가 한 건이라도 있으면 그 단지의 실거래
+    경로가 통째로 건너뛰어졌다. 수집 호가가 0행이던 동안에는 드러나지 않았지만,
+    사용자가 84㎡ 호가 하나를 손으로 입력하는 순간 **그 단지의 59㎡ 실거래 후보가
+    사라졌다** — 입력할수록 선택지가 줄어드는 형태라 원인을 짐작할 수도 없다.
+    지금은 호가 그룹을 세우고, **호가가 없는 면적대에 한해** 실거래 후보를 덧붙인다.
+    같은 면적대에 둘 다 있으면 **호가가 이긴다**(더 최신 정보이고, 실제로 살 수 있는
+    물건이다). 그래야 같은 유닛이 두 후보로 중복 노출되지 않는다.
     """
     query = getattr(repo, "recommendation_candidates", None)
     listings_of = getattr(repo, "listings_for_complex", None)
@@ -757,42 +900,64 @@ def _assemble_candidates(repo: Any, criteria: dict[str, Any],
                      else "households")
             continue
 
-        listings = listings_of(c.id) or []
+        # ⚠️ `user_id` 를 넘긴다 — 없으면 사용자 수동 입력 호가가 0건으로 나온다
+        #    (fail-closed · migrations/016). 배선을 잊으면 조용히 안 보인다.
+        listings = listings_of(c.id, user_id=user_id) or []
         trades = (trades_of(c.id) if trades_of else []) or []
         location = location_of(c.id) if location_of else None
         # 매칭된 정비사업 구역(적재 시점에 대표지번 정확일치로 이미 이어져 있다).
         # 없으면 None → 도메인이 '확인되지 않음'으로 판정한다(없다고 말하지 않는다).
         redev = redev_of(c.id) if redev_of else None
 
+        # --- (a) 호가 기준 후보 -------------------------------------------
+        # 같은 물건(중복)을 접고, 서로 다른 유닛(면적·층·동)은 각각 후보로 둔다.
+        # 호가로 **후보를 실제로 세운** 면적대. (b)에서 같은 면적대를 두 번 세우지
+        # 않으려고 쓴다 — 그러니까 여기 들어가는 것은 "후보가 된 면적"뿐이다.
+        listing_areas: list[float] = []
         if listings:
             funnel["with_listings"] += 1
-            # 같은 물건(중복)을 접고, 서로 다른 유닛(면적·층·동)은 각각 후보로 둔다.
-            for grp in group_duplicates(listings):
-                area = grp.representative.area_m2
-                # 평수는 **후보 선별**이다: 59㎡를 원하는 사람에게 84㎡ 는 제외 사유가
-                # 아니라 애초에 후보가 아니다. 면적 미상(0·None)도 통과시키지 않는다 —
-                # 조건 대상 여부를 판정할 수 없는 것을 "맞다"고 우기지 않는다.
-                if not conditions.area_ok(area):
-                    out.drop("area" if conditions.area_known(area) else "area_unknown")
-                    continue
-                candidates.append(_build(c, area, trades, listings, location,
-                                         redev, group=grp))
-                funnel["listing_candidates"] += 1
-                if len(candidates) >= MAX_CANDIDATES:
-                    return _capped(out, funnel, conditions)
-            continue
+        for grp in group_duplicates(listings):
+            area = grp.representative.area_m2
+            # 평수는 **후보 선별**이다: 59㎡를 원하는 사람에게 84㎡ 는 제외 사유가
+            # 아니라 애초에 후보가 아니다. 면적 미상(0·None)도 통과시키지 않는다 —
+            # 조건 대상 여부를 판정할 수 없는 것을 "맞다"고 우기지 않는다.
+            if not conditions.area_ok(area):
+                out.drop("area" if conditions.area_known(area) else "area_unknown")
+                continue
+            # ⚠️ **조건을 통과한 뒤에 센다**(CR35-1). 조건에 걸려 떨어진 호가까지
+            #    세면 그 면적이 (b)의 ±AREA_TOLERANCE_M2 안에 있는 **조건 안 실거래**를
+            #    지운다 — 조건 80~85㎡ · 호가 85.3㎡(밖) · 실거래 84.97㎡(안) 이면
+            #    후보가 0건이 되고 `dropped`·`excluded` 어디에도 안 남는다(조용한 유실).
+            #    "탈락 호가도 자리를 차지한다"가 막으려던 것(사용자가 배제한 면적이
+            #    실거래로 되살아남)은 아래 `kept = [a for a in areas
+            #    if conditions.area_ok(a)]` 가 이미 막는다 — 실거래 면적도 같은
+            #    `area_ok` 를 통과해야 한다. 두 규칙이 갈리는 경우는 두 값이 조건
+            #    경계를 사이에 두고 나뉠 때뿐이고, 그때 옳은 답은 "조건 안 실거래를
+            #    살린다"이다(사용자가 요구한 면적대에 실제 거래가 있다).
+            listing_areas.append(area)
+            candidates.append(_build(c, area, trades, listings, location,
+                                     redev, group=grp))
+            funnel["listing_candidates"] += 1
+            if len(candidates) >= MAX_CANDIDATES:
+                return _capped(out, funnel, conditions)
 
-        # 호가 0건 — 실거래로 후보를 세운다(G4).
-        areas = _trade_area_groups(trades)
+        # --- (b) 호가 후보가 **없는 면적대**만 실거래로 세운다(G4) --------
+        # 호가 하나가 그 단지의 다른 면적대를 지우지 않게 하되, 같은 면적대를 두 번
+        # 세우지도 않는다. 겹침 판정은 후보 조립 전체가 쓰는 `AREA_TOLERANCE_M2` 다.
+        # `listing_areas` 는 (a)에서 **후보가 된** 면적만 담는다 — 조건에 걸려 떨어진
+        # 호가는 자리를 차지하지 않는다(CR35-1).
+        areas = [a for a in _trade_area_groups(trades)
+                 if not any(abs(a - la) <= AREA_TOLERANCE_M2 for la in listing_areas)]
         if not areas:
-            funnel["no_price_evidence"] += 1
-            # ⚠️ 여기서 그냥 continue 하면 이 단지는 **어디에도 안 남는다.** 사용자가
-            #    "왜 우리 단지가 없지"라고 물으면 답할 근거가 사라진다(실측: 50개 중 4개).
-            out.excluded.append(excluded_record(
-                complex_id=c.id, complex_name=c.name, area_m2=None,
-                price_basis=None, code=EXCLUDED_NO_PRICE,
-                reason=(f"가격 근거 없음 — 활성 호가가 없고 최근 {PERIOD_LADDER[-1]}개월 "
-                        f"실거래가 같은 면적대에서 {MIN_SAMPLE}건 미만입니다")))
+            if not listings:
+                funnel["no_price_evidence"] += 1
+                # ⚠️ 여기서 그냥 continue 하면 이 단지는 **어디에도 안 남는다.** 사용자가
+                #    "왜 우리 단지가 없지"라고 물으면 답할 근거가 사라진다(실측: 50개 중 4개).
+                out.excluded.append(excluded_record(
+                    complex_id=c.id, complex_name=c.name, area_m2=None,
+                    price_basis=None, code=EXCLUDED_NO_PRICE,
+                    reason=(f"가격 근거 없음 — 활성 호가가 없고 최근 {PERIOD_LADDER[-1]}개월 "
+                            f"실거래가 같은 면적대에서 {MIN_SAMPLE}건 미만입니다")))
             continue
         # ⚠️ **여기서 걸러진 것을 '가격 근거 없음'으로 부르지 않는다.** 위 분기와 순서를
         #    바꾸면 "59㎡가 없는 단지"가 "실거래 표본이 부족한 단지"로 보고되고,
@@ -803,7 +968,10 @@ def _assemble_candidates(repo: Any, criteria: dict[str, Any],
         out.drop("area_unknown", sum(1 for a in areas if not conditions.area_known(a)))
         if not kept:
             continue
-        funnel["trade_only"] += 1
+        # `trade_only` 는 **호가가 하나도 없어 실거래로만 선 단지** 수다. 호가와 실거래가
+        # 섞인 단지를 여기 세면 깔때기 합이 단지 수를 넘어 로그를 읽을 수 없게 된다.
+        if not listings:
+            funnel["trade_only"] += 1
         for area in kept:
             candidates.append(_build(c, area, trades, [], location,
                                      redev, group=None))

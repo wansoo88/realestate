@@ -1,0 +1,26 @@
+# 줄바꿈은 저장소·작업본 모두 LF 로 고정한다 (CR39-1)
+#
+# 왜 필요한가 — 이건 취향 문제가 아니라 **검사가 조용히 공허해지는** 문제다.
+#   `core.autocrlf=true` 인 윈도우 체크아웃에서 작업본만 CRLF 가 된다(커밋 블롭은 LF).
+#   그러면 소스를 줄 단위로 훑는 검사가 `split("\n")` 뒤에 `\r` 를 달고 다니는데,
+#   JS 정규식에서 `\r` 는 **줄종결자**라 `$` 앵커가 그 앞에서 끝난다.
+#   `frontend/src/test/apiContract.test.ts` 의 `over_budget:` 전수 검사가 바로 그 형태였고,
+#   CRLF 체크아웃에서는 **매칭 0건 → 빈 배열 → 검사 통과**가 됐다.
+#   막으라고 만든 관문이 "아무것도 못 찾았으니 위반도 없다"로 뒤집힌다.
+#
+# 즉 이 파일이 없으면 **어느 개발자의 체크아웃이냐에 따라 테스트의 의미가 달라진다.**
+# 그 상태에서는 초록을 근거로 쓸 수 없다.
+* text=auto eol=lf
+
+# 바이너리는 절대 변환하지 않는다 (변환하면 파일이 깨진다)
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.woff binary
+*.woff2 binary
+*.zip  binary
+*.gz   binary
+*.pdf  binary
+*.drawio binary

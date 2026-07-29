@@ -43,9 +43,24 @@ interface Props {
    */
   llmActive?: boolean;
   onShowOnMap?: (complexId: number) => void;
+  /**
+   * "내 매물"(호가 직접 입력) 화면으로 가는 길 (CR35-2).
+   *
+   * 이 카드의 점수 설명은 호가가 없으면 *"'내 매물'에서 직접 입력하시면 가격 축이
+   * 반영됩니다"* 라고 말한다. 그 문장이 가리키는 화면이 **여기서 열려야** 한다 —
+   * 안내만 있고 갈 곳이 없으면 그 문장은 거짓말이다.
+   */
+  onAddListing?: (complex: { id: number; name: string }) => void;
 }
 
-export function ReportCard({ item, tags, unknownTags, llmActive = false, onShowOnMap }: Props) {
+export function ReportCard({
+  item,
+  tags,
+  unknownTags,
+  llmActive = false,
+  onShowOnMap,
+  onAddListing,
+}: Props) {
   const price = priceView(item);
   const score = scoreView(item);
   const dong = dongView(item.dong_valuation);
@@ -123,6 +138,25 @@ export function ReportCard({ item, tags, unknownTags, llmActive = false, onShowO
               <span className="num">{formatPct(price.gapPct)}</span>
             </>
           )}
+        </p>
+      )}
+
+      {/* 호가가 없으면 **가격 축이 통째로 빠진다**(가중치 31%). 서버 설명이 가리키는
+          "내 매물" 화면으로 가는 길을 그 사실 옆에 둔다 — 안내만 있고 갈 곳이 없으면
+          그건 안내가 아니다(CR35-2). */}
+      {price.askKrw === null && onAddListing && (
+        <p className="report__addask">
+          <button
+            type="button"
+            className="report__addask-btn"
+            onClick={() => onAddListing({ id: item.complex.id, name: item.complex.name })}
+          >
+            이 단지 호가 입력
+          </button>
+          <span className="report__addask-why">
+            네이버 부동산 등에서 본 호가를 적으면 <strong>가격 축</strong>이 이 후보의 점수에
+            반영됩니다. 공공 데이터에는 호가가 없습니다.
+          </span>
         </p>
       )}
 

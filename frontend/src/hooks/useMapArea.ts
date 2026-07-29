@@ -9,9 +9,15 @@
  * 컴포넌트에서 fetch 를 부르지 않기 위해 훅으로 뺐다(components.md §1, RN 재사용).
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ApiException, api, type ClusterItem, type ComplexItem } from "../api/client";
+import {
+  ApiException,
+  api,
+  type ClusterItem,
+  type ComplexItem,
+  type MapBudget,
+} from "../api/client";
 import { bboxTooLarge } from "../lib/bbox";
-import { buildMapQuery, type MapFilterState } from "../lib/mapFilters";
+import { buildMapQuery, mapFilterKey, type MapFilterState } from "../lib/mapFilters";
 
 /** 지도를 끌 때마다 요청이 나가지 않도록 하는 간격. */
 export const MAP_DEBOUNCE_MS = 350;
@@ -31,6 +37,14 @@ export interface MapAreaState {
    * (idle 은 지도가 멈출 때만 오므로 렌더 폭풍이 되지 않는다)
    */
   bbox: string | null;
+  /**
+   * 서버가 말한 예산 기준(`budget` 블록 · api-spec §4). **군집 응답에도 온다.**
+   *
+   * ⚠️ `null` 은 **"서버가 말하지 않았다"** 이지 "적용 안 됨"이 아니다. 둘을 같은 값으로
+   *    접으면 화면이 "구버전 서버"와 "예산을 못 세웠다"를 구분하지 못한다 —
+   *    해석은 `lib/budgetStatus.budgetStatusView` 한 곳에서만 한다.
+   */
+  budget: MapBudget | null;
 }
 
 export function useMapArea(filters: MapFilterState) {
@@ -41,6 +55,7 @@ export function useMapArea(filters: MapFilterState) {
     loading: false,
     error: null,
     bbox: null,
+    budget: null,
   });
 
   // 최신 필터를 콜백 재생성 없이 읽는다(지도 리스너를 매번 다시 달지 않기 위해).
@@ -71,10 +86,13 @@ export function useMapArea(filters: MapFilterState) {
       if (!alive.current || id !== reqId.current) return;
       // ⚠️ 통째로 갈아끼우지 않는다(updater 로 이전 상태를 이어받는다) —
       //    조회 응답이 화면 범위(bbox)를 덮어 지우면 "이 주변에서 찾기"가 조회 때마다 꺼진다.
+      // 예산 블록은 **매 응답마다 새로 쓴다**(?? 로 옛 값을 이어받지 않는다).
+      // 서버가 말을 멈췄는데 지난 응답의 "적용됨"이 남아 있으면 화면이 옛 사실을 말한다.
+      const budget = res.budget ?? null;
       setState((s) =>
         res.level === "complex"
-          ? { ...s, level: "complex", items: res.items, clusters: [], loading: false, error: null }
-          : { ...s, level: "cluster", items: [], clusters: res.items, loading: false, error: null },
+          ? { ...s, level: "complex", items: res.items, clusters: [], loading: false, error: null, budget }
+          : { ...s, level: "cluster", items: [], clusters: res.items, loading: false, error: null, budget },
       );
     } catch (e) {
       if (!alive.current || id !== reqId.current) return;
@@ -114,9 +132,13 @@ export function useMapArea(filters: MapFilterState) {
     [schedule],
   );
 
-  // 필터 **내용**이 바뀌면 즉시 재조회. 객체 정체성이 아니라 실제 쿼리로 비교해야
+  // 필터 **내용**이 바뀌면 즉시 재조회. 객체 정체성이 아니라 내용으로 비교해야
   // 부모가 매 렌더 새 객체를 만들어도 무한 루프가 나지 않는다.
-  const filterKey = JSON.stringify(buildMapQuery("", 0, filters));
+  //
+  // ⚠️ 쿼리(`buildMapQuery`)만으로 비교하면 안 된다. 쿼리에는 이제 금액이 없고
+  //    `budget=mine` 플래그만 있어서, 희망가를 바꿔도 쿼리가 그대로다(SR32-1).
+  //    그래서 실효 금액까지 보는 `mapFilterKey` 를 쓴다 — 이 값은 **비교 전용**이다.
+  const filterKey = mapFilterKey(filters);
   const firstRun = useRef(true);
   useEffect(() => {
     if (firstRun.current) {

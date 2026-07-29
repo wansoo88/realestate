@@ -234,3 +234,95 @@ describe("기존 화면 회귀", () => {
     expect(screen.getByText(/지방세법 §11/)).toBeTruthy();
   });
 });
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * CR35-4 — **무엇을 기준으로 계산했는지 화면이 말한다**
+ *
+ * 같은 단지가 자금계획과 추천 카드에서 다른 금액으로 서던 문제의 마지막 조각이다.
+ * 이제 금액은 서버가 정하고(추천과 같은 함수), 화면은 그 근거를 **접지 않고** 적는다.
+ * ───────────────────────────────────────────────────────────────────────── */
+
+describe("기준가 근거 (target_price)", () => {
+  const COMPLEX_BASIS: PlanBasis = {
+    kind: "complex",
+    name: "가나아파트",
+    estimated: true,
+    asOf: "2026-06-30",
+  };
+
+  it("시점 환산 추정가면 표본·기준월과 **무엇과 같은 기준인지**를 적는다 (CR36-5)", () => {
+    renderPanel({
+      data: {
+        ...response(),
+        target_price: {
+          krw: 900_000_000,
+          basis: "time_adjusted_band",
+          as_of_ym: "2026-06",
+          sample_size: 12,
+          period_months: 12,
+          reason: null,
+        },
+      },
+      planBasis: COMPLEX_BASIS,
+      planArea: { m2: 84.97, basis: "map_trade" },
+    });
+
+    const plan = screen.getByRole("region", { name: "자금계획" });
+    expect(plan.textContent).toContain("최근 실거래를 한 시점으로 환산한 추정가");
+    expect(plan.textContent).toContain("12건");
+    expect(plan.textContent).toContain("2026-06");
+    // 어느 카드와 같은 값인지 말하지 않으면, 추천을 안 돌린 사용자에게는 없는 카드를 가리킨다
+    expect(plan.textContent).toContain("AI 추천도 '가나아파트 84.97㎡' 를 같은 기준으로 계산합니다");
+    // 어느 면적으로 물었는지 — 없으면 34평 계획이 25평 매물의 계획으로 읽힌다
+    expect(plan.textContent).toContain("84.97㎡ 기준");
+  });
+
+  it("직접 입력한 금액은 '직접 입력하신 금액'이라고 부른다(서버가 근거를 모른다)", () => {
+    renderPanel({
+      data: {
+        ...response(),
+        target_price: { krw: 900_000_000, basis: "client_supplied", sample_size: 0 },
+      },
+      planBasis: { kind: "manual" },
+    });
+
+    const plan = screen.getByRole("region", { name: "자금계획" });
+    expect(plan.textContent).toContain("직접 입력하신 금액");
+    expect(plan.textContent).toContain("서버가 근거를 확인하지 않았습니다");
+  });
+
+  it("기준가를 못 만들었으면 **계획을 지어내지 않고 사유**를 보인다", () => {
+    renderPanel({
+      data: {
+        ...response(null),
+        target_price: {
+          krw: null,
+          basis: null,
+          sample_size: 0,
+          reason: "이 단지의 실거래 자료가 없습니다",
+        },
+      },
+      planBasis: COMPLEX_BASIS,
+    });
+
+    const plan = screen.getByRole("region", { name: "자금계획" });
+    expect(plan.textContent).toContain("자금계획을 세우지 못했습니다");
+    expect(plan.textContent).toContain("이 단지의 실거래 자료가 없습니다");
+    // 사유를 아는데 "포함되지 않았습니다"로 뭉뚱그리지 않는다
+    expect(plan.textContent).not.toContain("자금계획이 포함되지 않았습니다");
+    expect(plan.textContent).not.toContain("0원");
+  });
+
+  it("서버가 블록을 안 주면(구버전) 근거 줄 자체가 없다 — 지어내지 않는다", () => {
+    const { container } = render(
+      <AffordabilityPanel
+        data={response()}
+        loading={false}
+        error={null}
+        planBasis={{ kind: "manual" }}
+      />,
+    );
+    expect(container.querySelector(".plan__ref")).toBeNull();
+    expect(container.querySelector(".plan__noref")).toBeNull();
+  });
+});

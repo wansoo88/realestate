@@ -362,6 +362,31 @@
   line-height: 1.6;
 }
 
+/* 호가 입력 동선 — 안내 문장(가격 축 미반영) 옆의 실제 입구.
+   지도 버튼보다 약하게: 이건 보조 행동이지 이 카드의 주된 결론이 아니다. */
+.report__addask {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-1);
+  margin: var(--sp-2) 0 0;
+}
+
+.report__addask-btn {
+  min-height: var(--touch-min);
+  padding: 0 var(--sp-3);
+  border-radius: var(--r-btn);
+  border: 0.5px solid var(--hairline-strong);
+  color: var(--accent-text);
+  font-size: var(--fs-caption);
+}
+
+.report__addask-why {
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
 .report__map-btn {
   width: 100%;
   margin-top: var(--sp-3);

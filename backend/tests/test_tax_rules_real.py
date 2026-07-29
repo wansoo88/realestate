@@ -178,3 +178,41 @@ def test_대출규제_대표값(prod_rules):
     assert prod_rules.lending_rule("ltv").rate_pct == 70.0
     assert prod_rules.lending_rule("dsr").rate_pct == 40.0
     assert prod_rules.lending_rule("dti").rate_pct == 60.0
+
+
+# ---------------------------------------------------------------------------
+# ★ CR37-5 — `purpose`(실거주/투자)는 **배선만 서 있다**
+#
+# `routes.py`·`mapFilters.ts`·`purpose.ts` 세 곳이 현재형으로 "목적에 따라 대출
+# 절대한도·스트레스 가산이 달라 한도 자체가 달라진다"고 단언했는데, 운영 세율에
+# `purpose` 를 조건으로 쓰는 규칙이 **하나도 없어 두 값의 결과가 같았다**(실측
+# 1,026,560,000 동일). 말과 코드를 맞춘 뒤, **그 사실 자체**를 여기서 못박는다.
+#
+# 이 테스트는 규칙이 생기는 날 **일부러 깨진다.** 그때 고칠 것은 이 테스트가 아니라
+# 위 세 곳의 문장이다(실패 메시지가 그렇게 말한다).
+# ---------------------------------------------------------------------------
+
+def test_운영_세율에_목적별_규칙이_아직_없다(prod_rules):
+    """`purpose` 를 `when` 조건으로 쓰는 대출 규칙이 0개인가."""
+    using = [r.id for r in (*prod_rules.lending_caps, *prod_rules.lending_stress)
+             if "purpose" in r.when]
+    assert using == [], (
+        f"목적별 대출 규칙이 생겼습니다: {using}. 이제 `purpose` 가 한도를 실제로 "
+        "바꿉니다 — **주석·문서를 함께 고치세요**: backend `routes.py`(map_complexes 의 "
+        "purpose 파라미터) · `affordability/models.py`(PropertyFacts.purpose) · "
+        "`docs/02-design/api-spec.md` §4 파라미터 표 · 프론트 `lib/mapFilters.ts`·"
+        "`lib/purpose.ts`. 그리고 이 테스트를 '달라진다'를 검증하는 테스트로 바꾸세요.")
+
+
+def test_오늘은_실거주와_투자의_한도가_같다(prod_rules):
+    """위 사실의 **결과**를 금액으로 확인한다(규칙 목록만 보면 배선 누락을 못 본다)."""
+    from app.domain.affordability.engine import compute_affordability
+
+    borrower = Borrower(cash_krw=500_000_000, annual_income_krw=100_000_000)
+    live = compute_affordability(
+        borrower, prod_rules, prop=PropertyFacts(purpose="live")).max_purchase_krw
+    invest = compute_affordability(
+        borrower, prod_rules, prop=PropertyFacts(purpose="invest")).max_purchase_krw
+    assert live == invest, (
+        f"목적에 따라 한도가 달라졌습니다(live={live:,} invest={invest:,}) — "
+        "위 테스트의 안내대로 주석·문서를 갱신하세요.")

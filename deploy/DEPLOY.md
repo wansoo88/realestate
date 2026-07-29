@@ -235,6 +235,11 @@ docker exec realestate-db psql -U realestate -d realestate -c "
   SELECT to_regclass('public.school_district_member');"                    # 있으면 013 적용됨
 docker exec realestate-db psql -U realestate -d realestate -c "
   SELECT to_regclass('public.redev_project');"                             # 있으면 014 적용됨
+docker exec realestate-db psql -U realestate -d realestate -c "
+  SELECT to_regclass('public.market_price_index');"                        # 있으면 015 적용됨
+docker exec realestate-db psql -U realestate -d realestate -c "
+  SELECT column_name FROM information_schema.columns
+   WHERE table_name='listing' AND column_name='created_by_user_id';"       # 있으면 016 적용됨
 
 # (2) 백업 먼저 (파괴적이지 않아도 습관으로)
 mkdir -p /root/realestate-backup
@@ -254,22 +259,71 @@ docker exec realestate-db pg_dump -U realestate -d realestate --schema-only \
 #     ⚠️ 표만 만들 뿐 값은 배치가 채운다: `python scripts/build_market_index.py` (§5-3c).
 #        비어 있어도 기능은 죽지 않고 **보정을 하지 않은 채** 동작한다(사유가 응답에 남는다).
 #        다만 보정 없이는 서울 단지의 적정가 밴드가 평균 ~8% 낮게 나온다(§5-3c 실측).
-#     ※ 운영 DB 에는 **2026-07-28 적용 완료**(추가만 하는 마이그레이션 · 스키마 백업 후 실행).
+#     016 은 `listing` 에 사용자 수동 입력 호가를 받는 칸(`created_by_user_id`·`as_of`)과
+#     CHECK 제약을 더한다. 운영 `listing` 이 0행이라 가격·리스크 축이 죽어 있었고,
+#     남은 합법적 경로가 사람이 손으로 옮겨 적는 것뿐이다(자세한 근거는 파일 머리말).
+#     ⛔⛔ **016 은 코드보다 먼저다. 안 하면 지도와 추천이 통째로 죽는다.** (2026-07-29 실측)
+#        피해 범위가 "수동 입력 API 만"이 아니다. 새 코드의 **읽기 경로 네 곳**이
+#        016 의 신규 컬럼을 SQL 에서 하드 참조한다(`postgis.py`):
+#          · `_BBOX_SQL`            → `complexes_in_bbox`      = **지도 전체**
+#          · `_CANDIDATES_SQL_*`    → `recommendation_candidates` = **추천 후보 조회**
+#          · `_SCOPE_STATS_*`(_AREA_MATCH_SQL) → `candidate_scope_stats` = 제외 사유 집계
+#          · `_LISTINGS_SQL`        → `listings_for_complex`   = 후보의 호가 근거
+#            (여기만 `li.as_of` 도 함께 참조한다 — 오류 메시지가 컬럼명이 달라 보인다)
+#        016 없이 새 코드를 올리면 넷 다
+#            `psycopg.errors.UndefinedColumn: column li.created_by_user_id does not exist`
+#        로 실패한다 → 지도가 빈 화면이 되고 추천은 매번 error 로 끝난다.
+#        013 과 같은 성격의 사고이며(그쪽은 입지 조회), 되돌리려면 016 을 적용하는 수밖에 없다.
+#     ⚠️ 제약이 **출처와 소유자를 짝으로 강제**한다(`listing_user_source_pair`).
+#        적용 시점 `listing` 0행이라 백필 대상이 없다 — 기존 행이 있었다면 전부
+#        `created_by_user_id NULL`(= 수집분)이 되고 CHECK 도 그대로 만족한다.
+#     ※ 운영 DB 에는 015 까지 **2026-07-28 적용 완료**(추가만 하는 마이그레이션 · 스키마 백업 후 실행).
+#        016 은 미적용 — 배포 시 **코드 교체 전에** 적용한다.
 for f in backend/migrations/009_user_approval.sql backend/migrations/010_job_result_meta.sql \
          backend/migrations/011_poi_natural_key.sql \
          backend/migrations/012_school_district_natural_key.sql \
          backend/migrations/013_school_level_and_zone_member.sql \
          backend/migrations/014_redevelopment_project.sql \
-         backend/migrations/015_market_price_index.sql; do
+         backend/migrations/015_market_price_index.sql \
+         backend/migrations/016_user_entered_listing.sql; do
   echo "--- $f ---"
   docker exec -i realestate-db psql -U realestate -d realestate -v ON_ERROR_STOP=1 < "$f"
 done
 
 # (4) 적용 확인 — (1)을 다시 돌려 컬럼이 생겼는지 눈으로 본다
+#     016 은 컬럼만이 아니라 **CHECK 제약**까지 확인한다. 컬럼만 생기고 제약이 빠지면
+#     출처와 소유자가 어긋난 행이 들어올 수 있고, 그 순간 "무엇이 근거였나"에 답할 수 없다.
+docker exec realestate-db psql -U realestate -d realestate -c "
+  SELECT conname FROM pg_constraint
+   WHERE conrelid='listing'::regclass AND conname LIKE 'listing_user_%' ORDER BY 1;"
+# 기대 — CHECK 제약 **7건** (ORDER BY 1 순서 그대로. 아래 목록과 한 줄씩 대조):
+#   listing_user_area_range
+#   listing_user_as_of
+#   listing_user_dong_len
+#   listing_user_floor_range
+#   listing_user_note_len
+#   listing_user_price_range
+#   listing_user_source_pair
+#     ⚠️ 016 이 만드는 CHECK 는 7개다(2026-07-29 운영 실측 `n_constraints = 7`).
+#        예전 이 목록에는 층 범위 제약이 빠져 "6건"이라 적혀 있었다 — 7건이 나오는데
+#        6건이라 적힌 목록은 확인 절차가 아니라 **혼란의 원인**이다(운영자가 멈추거나,
+#        더 나쁘게는 세어 보지 않고 넘어간다). (CR35-5)
+#        이 목록은 `test_절차서의_제약_확인_목록이_마이그레이션과_일치한다` 가
+#        마이그레이션 파일과 대조한다 — 손으로 고치면 테스트가 먼저 깨진다.
 ```
 
 > ⚠️ `psql` 에 `-v ON_ERROR_STOP=1` 을 반드시 준다. 없으면 **중간에 실패해도 0 으로 끝나** 실패가
 > 성공으로 보인다.
+
+> ### ⛔ 016 을 건너뛰고 코드만 올리면 — 되돌아오는 길이 하나뿐이다
+> 마이그레이션이 먼저라는 규칙(§5-3b 머리말)이 016 에서 가장 세게 걸린다.
+> `listing.created_by_user_id`(와 `listing.as_of`)는 수동 입력 API 만 쓰는 칸이 **아니라**
+> 지도(`complexes_in_bbox`)· 추천 후보 조회(`recommendation_candidates`)·
+> 제외 사유 집계(`candidate_scope_stats`)· 호가 근거 조회(`listings_for_complex`) SQL 이
+> 모두 하드 참조한다. 없으면 네 경로가 동시에 `UndefinedColumn` 으로 죽어
+> **지도는 빈 화면, 추천은 전건 error** 가 된다. 인증은 살아 있어서 "로그인은 되는데
+> 아무것도 안 나오는" 형태라 원인을 짐작하기 어렵다 — 순서를 지키는 것이 유일한 예방이다.
+> 이미 그 상태에 빠졌다면 016 을 적용하면 즉시 복구된다(코드 롤백 불필요).
 
 ### 5-3c. 시장지수 배치 — **적정가 밴드의 시점 보정** (015 적용 후)
 
@@ -341,12 +395,96 @@ docker exec realestate-db psql -U realestate -d realestate -c "
 양방향). 방향이 갈리는 이유는 ① 한 달치 시점 차이 ② 시도 기준월도 2026-05 가 되면서
 동률 tie-break 로 **시군구 지수를 쓰게 된 15개 구**(더 정밀한 지수로 바뀐 것)다.
 
+### 5-3d. 이번 배포로 **지도 금액의 의미가 바뀐다** (CR34-3 · 배포 후 눈으로 확인할 것)
+
+지도(`GET /map/complexes`)의 `recent_price_krw` 는 여전히 **최근 체결가 1건**이다.
+바뀐 것은 **고르는 범위**다 — 사용자가 면적 조건을 걸면 그 조건 **안**의 최근 거래를 고른다.
+
+왜 바꿨나 (운영 DB 실측 2026-07-29):
+서울에서 55~65㎡ 를 가진 단지 400곳에 그 필터를 걸었을 때 **176곳(44%)** 의 표시가가
+조건 **밖 면적**의 거래였고, 조건 안 최근 거래와 **평균 26.8%**(최대 168.6%) 어긋났다.
+극단 사례: 대우디오빌 — 59㎡ 를 찾는 사용자에게 **30㎡ 체결가 3.05억**이 그 단지 가격으로
+보였다(조건 안 최근 거래는 9.20억, **+201.6%**).
+
+배포 후 확인:
+```bash
+# 면적 조건이 있는 요청과 없는 요청이 **다른 금액**을 내야 한다(같으면 배선이 안 걸린 것).
+# (아래는 토큰이 필요한 인증 엔드포인트다 — 브라우저 개발자도구 Network 로 봐도 된다.)
+docker exec realestate-db psql -U realestate -d realestate -c "
+  WITH cx AS (SELECT id FROM complex WHERE name LIKE '대우디오빌%' LIMIT 1)
+  SELECT '조건없음' AS q, price_krw, area_m2 FROM trade t, cx
+   WHERE t.complex_id=cx.id AND NOT t.is_cancelled ORDER BY contract_date DESC LIMIT 1;"
+```
+* 조건에 맞는 거래가 **하나도 없으면 금액이 null** 이다(조건 밖 값으로 채우지 않는다).
+  실측상 400곳 중 8곳(2%)이며, 화면은 그때 '해당 면적 실거래 없음'으로 보여야 한다.
+* 성능 실측(warm 중위/최대 ms · 500개 상한): 강남송파 밀집 122.8/134 → 122.5/135,
+  최대 bbox(2도)+면적조건 123.6/135 → **137.6/141**. 최악 +14ms — 1초 목표 대비 무시 가능.
+
+> ⚠️ **지도 금액과 추천 카드 금액은 앞으로도 다르다.** 지도는 *체결된 1건*,
+> 추천은 *창 중위를 기준월로 환산한 추정가*다. 실측(226단지)으로 격차를 분해하면
+> 정의 차이 |중위| 5.8% · 시점 보정 |중위| 3.4% 이고 **67% 의 단지에서 정의 차이가 더 크다**
+> — 지도를 시점 보정해도 두 값은 맞지 않는다. 그래서 서버가 각 값에 `price_basis` 를
+> 붙여 무엇인지 말한다. 자금계획(`/affordability`)만은 `complex_id` 를 받으면 추천과
+> **같은 함수**로 기준가를 만들어 값이 일치한다.
+
+### 5-3e. 수집기 종료코드 계약 (cron 을 걸 때 반드시)
+
+`scripts/fetch_academy.py` 는 이제 **부분 수집을 성공으로 끝내지 않는다**(CR33-6).
+
+| 종료코드 | 뜻 | 운영자 조치 |
+|---|---|---|
+| 0 | 전량 수집 | 없음 |
+| 1 | 실패 — **파일 없음**(인증키 오류·페이지네이션 고장) | 원인 해결 후 재실행 |
+| 2 | 부분 수집 — **파일은 있으나 일부만** | 파일 안 `failures` 를 보고 그 교육청만 다시 |
+
+`--allow-partial` 을 주면 2 대신 0 으로 끝난다. **cron 에는 쓰지 말 것** —
+그 플래그는 "사람이 보고 넘기기로 했다"는 기록이다.
+시장지수 크론 래퍼(`/opt/realestate/scripts/market-index.sh`)와 같은 규율이다.
+
+> 아직 `fetch_academy` 는 cron 에 없다(수동 실행). 거는 날 이 표대로 래퍼를 쓸 것 —
+> 로그만 남기고 0 으로 끝나면 몇 달 뒤 낡은 값을 보고도 아무도 모른다.
+
 ### 5-4. API 기동
+
+> ⛔ **여기 오기 전에 §5-3b 가 끝나 있어야 한다.** 특히 **016**. 새 코드의 지도·추천
+> 조회 SQL 이 `listing.created_by_user_id` 를 하드 참조하므로, 016 없이 API 를 띄우면
+> 컨테이너는 정상 기동하고 헬스체크도 통과하는데 **지도가 빈 화면, 추천이 전건 error**
+> 가 된다(§5-3b 참조). "떴으니 됐다"로 넘어가지 않도록 아래 확인을 반드시 한다.
+
 ```bash
 docker compose -f docker-compose.deploy.yml up -d api    # 5-2 에서 이미 빌드됨
 docker compose -f docker-compose.deploy.yml ps
 curl -fsS http://127.0.0.1:8013/api/v1/health            # {"status":"ok","role":"api"}
+
+# ⚠️ 헬스체크는 DB 컬럼을 안 본다. **지도를 실제로 한 번 불러 본다**(016 누락 탐지).
+#    토큰이 필요하면 로그인 후 Authorization 헤더를 붙일 것.
+curl -fsS "http://127.0.0.1:8013/api/v1/map/complexes?bbox=126.9,37.4,127.1,37.6&zoom=14" \
+  -H "Authorization: Bearer <TOKEN>" | head -c 300
+# 500 + 로그에 UndefinedColumn(li.created_by_user_id) → 016 미적용이다. §5-3b 로 돌아간다.
 ```
+
+**(확인) 016 이 정말 사는지 — `/me/listings` 왕복 스모크 (SR-031 §9-10⑤)**
+
+지도 조회는 `listing` 을 **읽기만** 한다. 016 의 쓰기 경로(제약 7건 · 소유자 컬럼)는
+아래로 확인한다. 끝나면 지운 상태로 돌아간다 — 운영 데이터를 남기지 않는다.
+
+```bash
+API=http://127.0.0.1:8013/api/v1 ; H="Authorization: Bearer <TOKEN>"
+CID=$(curl -fsS "$API/map/complexes?bbox=126.9,37.4,127.1,37.6&zoom=14" -H "$H" \
+      | python3 -c "import json,sys;print(json.load(sys.stdin)['items'][0]['id'])")
+
+LID=$(curl -fsS -X POST "$API/me/listings" -H "$H" -H 'Content-Type: application/json' \
+  -d "{\"complex_id\":$CID,\"ask_price_krw\":900000000,\"area_m2\":84.97,
+       \"as_of\":\"$(date +%F)\"}" | python3 -c "import json,sys;print(json.load(sys.stdin)['item']['id'])")
+
+curl -fsS "$API/me/listings" -H "$H" | head -c 200      # items 1건 · source_label "사용자 입력"
+curl -fsS -o /dev/null -w "%{http_code}\n" -X DELETE "$API/me/listings/$LID" -H "$H"   # 204
+
+docker exec realestate-db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  -c "select count(*) from listing;"     # 스모크 전후 모두 0 이어야 한다
+```
+> 실패 형태로 016 미적용을 가려낸다: `UndefinedColumn(created_by_user_id)` → 016 없음.
+> `CheckViolation(listing_user_*)` → 제약은 있는데 값이 어긋난 것이니 입력을 먼저 본다.
 
 기동에 실패하면 `.env` 문제일 가능성이 높다(JWT_SECRET 32자↑, FIELD_ENCRYPTION_KEY 정확히 32).
 ```bash
@@ -434,11 +572,40 @@ rm -rf "$T"
 > Report-Only 변형도 같은 방법으로 미리 검사할 수 있다(§5-5(3) 의 sed 를 `$T/realestate.conf`
 > 에 적용한 뒤 `nginx -t` 를 한 번 더).
 
+> ### ⛔ 사이트 파일 이름은 **하나다** — `realestate.utilverse.info` (SR34-1)
+> 이 절의 모든 블록이 **같은 파일**에 쓴다:
+>
+> ```
+> /etc/nginx/sites-enabled/realestate.utilverse.info
+>   -> ../sites-available/realestate.utilverse.info      ← nginx 가 실제로 읽는 파일
+> ```
+>
+> **왜 굳이 못 박는가** — 2026-07-29 보안리뷰가 이 문서에서 이름이 **세 곳으로 갈린**
+> 것을 실측했다. §5-5c 만 위 이름을 쓰고, §5-5(3)·(5)·부트스트랩·롤백은
+> `realestate.conf` 를 썼다. 운영 서버에 `realestate.conf` 는 **없다.**
+> 갈린 이유는 이력이다: §5-5c 는 나중에 **살아 있는 서버를 보고** 썼고, 나머지는 초안의
+> 일반 이름이 그대로 남았다. 그대로 따르면 새 파일 하나가 생기고 끝난다 —
+> `guard_site` 통과 · `nginx -t` 통과 · `reload` 성공, 그리고 **새 설정은 안 걸린다.**
+> `<APP_ROOT>` 함정과 같은 종류다(전부 통과하는데 동작만 안 함).
+>
+> 그래서 ① 이름을 하나로 모았고, ② `guard_site` 가 **그 파일이 활성 사이트인지**까지
+> 보고(④), ③ `backend/tests/test_deploy_config.py` 가 이 문서에 `/etc/nginx` 경로로
+> 다른 이름이 다시 새어 들어오면 깨진다.
+>
+> ⚠️ 링크를 새로 만들어 두 파일을 동시에 활성화하지 말 것 — 같은 `server_name` 블록이
+> 둘이 되면 nginx 는 **먼저 읽은 쪽**을 쓰고 경고만 낸다(`nginx -t` 는 통과한다).
+
 **(1) 부트스트랩 블록 배치 — HTTP 전용, 인증서 참조 없음**
+
+> 인증서가 **이미 있는 서버**(재배포)라면 이 단계는 건너뛴다 — 살아 있는 사이트 설정을
+> HTTP 전용으로 덮어쓰게 된다. `ls /etc/letsencrypt/live/realestate.utilverse.info/` 로 먼저 본다.
+
 ```bash
 sudo mkdir -p /var/www/certbot
-sudo cp deploy/nginx-realestate-bootstrap.conf /etc/nginx/sites-available/realestate.conf
-sudo ln -sfn ../sites-available/realestate.conf /etc/nginx/sites-enabled/realestate.conf
+sudo cp deploy/nginx-realestate-bootstrap.conf \
+        /etc/nginx/sites-available/realestate.utilverse.info
+sudo ln -sfn ../sites-available/realestate.utilverse.info \
+             /etc/nginx/sites-enabled/realestate.utilverse.info
 sudo nginx -t                       # 인증서를 참조하지 않으므로 통과한다
 sudo systemctl reload nginx         # 통과했을 때만
 ```
@@ -452,6 +619,93 @@ sudo ls -l /etc/letsencrypt/live/realestate.utilverse.info/fullchain.pem   # 존
 > **자동으로 고쳐 쓴다.** 동거 서비스 설정이 있는 서버에서 자동 수정은 위험하다.
 > `certonly` 는 인증서만 받고 설정은 건드리지 않는다.
 
+**(2.5) ⛔ `guard_site` — `nginx -t` 가 **안 보는 것**을 본다 (SR33-4)**
+
+> ### `nginx -t` 는 경로를 검사하지 않는다
+> 운영 서버에서 직접 확인했다(2026-07-29):
+>
+> | 설정 | `nginx -t` |
+> |---|:--:|
+> | `<APP_ROOT>` → `/opt/realestate` (정상) | **통과** |
+> | `<APP_ROOT>` → `/nonexistent/does/not/exist` | **통과** |
+> | `<APP_ROOT>` **미치환 그대로** | **통과** |
+>
+> 문법만 보기 때문이다. 그리고 이 함정으로 **운영 메인이 404 가 된 적이 있다** —
+> 물증이 서버에 남아 있다(`realestate.error.log.2.gz`):
+> `stat() "/tmp/tmp.BrOsTCkDTX/dist/" failed (13: Permission denied)` — `$(pwd)` 치환이
+> 다른 디렉터리에서 돈 흔적이다. 그때 `nginx -t` 는 통과했고 reload 도 성공했다.
+>
+> 예전 가드는 `grep … && echo "진행 금지"` **한 줄**이었고 **중단하지 않았다.**
+> 아래 함수는 실패하면 이어지는 `nginx -t`·`reload` 가 **아예 실행되지 않는다**(`&&` 연결).
+
+```bash
+# 아래 (3)·(5)·§5-5c 에서 그대로 쓴다. 셸을 새로 열면 다시 붙여넣는다.
+guard_site() {
+  local site="$1" approot="$2" d rc=0 roots target link hit=0
+
+  # ⓪ ⛔ 파일이 비었는가 (SR35-2) — 같은 함정의 **세 번째 얼굴**
+  #    ①은 "틀린 내용", ④는 "다른 파일", ⓪은 **"아무것도 없는 경우"** 다.
+  #    빈 파일은 `nginx -t` 를 통과하고 reload 도 성공한다. 문법 오류가 없으니까.
+  #    그리고 그 순간 이 사이트의 server 블록이 통째로 사라져 **서비스만 조용히 없어진다.**
+  #    §5-5c 의 `sed … > "$SITE"` 리다이렉트는 원본 경로가 틀리면 **살아 있는 파일을
+  #    먼저 비운다** — 그래서 아래에서 그 줄도 `.new` + `mv` 로 바꿨다.
+  if [ ! -s "$site" ]; then
+    echo "⛔ 설정 파일이 비었다: $site"
+    echo "   → 빈 파일도 nginx -t 는 통과한다. 백업에서 되돌린다."
+    return 1
+  fi
+  if ! grep -qE '^[[:space:]]*server_name[[:space:]]+' "$site"; then
+    echo "⛔ server_name 이 없다 — 이 파일은 우리 사이트 설정이 아니다: $site"
+    return 1
+  fi
+
+  # ① 치환 누락 — nginx -t 가 통과시키는 첫 번째 함정
+  if grep -q '<APP_ROOT>' "$site"; then
+    echo "⛔ <APP_ROOT> 가 치환되지 않았다: $site"; return 1
+  fi
+
+  # ② SPA 진입 문서가 실제로 있는가 — 없으면 메인이 404 다(nginx -t 는 통과한다)
+  if [ ! -f "$approot/frontend/dist/index.html" ]; then
+    echo "⛔ root 경로에 index.html 이 없다: $approot/frontend/dist/index.html"
+    echo "   → 프론트 산출물을 먼저 올린다(§4 rsync). 서버에서 빌드하지 않는다."
+    return 1
+  fi
+
+  # ③ 설정에 적힌 **모든** root 경로가 실재하는가(certbot webroot 포함)
+  #    ⚠️ `for d in $(…)` 로 돌면 공백이 든 경로가 단어 분리된다(CR38-5). 줄 단위로 읽는다.
+  roots=$(grep -oE '^[[:space:]]*root[[:space:]]+[^;]+' "$site" \
+          | sed -E 's/^[[:space:]]*root[[:space:]]+//; s/[[:space:]]+$//')
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    [ -d "$d" ] || { echo "⛔ 존재하지 않는 root 경로: $d"; rc=1; }
+  done <<EOF
+$roots
+EOF
+  [ "$rc" -eq 0 ] || return 1
+
+  # ④ ⛔ 이 파일이 **nginx 가 실제로 읽는 파일**인가 (SR34-1)
+  #    ①~③ 은 전부 파일의 *내용*만 본다. 내용이 완벽해도 nginx 가 안 읽는 파일이면
+  #    가드도·`nginx -t` 도·`reload` 도 성공하고 **바뀌는 것은 아무것도 없다.**
+  #    실제로 이 문서가 그 상태였다(§5-5 머리말 참조).
+  target=$(readlink -f "$site")
+  for link in /etc/nginx/sites-enabled/*; do
+    [ -e "$link" ] || continue                       # 글롭이 안 맞으면 문자열 그대로 온다
+    [ "$(readlink -f "$link")" = "$target" ] && { hit=1; break; }
+  done
+  if [ "$hit" -ne 1 ]; then
+    echo "⛔ 이 파일은 활성 사이트가 아니다: $site"
+    echo "   → nginx 는 sites-enabled 에 링크된 파일만 읽는다. 지금 활성인 것:"
+    ls -l /etc/nginx/sites-enabled/ | sed 's/^/     /'
+    echo "   → SITE 를 위 파일 이름으로 맞춘다(§5-5 머리말)."
+    echo "      ⚠️ 링크를 새로 만들어 둘 다 켜지 말 것 — 같은 server_name 이 둘이면"
+    echo "         nginx 는 먼저 읽은 쪽만 쓰고 경고만 낸다."
+    return 1
+  fi
+
+  echo "✅ 치환 완료 · root 경로 존재 · 활성 사이트 확인"
+}
+```
+
 **(3) 본 설정으로 교체 — 단, CSP 는 `Report-Only` 로 먼저 올린다 (SR15-4)**
 
 > ⚠️ **왜 두 단계인가.** CSP 를 잘못 좁히면 **지도가 죽는다.** 그런데 화면만 보면
@@ -460,24 +714,40 @@ sudo ls -l /etc/letsencrypt/live/realestate.utilverse.info/fullchain.pem   # 존
 > **막지 않고 위반만 보고**하므로, 지도가 정상 동작하는 상태에서 "무엇이 걸리는지"를
 > 먼저 눈으로 확인할 수 있다. 확인이 끝난 뒤 (5)에서 강제로 바꾼다.
 
+> ⚠️ **여기서 덮어쓰는 파일은 지금 서비스 중인 그 파일이다** (SR34-1 로 이름을 맞춘
+> 결과다 — 예전 이름 `realestate.conf` 는 아무도 안 읽는 파일이라 덮어써도 티가 안 났다).
+> 그래서 ① **먼저 백업**하고, ② 가드가 실패하면 **그 자리에서 백업으로 되돌린다.**
+> 디스크의 설정이 나빠도 nginx 는 이미 읽어 둔 것으로 계속 돌지만, 다음 reload 는
+> 사람이 아니라 **certbot 갱신 훅**일 수 있다 — 나쁜 파일을 남겨 두고 셸을 닫지 않는다.
+
 ```bash
-sudo cp deploy/nginx-realestate.conf /etc/nginx/sites-available/realestate.conf
-sudo sed -i "s|<APP_ROOT>|$(pwd)|g" /etc/nginx/sites-available/realestate.conf
-grep -n '<APP_ROOT>' /etc/nginx/sites-available/realestate.conf && \
-  echo "치환 안 된 자리가 남았다 — 진행 금지"
+SITE=/etc/nginx/sites-available/realestate.utilverse.info
+APP_ROOT=$(pwd)                      # ⚠️ 저장소 루트에서 실행하고 있는지 눈으로 확인할 것
+
+sudo mkdir -p /root/realestate-backup
+BACKUP=/root/realestate-backup/nginx-site-$(date +%Y%m%d-%H%M%S).conf
+sudo cp "$SITE" "$BACKUP" && echo "백업: $BACKUP"   # 되돌릴 자리를 먼저 만든다
+
+sudo cp deploy/nginx-realestate.conf "$SITE"
+sudo sed -i "s|<APP_ROOT>|$APP_ROOT|g" "$SITE"
 
 # CSP 만 Report-Only 로 바꾼다. 저장소 파일은 '강제'가 기본값이고,
 # 여기서 이름만 바꿔 붙인다 — 되돌릴 때는 (5)에서 원본을 다시 복사하면 된다.
 sudo sed -i 's/add_header Content-Security-Policy /add_header Content-Security-Policy-Report-Only /' \
-  /etc/nginx/sites-available/realestate.conf
-grep -c 'Content-Security-Policy-Report-Only' /etc/nginx/sites-available/realestate.conf
+  "$SITE"
+grep -c 'Content-Security-Policy-Report-Only' "$SITE"
 # → 3 이어야 한다 (server · 정적자산 · /index.html). 3 이 아니면 진행 금지.
 
-# ⚠️ 반드시 문법 검사부터. 실패한 채 reload 하면 **동거 서비스까지 같이 죽는다.**
-sudo nginx -t
-
-# 통과했을 때만
-sudo systemctl reload nginx
+# ⛔ 치환·경로 가드 → 문법 검사 → reload 를 **`&&` 로 묶는다.**
+#    가드가 실패하면 nginx -t 도 reload 도 실행되지 않는다(SR33-4).
+#    ⚠️ 문법 검사를 건너뛰고 reload 하면 **동거 서비스까지 같이 죽는다.**
+#
+# ⛔ 되돌리기를 **주석으로 두지 않는다** (SR35-1). 위가 fail-closed 인 바로 밑줄이
+#    fail-open 이면 앞의 `&&` 가 무의미하다 — 나쁜 파일이 디스크에 그대로 남고,
+#    **다음 reload 는 사람이 아니라 certbot 갱신 훅일 수 있다**(installer=nginx 가 3개).
+#    그때는 우리 사이트가 아니라 **동거 서비스 인증서 갱신이 실패**한다.
+guard_site "$SITE" "$APP_ROOT" && sudo nginx -t && sudo systemctl reload nginx \
+  || { echo "⛔ 실패 — 백업으로 되돌린다"; sudo cp "$BACKUP" "$SITE"; sudo nginx -t; false; }
 ```
 
 **(4) Report-Only 확인 — 지도가 살아 있는가 · 무엇이 걸리는가**
@@ -507,13 +777,27 @@ curl -sI https://realestate.utilverse.info/ | grep -i 'content-security-policy'
 **(5) CSP 강제 전환 — 확인이 끝난 뒤에만**
 
 ```bash
+SITE=/etc/nginx/sites-available/realestate.utilverse.info
+APP_ROOT=$(pwd)
+
+# (3)과 같은 이유로 **살아 있는 파일**을 덮어쓴다 — 먼저 백업한다.
+sudo mkdir -p /root/realestate-backup
+BACKUP=/root/realestate-backup/nginx-site-$(date +%Y%m%d-%H%M%S).conf
+# ⛔ 백업이 실패하면 **거기서 멈춘다** (SR35-1). `&& echo` 만 달면 백업이 실패해도
+#    다음 줄이 살아 있는 파일을 덮어쓴다 — 되돌릴 곳이 없어진 채로. 디스크가 92% 다.
+sudo cp "$SITE" "$BACKUP" || { echo "⛔ 백업 실패 — 중단한다"; exit 1; }
+echo "백업: $BACKUP"
+
 # 저장소 원본을 다시 복사한다(원본이 '강제' 상태다 — sed 를 되돌리지 않는다)
-sudo cp deploy/nginx-realestate.conf /etc/nginx/sites-available/realestate.conf
-sudo sed -i "s|<APP_ROOT>|$(pwd)|g" /etc/nginx/sites-available/realestate.conf
-grep -c 'Content-Security-Policy-Report-Only' /etc/nginx/sites-available/realestate.conf
+sudo cp deploy/nginx-realestate.conf "$SITE"
+sudo sed -i "s|<APP_ROOT>|$APP_ROOT|g" "$SITE"
+grep -c 'Content-Security-Policy-Report-Only' "$SITE"
 # → 0 이어야 한다(강제). 0 이 아니면 진행 금지.
 
-sudo nginx -t && sudo systemctl reload nginx
+# ⛔ (2.5) 의 가드를 여기서도 통과해야 한다 — 원본을 다시 깔았으므로 `<APP_ROOT>` 가
+#    다시 들어왔고, 치환이 이번에도 제대로 됐는지는 **다시 확인해야 하는 사실**이다.
+guard_site "$SITE" "$APP_ROOT" && sudo nginx -t && sudo systemctl reload nginx \
+  || { echo "⛔ 실패 — 백업으로 되돌린다"; sudo cp "$BACKUP" "$SITE"; sudo nginx -t; false; }
 ```
 전환 직후 **지도를 다시 한 번 연다.** 여기서 깨지면 (3)으로 되돌린다(Report-Only 재적용).
 
@@ -528,7 +812,7 @@ sudo certbot renew --dry-run
 **막혔을 때** — `nginx -t` 가 실패하면 **손으로 고치지 말고** 아래로 되돌린 뒤 보고한다.
 그 상태에서 임의 수정이 동거 서비스를 위태롭게 하는 유일한 경로다.
 ```bash
-sudo rm /etc/nginx/sites-enabled/realestate.conf
+sudo rm /etc/nginx/sites-enabled/realestate.utilverse.info
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
@@ -585,12 +869,25 @@ python scripts/manage_users.py --list                    # approved·admin 으�
 
 ```bash
 SITE=/etc/nginx/sites-available/realestate.utilverse.info
-cp "$SITE" /root/realestate-backup/nginx-site-$(date +%Y%m%d-%H%M%S).conf
+APP_ROOT=/opt/realestate
+BACKUP=/root/realestate-backup/nginx-site-$(date +%Y%m%d-%H%M%S).conf
+cp "$SITE" "$BACKUP" || { echo "⛔ 백업 실패 — 중단한다"; exit 1; }
 
-# 저장소 원본을 다시 깔면 임시 블록이 사라진다(원본에는 애초에 없다)
-sed "s#<APP_ROOT>#/opt/realestate#g" /opt/realestate/deploy/nginx-realestate.conf > "$SITE"
+# ⛔ `> "$SITE"` 로 직접 쓰지 않는다 (SR35-2).
+#    리다이렉트는 **명령이 실행되기 전에 파일을 먼저 비운다.** 원본 경로가 틀리면
+#    sed 는 아무것도 못 읽고, 살아 있는 설정만 0바이트로 남는다.
+#    빈 파일은 `nginx -t` 를 통과하고 reload 도 성공한다 — **서비스만 사라진다.**
+#    그래서 새 파일에 쓰고, 내용이 있을 때만 갈아 끼운다.
+sed "s#<APP_ROOT>#$APP_ROOT#g" "$APP_ROOT/deploy/nginx-realestate.conf" > "$SITE.new" \
+  && [ -s "$SITE.new" ] \
+  && mv "$SITE.new" "$SITE" \
+  || { echo "⛔ 새 설정 생성 실패 — 원본을 건드리지 않았다"; rm -f "$SITE.new"; exit 1; }
 
-nginx -t && systemctl reload nginx     # ⚠️ 검사 실패 시 reload 하지 마라(동거 서비스가 같이 죽는다)
+# ⛔ (2.5) 의 가드. 여기는 `$(pwd)` 가 아니라 절대경로를 쓰지만, 그렇다고 검사를
+#    건너뛰지 않는다 — 치환 실패(sed 패턴 오타)와 산출물 부재는 경로 방식과 무관하다.
+guard_site "$SITE" "$APP_ROOT" && nginx -t && systemctl reload nginx \
+  || { echo "⛔ 실패 — 백업으로 되돌린다"; cp "$BACKUP" "$SITE"; nginx -t; false; }
+# ⚠️ 가드·검사 실패 시 reload 하지 마라(동거 서비스가 같이 죽는다)
 
 # 확인: 가입이 403 이 아니라 정상 동작하고, 보안 헤더가 5종 다 붙는지
 # ⚠️ `curl -sI`(HEAD)로 재지 마라 — register 는 POST 전용이라 405 가 나고 그 경로엔 헤더가
@@ -630,12 +927,22 @@ check_headers() {
 }
 
 BASE=https://realestate.utilverse.info
+
+# ⛔ **먼저 상태코드부터**(SR33-4). `curl -sI` 는 헤더만 보고 200/404 를 구분하지 않아,
+#    메인이 404 여도 헤더는 다 붙어 있어서 위 검사가 전부 [OK] 로 찍힌다.
+#    `<APP_ROOT>` 오치환으로 실제로 겪은 형태다 — nginx -t 도 통과했었다.
+MAIN_CODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/")
+[ "$MAIN_CODE" = "200" ] || { echo "⛔ 메인이 $MAIN_CODE 다 — root 경로/산출물을 확인하라"; }
+
 check_headers "$BASE/"                 # → try_files 로 index.html 을 탄다(가장 중요)
 check_headers "$BASE/index.html"
 check_headers "$BASE/api/v1/health"
 # 정적 자산 하나 (파일명은 빌드마다 다르다)
+# ⚠️ 빈 값이면 **조용히 건너뛰지 않는다** — 메인이 404 면 여기가 항상 빈 값이 되고,
+#    그러면 "검사 3개가 통과했다"로 보인다(실패가 실패로 안 보이는 자리).
 ASSET=$(curl -s "$BASE/" | grep -oE '/assets/[^"]+\.js' | head -1)
-[ -n "$ASSET" ] && check_headers "$BASE$ASSET"
+if [ -n "$ASSET" ]; then check_headers "$BASE$ASSET"
+else echo "  [실패] 메인 HTML 에서 /assets/*.js 를 못 찾았다 — 메인이 404 이거나 빌드 산출물이 다르다"; fi
 ```
 `[실패]` 가 하나라도 있으면 **DEP-1 회귀**다. `nginx-realestate.conf` 에서 해당
 location 에 보안헤더 5종이 다시 적혀 있는지 확인한다.
@@ -665,6 +972,86 @@ free -m
 `docker stats` 의 MEM% 가 90% 를 넘으면 상한을 올리기 전에 **PM 에 보고**한다
 (최악 여유가 16MB 뿐이라 임의로 올리면 동거 서비스가 위험하다).
 
+**(5) ⛔ 접근 로그에 쿼리 값이 남지 않는가 (SR32-1 · 이 배포의 차단 사유였다)**
+
+세 싱크를 **각각** 본다. 하나만 막혀 있으면 나머지가 계속 쓴다.
+확인 전에 **지도를 한 번 호출해 로그 줄을 만든다** — 로그가 비어 있으면 grep 0건이
+"막혔다"가 아니라 "아무 일도 없었다"는 뜻이다.
+
+**먼저 한 줄 — 새 로그 포맷이 *활성 파일*에 들어갔는가 (SR34-1)**
+```bash
+# nginx 가 읽는 그 파일을 링크에서 되짚어 센다. 다른 파일에 잘 써 두고 여기서 0 이면
+# 그게 정확히 SR34-1 의 증상이다(가드·nginx -t·reload 는 전부 성공한다).
+sudo grep -c 're_noquery' \
+  "$(readlink -f /etc/nginx/sites-enabled/realestate.utilverse.info)"   # → 4 기대
+```
+
+```bash
+TOKEN=<로그인해서 받은 access_token>
+BASE=https://realestate.utilverse.info
+
+# 카나리를 일부러 쿼리에 실어 쏜다(둘 다 거절/무시되지만 로그 줄은 남는다)
+curl -sS -o /dev/null -H "Authorization: Bearer $TOKEN" \
+  "$BASE/api/v1/map/complexes?bbox=126.9,37.4,127.1,37.6&zoom=14&budget=mine&canary=1314310000"
+curl -sS -o /dev/null -H "Authorization: Bearer $TOKEN" \
+  "$BASE/api/v1/me/listings?complex_id=1234"
+
+sleep 1
+echo "--- nginx ---"
+sudo grep -c "1314310000\|complex_id=1234\|max_price_krw=" \
+     /var/log/nginx/realestate.access.log            # → 0 이어야 한다
+sudo tail -2 /var/log/nginx/realestate.access.log    # 경로만 있고 '?' 가 없어야 한다
+echo "--- uvicorn(app 컨테이너) ---"
+docker logs --since 2m realestate-api | grep -c "1314310000\|complex_id=1234"   # → 0
+docker logs --since 2m realestate-api | grep "map/complexes" | tail -2
+```
+
+기대 형태 — **경로만 남고 값은 없다**:
+```
+… "GET /api/v1/map/complexes HTTP/1.1" 200 …          ← nginx (re_noquery)
+INFO: 127.0.0.1:… - "GET /api/v1/map/complexes HTTP/1.1" 200 OK   ← uvicorn (필터)
+```
+
+> ⚠️ **앱 미들웨어 줄(`GET … [q: …] 200`)은 나오지 않는다** (SR33-3, 2026-07-29 실측).
+> `app` 로거의 INFO 는 **아무 데도 안 나간다** — uvicorn 의 `dictConfig` 는 root 로거를
+> 설정하지 않아 핸들러가 0개이고, `logging.lastResort` 는 임계가 WARNING 이라 INFO 를
+> 버린다. 그래서 실제로 도는 방어는 **uvicorn 필터와 nginx 포맷 둘**이고,
+> `main.log_target` 은 그 둘의 규칙을 코드로 못박아 두는 자리 + 500 로그 경로다.
+> **없다고 장애로 오인하지 말 것.** 대신 500 로그는 반드시 한 번 본다:
+> ```bash
+> docker logs --since 10m realestate-api | grep '처리되지 않은 오류' || echo "(500 없음 — 정상)"
+> # 나온다면 그 줄에 `?` 뒤 값이 없어야 한다(SR33-1 · 경로 + `[q: 이름들]` 만)
+> ```
+
+한 줄이라도 `?` 뒤가 보이면 **배포를 되돌리고 원인을 찾는다.** 흔한 원인 셋:
+① `nginx-realestate.conf` 의 `access_log` 에서 `re_noquery` 가 빠졌다(= 기본 combined),
+② 서버에 **옛 conf 가 남아** 있다(`nginx -t` 는 통과한다 — 문법이 아니라 내용 문제),
+③ 이미지가 옛 코드다(`docker compose ... build` 를 건너뛴 배포).
+
+**(6) 옛 로그 정리 — 이번 배포 전의 줄은 그대로 남아 있다**
+```bash
+sudo zgrep -c "max_price_krw=" /var/log/nginx/realestate.access.log.*.gz 2>/dev/null
+
+# ⚠️ 글롭은 `realestate.*` — access 만 잡으면 **error 로그가 빠진다**(SR33-2).
+#    실측(2026-07-29): `realestate.error.log.2.gz` 가 0644(월드 리더블)로 남아 있었고,
+#    `/var/log/nginx/` 자체가 0755 라 같은 호스트의 다른 계정이 들어올 수 있다.
+sudo ls -l /var/log/nginx/realestate.*               # 0644 가 하나라도 있으면 아래를 돌린다
+sudo chmod 640 /var/log/nginx/realestate.*
+grep -n "create 0640" /etc/logrotate.d/nginx || echo "⚠️ logrotate create 권한을 확인할 것"
+
+# nginx `error_log` 는 `log_format` 대상이 아니라 `request: "<원본 요청줄>"` 로
+# **쿼리를 포함해** 쓴다(4xx/5xx·limit_req 초과 시). 즉 re_noquery 의 **밖**이다.
+# 지금 URL 에 금액은 없지만, 실제로 남는지는 배포 후 한 번 눈으로 본다.
+sudo grep -c 'request: "[^"]*?' /var/log/nginx/realestate.error.log || true   # → 0 기대
+```
+> logrotate 의 `create 0640 www-data adm` 은 **새로 만드는 파일**에만 걸린다.
+> 압축 회전본(`*.gz`)이 0644 로 남는 사례를 실측했다 — 위 `chmod` 를 같이 돌린다.
+>
+> **`error_log` 를 끄지 않는 이유**: 그 파일이 장애 때 유일한 단서다. 대신
+> ① 권한을 0640 으로 잠그고 ② 쿼리가 실린 줄이 실제로 생기는지 주기적으로 본다.
+> 금액은 이미 URL 을 떠났으므로(SR32-1) 남을 값은 `bbox`·`complex_id` 급이다.
+> 이 판단이 바뀌어야 하는 신호는 **위 grep 이 0 이 아닌 날**이다.
+
 ---
 
 ## 6. 롤백
@@ -673,7 +1060,7 @@ free -m
 
 ```bash
 # 1) 웹 노출 제거 (가장 먼저 — 사용자 영향 차단)
-sudo rm /etc/nginx/sites-enabled/realestate.conf
+sudo rm /etc/nginx/sites-enabled/realestate.utilverse.info
 sudo nginx -t && sudo systemctl reload nginx
 
 # 2) 우리 컨테이너 중지 (데이터는 남는다)

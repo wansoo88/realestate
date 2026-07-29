@@ -14,7 +14,14 @@
  *     달라진다. 가정 없는 월 상환액은 근거 없는 숫자다(G2).
  */
 import type { AffordabilityResponse } from "../api/client";
-import { planOverLimit, planOverLimitKrw, usablePlan } from "../lib/affordability";
+import {
+  planAreaNote,
+  planOverLimit,
+  planOverLimitKrw,
+  targetPriceView,
+  usablePlan,
+  type PlanArea,
+} from "../lib/affordability";
 import { formatAsOf, formatKrw, formatKrwManwon } from "../lib/format";
 import { usableEvidence } from "../lib/recommendation";
 import { Price } from "./Price";
@@ -49,6 +56,11 @@ interface Props {
   onClearComplex?: () => void;
   /** 조건에 저장된 희망가(있으면 되돌아갈 곳을 문장으로 말할 수 있다). */
   targetPriceKrw?: number | null;
+  /**
+   * 단지 기준일 때 **어느 면적으로** 요청했는가 (CR35-4).
+   * 기준가는 면적별 값이라, 이 말이 없으면 34평 계획이 25평 매물의 계획으로 읽힌다.
+   */
+  planArea?: PlanArea | null;
 }
 
 /** 한도를 결정한 제약을 사람 말로. 모르는 코드는 원문을 그대로 둔다(지어내지 않는다). */
@@ -98,6 +110,7 @@ export function AffordabilityPanel({
   noPriceComplexName = null,
   onClearComplex,
   targetPriceKrw = null,
+  planArea = null,
 }: Props) {
   if (needsProfile) {
     return (
@@ -130,6 +143,13 @@ export function AffordabilityPanel({
   const cost = data.acquisition_cost_krw;
   const plan = usablePlan(data.plan);
   const isComplex = planBasis?.kind === "complex";
+  /** 서버가 말하는 기준가 근거. 구버전 응답이면 null 이고, 그때는 아무 말도 하지 않는다. */
+  // 기준가 근거는 **무엇에 대한 값인지** 이름으로 말해야 한다 (CR36-5) —
+  // "추천 카드와 같은 값"만으로는 어느 카드인지, 카드가 있기는 한지 알 수 없다.
+  const target = targetPriceView(data.target_price, {
+    complexName: isComplex ? planBasis?.name : null,
+    areaM2: planArea?.m2 ?? null,
+  });
 
   return (
     <div className="afford">
@@ -167,20 +187,35 @@ export function AffordabilityPanel({
           </p>
         )}
 
-        {plan === null ? (
-          <p className="plan__empty">
-            {planBasis === null
-              ? "희망 매매가를 정하거나 지도에서 단지를 고르면 필요한 대출과 월 원리금을 계산합니다."
-              : "이 응답에는 자금계획이 포함되지 않았습니다 — 계산 결과를 지어내지 않습니다."}
-            {planBasis === null && onEditConditions && (
-              <>
-                {" "}
-                <button type="button" className="plan__link" onClick={onEditConditions}>
-                  희망 매매가 정하기
-                </button>
-              </>
-            )}
+        {/* ── 기준가를 못 세운 경우 ─────────────────────────────────────────
+            서버가 표본 부족으로 금액을 만들지 못하면 **계획 자체가 없다**.
+            0 으로 채우거나 다른 값으로 슬쩍 갈아끼우지 않고, 사유를 그대로 보인다. */}
+        {target && !target.known && (
+          <p className="plan__noref" role="status">
+            <strong>{target.label}</strong>
+            {target.reason ? ` — ${target.reason}` : ""}
+            {planBasis?.kind === "complex" ? " 다른 면적이나 다른 단지를 골라 보세요." : ""}
           </p>
+        )}
+
+        {plan === null ? (
+          // 사유를 이미 위에서 말했으면(기준가 없음) 여기서 또 말하지 않는다 —
+          // "포함되지 않았습니다"는 사유를 모를 때 쓰는 문장이다.
+          target && !target.known ? null : (
+            <p className="plan__empty">
+              {planBasis === null
+                ? "희망 매매가를 정하거나 지도에서 단지를 고르면 필요한 대출과 월 원리금을 계산합니다."
+                : "이 응답에는 자금계획이 포함되지 않았습니다 — 계산 결과를 지어내지 않습니다."}
+              {planBasis === null && onEditConditions && (
+                <>
+                  {" "}
+                  <button type="button" className="plan__link" onClick={onEditConditions}>
+                    희망 매매가 정하기
+                  </button>
+                </>
+              )}
+            </p>
+          )
         ) : (
           <>
             {/* 무엇을 기준으로 세운 계획인가 — 단지 기준이면 **추정치임을 함께** 말한다. */}
@@ -209,6 +244,19 @@ export function AffordabilityPanel({
             )}
 
             <p className="plan__target num">{formatKrw(plan.target_price_krw)}</p>
+
+            {/* ── 이 금액이 **어디서 온 값인가** (CR35-4) ─────────────────────
+                서버가 `basis` 로 말해 준다. 화면이 이걸 안 적으면 추천 카드와 자금계획이
+                다른 금액을 말할 때 사용자는 어느 쪽이 맞는지 판단할 근거가 없다. */}
+            {target?.known && (
+              <p className={`plan__ref${target.estimated ? " plan__ref--est" : ""}`}>
+                <span className="plan__ref-label">{target.label}</span>
+                {target.detail && <span className="plan__ref-detail">{target.detail}</span>}
+                {target.reason && <span className="plan__ref-why">사유: {target.reason}</span>}
+                {/* 면적을 말하지 않으면 34평 계획이 25평 매물의 계획으로 읽힌다 */}
+                {planArea && <span className="plan__ref-area">{planAreaNote(planArea)}</span>}
+              </p>
+            )}
 
             <dl className="plan__rows">
               <div className="plan__row">

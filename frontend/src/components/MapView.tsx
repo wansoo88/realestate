@@ -14,9 +14,10 @@
  *    조건 진입점은 좌상단(App 의 조건 바), 범례는 좌상단 아래에 둔다.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ClusterItem, ComplexItem } from "../api/client";
+import type { ClusterItem } from "../api/client";
 import { lastCamera, rememberCamera } from "../lib/mapCamera";
 import { MarkerLayer } from "../lib/mapMarkers";
+import type { ScreenComplexItem } from "../lib/screenBudget";
 import { baseTier, densityNotice } from "../lib/markerTiers";
 import type { Place } from "../lib/placeSearch";
 import { MapLegend } from "./MapLegend";
@@ -38,7 +39,15 @@ const MAX_LEVEL = 14;
 
 interface Props {
   onBoundsChange: (bbox: string, zoom: number) => void;
-  items?: ComplexItem[]; // zoom >= 13 : 단지 단위
+  /**
+   * zoom >= 13 : 단지 단위.
+   *
+   * **서버 항목(`ComplexItem`)을 그대로 받지 않는다.** `over_budget` 은 3값인데 화면이
+   * 다시 판정해야 하고(정본 = 화면 판정, `lib/budgetStatus` 머리말), 그때 "모름"을
+   * `false` 로 접어도 **화면에는 아무 변화가 없다**(배지는 `=== true` 에만 붙는다).
+   * 그래서 타입으로 막는다 — `applyScreenBudget` 이 만든 값만 여기 들어온다(CR37-2).
+   */
+  items?: ScreenComplexItem[];
   clusters?: ClusterItem[]; // zoom < 13 : 군집
   selectedId?: number | null; // 리스트 카드 ↔ 마커 양방향 동기화
   hoveredId?: number | null; // 리스트 hover → 마커 강조

@@ -49,6 +49,12 @@ class PropertyFacts:
 
     area_m2: float = 84.0
     is_regulated_area: bool = False
+    #: live | invest. 대출 절대한도·스트레스 가산 조회에 **사실로 들어간다**
+    #: (`_lending_setup` 의 `cap_facts`). ⚠️ 다만 오늘 `config/tax_rules.yaml` 에는
+    #: `purpose` 를 조건으로 쓰는 규칙이 **하나도 없어 두 값의 결과가 같다**(CR37-5).
+    #: 배선은 남긴다 — 규칙이 생기는 날 설정 한 줄이면 되기 때문이고, 그때까지
+    #: "목적에 따라 한도가 달라진다"고 적지 않는다(있는 척하지 않는다).
+    #: 이 사실은 `tests/test_tax_rules_real.py` 가 못박는다(규칙이 생기면 거기서 깨진다).
     purpose: str = "live"          # live | invest
     #: 수도권 여부. 6억 절대한도(6.27 대책)가 수도권 조건부라 이 사실이 있어야 매칭된다.
     #: ⚠️ **사용자(클라이언트)가 보내는 값이 아니다** — API 요청 스키마에 필드가 없다(CR10-1).

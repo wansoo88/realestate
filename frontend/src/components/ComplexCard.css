@@ -54,6 +54,14 @@
   color: var(--text-estimated);
 }
 
+/* 금액이 **어느 면적의 체결가인지**. 금액의 단위에 가까우므로 금액 옆에 두되,
+   숫자가 주인공이라는 규칙(2)을 지키기 위해 캡션 크기·굵기 400 을 넘지 않는다. */
+.card__pricearea {
+  font-size: var(--fs-caption);
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+
 /* AI 추천 순위 — 근거(리포트)가 붙은 후보에만 생긴다. 지도 마커의 강조색과 같은 언어. */
 .card__rank {
   display: inline-flex;
@@ -156,9 +164,15 @@
     grid-area: price;
     margin: 0;
     justify-content: flex-end;
-    flex-wrap: nowrap;
+    /* 면적 꼬리표까지 한 줄에 다 못 들어가면 **지우지 말고 접는다** —
+       금액과 배지는 한 줄에 남고 면적만 다음 줄로 내려간다. */
+    flex-wrap: wrap;
     font-size: var(--fs-footnote);
     text-align: right;
+  }
+
+  .card__pricearea {
+    font-size: 11px;
   }
 
   /* '추정' 배지는 좁은 행에서도 **지우지 않는다.** 이 배지가 이 제품의 정체성이다
