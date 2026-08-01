@@ -51,8 +51,15 @@ from app.agents.orchestrator import (
 from app.agents.scoring import BASIS_USER_WEIGHTED
 from app.core.security import decrypt_amount, load_key
 from app.repositories.base import BBox, BBoxError
-from app.domain.affordability.engine import compute_affordability
-from app.domain.affordability.models import Borrower, PropertyFacts
+from app.domain.affordability.budget import (
+    SUMMARY_AREA_M2,
+    BudgetFn,
+    fixed_budget,
+    max_purchase_budget,
+    profile_affordability,
+    summary_affordability,
+)
+from app.domain.affordability.models import Borrower
 from app.domain.conditions import (
     FilterConditions,
     resolve_budget_override,
@@ -152,8 +159,14 @@ def _analyze(repo: Any, settings: Any, user_id: int, criteria: dict[str, Any],
         }
 
     borrower, forbidden = borrower_from_profile(profile, user_id, key)
-    prop = PropertyFacts(purpose=str(criteria.get("purpose") or "live"))
-    afford = compute_affordability(borrower, rules, prop=prop)
+    purpose = str(criteria.get("purpose") or "live")
+    # 자산 기준 상한 조회기 — **면적마다 다르다**(취득세 농특세 85㎡ 경계). 지도가 쓰는
+    # 바로 그 모듈이고, 세율 구간이 같은 면적은 한 번만 계산한다(운영 세율 2회).
+    afford_at = profile_affordability(borrower, rules, purpose)
+    # 결과 전체에 붙는 **요약 숫자**(고지 문구·tripwire)는 기준 면적 하나로 만든다.
+    # ⚠️ 후보 판정에는 쓰지 않는다 — 그게 CR39-2 였다(84㎡ 한 숫자로 전부를 제외).
+    #    이 값의 면적 기준은 `_budget_notes` 가 문장으로 밝힌다.
+    afford = summary_affordability(afford_at)
 
     prefs = repo.get_preferences(user_id) if hasattr(repo, "get_preferences") else {}
     avoid = (prefs or {}).get("avoid") or {}
@@ -165,6 +178,15 @@ def _analyze(repo: Any, settings: Any, user_id: int, criteria: dict[str, Any],
     #    사라지고 자기 한도가 쓰였다(예산이 늘어난 것처럼 보이는 실패 — 결과가 비는
     #    것보다 알아채기 어렵다). 면적과 **같은 규칙**으로 저장본을 폴백한다.
     override = resolve_budget_override(criteria, prefer)
+    # 후보 판정에 쓰는 **면적별 상한 조회기**. 희망가를 정했으면 면적과 무관한 금액
+    # 하나이고(사용자가 정한 값이다), 없으면 자산 기준 한도 — 그건 면적의 함수다.
+    # ⚠️ 지도(`/map/complexes`)와 **같은 함수**를 쓴다. 두 벌 두면 반드시 다시 갈린다.
+    budget_at = (fixed_budget(override) if override
+                 else max_purchase_budget(afford_at))
+    # 조회(정렬 신호)·요약 문구용 **한 숫자**. 리포지토리는 이 값으로 후보를 거르지
+    # 않는다 — 정렬에만 쓴다(`recommendation_candidates` 계약). 그래서 이 숫자가
+    # 면적별 상한과 어긋나도 후보가 조회 단계에서 사라지지 않는다.
+    # 판정은 위 `budget_at` 이 한다.
     budget = override or afford.max_purchase_krw
     # ⚠️ 평수(전용면적)는 **요청 스키마에 아예 없어서** 추천에 도달하지 못했다 —
     #    지도는 거르고 추천은 안 거르는 상태였다(사용자 제보 2026-07-27).
@@ -193,11 +215,14 @@ def _analyze(repo: Any, settings: Any, user_id: int, criteria: dict[str, Any],
         market_indexes=market_indexes,
         # 정비사업 판정이 목적에 따라 **정반대**가 된다(관리처분 = 투자엔 '확실',
         # 실거주엔 '이주 임박 — 부적합'). 예산 계산에만 쓰던 값을 여기로도 넘긴다.
-        purpose=prop.purpose,
+        purpose=purpose,
         # 희망가를 **명시했을 때만** 넘긴다. None 이면 파이프라인이 최대 실구매
         # 가능 금액을 쓴다(기존 동작). afford 를 조작해 우회하지 않는다 —
         # 그러면 finance finding 이 희망가를 '실구매 가능 금액'이라고 말하게 된다.
         budget_krw=override,
+        # 후보 하드 제외는 **이 조회기**로 한다(면적별 상한 — CR39-2).
+        # `budget_krw` 는 요약·폴백용 한 숫자로 남긴다(희망가일 때 둘은 같은 값이다).
+        budget_at=budget_at,
     )
     # 요청한 top_n 을 실제로 지킨다. 예전엔 파이프라인 기본값(10)으로 고정돼 있어
     # `top_n` 이 API 계약에만 있고 동작하지 않았다 — 이제 제외 사유가 "상위 N건 밖"을
@@ -206,7 +231,9 @@ def _analyze(repo: Any, settings: Any, user_id: int, criteria: dict[str, Any],
     result = run_mvp_pipeline(ctx, llm=llm, top_n=top_n)
     items = result["items"]
     # 각 후보가 **희망가 대비 얼마인지** 실어 준다(프론트가 "희망가보다 1.2억 저렴"을 표시).
-    _annotate_budget_gap(items, budget)
+    # 판정에 쓴 것과 **같은 조회기**를 넘긴다 — 다른 숫자로 차액을 그리면 "예산 안"인
+    # 후보가 화면에서는 초과로 보인다.
+    _annotate_budget_gap(items, budget_at)
     # 조립 단계에서 떨어진 단지가 앞에 온다 — 후보조차 되지 못한 쪽이 사용자 질문에
     # 더 가깝다("우리 단지가 아예 안 보인다").
     # 제외 사유는 사용자에게 그대로 보인다 — 나가기 직전에 자산 원본을 한 번 더 거른다.
@@ -236,22 +263,24 @@ BUDGET_GAP_KEY = "budget_gap_krw"
 BUDGET_GAP_PCT_KEY = "budget_gap_pct"
 
 
-def _annotate_budget_gap(items: list[dict[str, Any]], budget: int | None) -> None:
+def _annotate_budget_gap(items: list[dict[str, Any]],
+                         budget_at: BudgetFn) -> None:
     """추천 카드에 '적용 예산 대비 차액'을 붙인다.
 
     ⚠️ 예산이 0/None 이면(자산 미입력 등) 예산 필터 자체가 꺼진 상태다. 그때 0 을 넣으면
     "희망가와 딱 맞다"로 읽힌다 — **모르는 건 None** 으로 둔다(G2).
     비교 대상은 파이프라인이 예산 판정에 실제로 쓴 값(`est_price_krw`)이다.
     다른 값을 쓰면 "예산 안"이라며 통과시킨 후보가 화면에서는 초과로 보인다.
+
+    ⚠️ 기준 예산도 **후보마다 그 후보의 면적으로** 세운다(CR39-2). 한 숫자로 차액을
+    그리면 통과 판정에 쓴 상한과 화면의 차액이 다른 숫자에서 나오고, 그러면 차액이
+    음수(=예산 안)인데 실제로는 초과였던 후보가 생긴다. 면적을 몰라 상한을 못 세운
+    후보는 차액도 **None** 이다 — 그 후보는 애초에 예산 판정을 하지 않았다.
     """
-    if not budget:
-        for item in items:
-            item[BUDGET_GAP_KEY] = None
-            item[BUDGET_GAP_PCT_KEY] = None
-        return
     for item in items:
         price = item.get("est_price_krw")
-        if not price:
+        budget = budget_at((item.get("unit_type") or {}).get("area_m2"))
+        if not price or not budget:
             item[BUDGET_GAP_KEY] = None
             item[BUDGET_GAP_PCT_KEY] = None
             continue
@@ -276,15 +305,26 @@ def _budget_notes(override: int | None, max_purchase_krw: int) -> list[str]:
     슬라이더를 올린 만큼 살 수 있다고 믿는다(예산 필터가 조용히 자기 한도를 대체한다).
     여기 실리는 금액은 희망가(사용자 입력)와 최대 구매가(파생값)뿐이다 —
     보유현금·연소득 원본은 넣지 않는다(SR4-2).
+
+    ⚠️ **비교 대상 한도는 기준 면적 하나의 값이다** (CR39-2, 2026-07-30)
+    ---------------------------------------------------------------
+    최대 실구매 가능 금액은 면적의 함수인데(취득세 농특세 85㎡ 경계) 이 고지는 결과
+    전체에 한 번 붙는 문장이라 후보마다 다른 숫자를 담을 수 없다. 그래서 기준 면적
+    (`SUMMARY_AREA_M2` = `/affordability` 기본값과 같은 값)으로 만들고 **그 사실을
+    문장에 적는다.** 후보 하나하나의 판정은 이 숫자가 아니라 그 후보의 면적으로 세운
+    상한이 한다 — 문장이 판정보다 강한 주장을 하지 않게 하는 것이 이 괄호의 목적이다.
     """
     if not override:
         return []
     note = (f"희망 매매가 {override:,}원을 예산 **상한**으로 적용했습니다 "
             f"— 이 금액 이하 후보만 봅니다.")
     if max_purchase_krw and override > max_purchase_krw:
-        note += (f" 다만 이 금액은 산정된 최대 실구매 가능 금액 {max_purchase_krw:,}원을 "
+        note += (f" 다만 이 금액은 산정된 최대 실구매 가능 금액(전용 "
+                 f"{SUMMARY_AREA_M2:g}㎡ 기준) {max_purchase_krw:,}원을 "
                  f"{override - max_purchase_krw:,}원 초과합니다 — 초과분은 추가 현금이 "
-                 f"필요하며, 대출 한도 안에서 해결되지 않을 수 있습니다.")
+                 f"필요하며, 대출 한도 안에서 해결되지 않을 수 있습니다. "
+                 f"이 한도는 면적에 따라 조금 달라집니다(전용 85㎡ 초과분에 농어촌특별세가 "
+                 f"붙습니다).")
     return [note]
 
 

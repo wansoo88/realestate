@@ -1108,3 +1108,190 @@ docker compose -f docker-compose.deploy.yml down -v    # ⚠️ realestate-pgdat
 | 지도가 아예 안 뜸 / 타일이 빈칸 | CSP 가 출처를 막음 | 브라우저 콘솔의 `Refused to load ...` 에 찍힌 호스트를 확인. **임시로 `*` 를 넣지 말고** §5-5(3)의 Report-Only 로 되돌린 뒤 PM 보고 |
 | 콘솔에 `Refused to evaluate a string as JavaScript` 1건 | 카카오 SDK 의 IE 감지용 `eval` | **정상.** try/catch 안이라 지도는 동작한다. `'unsafe-eval'` 을 넣지 말 것 |
 | db OOM-kill | 상한 192MB 초과 | `docker inspect realestate-db --format '{{.State.OOMKilled}}'`. PM 보고 후 조정 |
+
+---
+
+## 9. 배포 후 감시 (5단계) — 절차는 `docs/05-monitoring/monitoring.md`
+
+배포는 끝이 아니다. 이 서버에서 난 사고 4건은 **전부 사람이 우연히 발견**했다.
+2026-07-30 에 감시를 걸었다. 배포 후 아래만 확인하면 된다.
+
+```bash
+# 1) 감시가 현재 상태를 어떻게 보는지 (알림 안 보냄)
+RE_MON_DRY_RUN=1 RE_MON_PRINT=1 /opt/realestate/scripts/monitor.sh --daily
+
+# 2) 새 배포에서 특히 중요한 세 줄을 눈으로 본다
+#    프론트  : 번들 /assets/xxx.js -> 200 application/javascript   ← root 가 새 배포를 보는가
+#    DB구조  : listing 신규컬럼 2/2 · CHECK 7/7                    ← 016 이 적용됐는가
+#    API 5xx : 이번 구간 0건                                        ← 실사용에서 깨지지 않았는가
+```
+
+- 5분마다: 메인/health/지도 응답 · **프론트 번들 존재** · DB OOM kill · 디스크 ·
+  로그 권한 · 로그 내 쿼리 유출 · access 로그 신선도 · `/api/` 5xx ·
+  **비밀번호 SSH 로그인 성공(트립와이어 T2)** · **`auth.log` 변화가 회전으로 설명되는가** ·
+  **`auth.log` 가 얼어붙지 않았는가** · **회전본 `.1` 이 로테이션 없이 바뀌지 않았는가** ·
+  **`auth.log` 의 mtime 과 크기가 모순되지 않는가(같은 길이 덮어쓰기·신선도 위조)** ·
+  **journald 를 두 번째 출처로 교차 계수** · **위 검사 대상이 0개인가(감시불능)** ·
+  감시 상호 확인(**일일 점검이 한 번도 안 돈 경우 포함**)
+- 매일 09:05: 위 전부 + 인증서 4장(동거 서비스 포함) · DB 구조(016) · 시장지수 기준월 ·
+  크래시 복구 흔적 → **요약 1통**. 아침에 안 오면 그 자체가 이상 신호다.
+- 알림: 텔레그램(pjt12-adsense 가 쓰는 봇과 같은 채팅). 금액·토큰·로그 원문은 보내지 않는다.
+
+### 알림에 찍히는 경보 키 — 무엇을 뜻하고 무엇을 해야 하는가
+
+일일 요약 머리말의 *"미해소 N건 (이름…)"* 에 나오는 이름들이다.
+**등급이 두 가지**라는 것만 기억하면 된다 — `경보:` 는 조치를 요구하고,
+`warn_*` 는 *"성공했지만 알아 둘 것"* 이다(CR42-1 · SR38-8).
+
+| 키 | 뜻 | 사람이 할 일 |
+|---|---|---|
+| `sshpw` | 비밀번호 SSH 로그인 **성공** (트립와이어 T2) | **즉시** — SSH 부터 잠근다 |
+| `authshrink` | `auth.log` 변화가 로테이션으로 설명되지 않는다(truncate·rm 후 재생성) | 즉시 — `ls -li /var/log/auth.log*` · `last \| head` |
+| `authedit` | 회전본 `auth.log.1` 이 로테이션 없이 바뀌었다 | 즉시 — 같은 확인 |
+| `authfresh` | `auth.log` 가 6시간째 안 늘었다 = **T2 가 무효** | `systemctl status rsyslog` |
+| **`authfake`** | `auth.log` 의 **mtime 은 새것인데 크기가 그대로**다 (SR39-2·SR39-1) | 즉시 — `touch` 로 신선도를 위조했거나, 이미 쓰인 구간을 **같은 길이로 덮어썼다**. `ls -l --time-style=full-iso /var/log/auth.log` · `systemctl status rsyslog` · **`journalctl -u ssh --since -1h \| grep Accepted`**(두 번째 출처) |
+| **`sshjournal`** | 어제까지 쓰던 **두 번째 로그 출처(journald)가 사라졌다** | `systemctl status systemd-journald` · `journalctl --disk-usage` · `ls -ld /var/log/journal`. ⚠️ 이게 뜨면 `auth.log` 한 곳만 남는다 — 같은 길이 덮어쓰기를 반증할 방법이 없어진다 |
+| **`daily_dead`** | 일일 점검이 **한 번도** 안 돌았거나 30시간 넘게 안 돈다 | `crontab -l \| grep monitor.sh` — **인증서·DB구조·시장지수·DB크래시·컨테이너로그 감시가 통째로 없는 상태**다 |
+| `logblind` | 위 검사들의 **대상이 0개**다(= 이상 없음이 아니라 "모른다") | 경로·마운트·로테이션 확인 |
+| `logperm` `logleak` `logfresh` `api5xx` | 로그 권한·쿼리 유출·정지·5xx | 본문의 확인 명령 |
+| `cert` | 인증서 21일 미만 (**동거 서비스 포함**) | `certbot renew --dry-run` |
+| `dbstruct` | 016 컬럼/CHECK 누락 · 시장지수 0행 · 진행 중인 달 완결 | 마이그레이션 확인 |
+| `marketstale` | 기준월이 밀렸는데 **이번 달 배치 기록이 없다** | `crontab -l \| grep market-index` |
+| `job_<이름>` | 배치가 **0 이 아닌 코드**로 끝났다 | 본문의 `사유:` 줄 |
+| **`warn_<이름>`** | 배치는 **성공**했는데 확인할 것이 있다 | ⚠️ **즉시 조치를 요구하지 않는다.** 시장지수의 경우 표본 부족(계절적 거래량 감소)이라 **지금 손으로 할 수 있는 것이 없다** |
+
+> **왜 `warn_` 을 따로 뒀나.** 예전에는 "기준월이 표본 부족으로 안 올라간 달"까지
+> `rc=1` 이라 사용자가 받는 문장이 **"배치 실패"** 였다. 배치는 51초에 전 행을 적재했는데도.
+> 게다가 감시가 같은 사실을 **그 달 내내 매일** 다시 보냈다(16개월 전수 계산: 95통 → 지금 4통).
+> 조치할 수 없는 알림이 통로를 선점하면 `sshpw` 가 울어도 같은 손짓으로 넘어간다 —
+> 이 텔레그램은 `pjt12-adsense` 와 **공유하는 유일한 통로**다.
+
+```bash
+# 감시 스크립트 자체의 회귀 검사 (알림 0통 · 서버 무접촉)
+bash /opt/realestate/scripts/monitor-selftest.sh
+#   → '통과 N · 실패 0 · 건너뜀 N · 하네스오류 0' 이어야 한다.
+#     ⚠️ '하네스오류' 는 **검사 결과가 아니다** — 그 값이 0 이 아니면 이 환경이
+#        임시파일을 못 만든 것이므로, 초록/빨강을 근거로 쓰기 전에 그것부터 고친다.
+```
+
+### 9-1. 감시 스크립트만 갱신하는 절차 (`CR-043` / `SR-039` 반영분)
+
+> ⚠️ **앱·DB·nginx 는 건드리지 않는다.** 바뀌는 것은 `/opt/realestate/scripts/` 의 셸 **5개**뿐이다.
+> (이번 라운드에서 실제로 내용이 바뀐 것은 `monitor.sh`·`monitor-lib.sh`·`monitor-selftest.sh`
+>  **3개**지만, 서버는 아직 `SR-038` 시점이라 `job-run.sh`·`market-index.sh` 도 서버 것과 다르다.
+>  **5개를 함께 올린다** — 섞이면 `CR42-1` 3층 중 배치 쪽 두 층이 빠진 채로 돈다.)
+> 서비스 중단 0 · 재기동 0 · 마이그레이션 0.
+> ⚠️ 게이트(code-review / security-review)가 **둘 다 통과한 뒤에만** 실행한다.
+
+**왜 지금 올려야 하나 (미루는 비용).**
+서버에는 아직 `SR-038` 시점 코드가 돈다. 즉 **운영에서 지금 열려 있는 것**:
+`SR38-1`(회전본 mtime 위조) · `SR38-2`(회전본 편집) · `SR38-3`(로그 동결) ·
+`CR42-2`(트립와이어가 `rm` 에 눈멂) · `CR42-3`(인증서 fail-open).
+그리고 **`CR42-1` 폭주는 2026-09-01 에 실제로 터진다** — `2026-07` 이 이미 0/3 이고
+최소표본 1,422 < 문턱 ≈2,080 이라 신고지연 30일이 다 지나도 못 넘는다.
+그날 옛 코드는 *"배치 실패"* 1통 + **그 달 내내 하루 한 통**을 보낸다.
+
+```bash
+# ── 0) 로컬에서 먼저 (해시를 손에 들고 간다) ────────────────────────────────
+cd <저장소>
+grep -rnE 'MUT[-]' deploy/         # 0건이어야 한다 (변이 잔재 · 표기를 쪼개 둔다)
+bash -n deploy/*.sh                # 8파일 전부 통과
+bash deploy/monitor-selftest.sh    # 통과 N · 실패 0 · 하네스오류 0
+sha256sum deploy/monitor.sh deploy/monitor-lib.sh deploy/job-run.sh deploy/market-index.sh \
+          deploy/monitor-selftest.sh
+```
+
+```bash
+# ── 1) 서버: 지금 것을 먼저 남긴다 (롤백 자산) ──────────────────────────────
+ssh <배포계정>@<DEPLOY_HOST>
+sudo -i
+cd /opt/realestate/scripts
+sha256sum monitor.sh monitor-lib.sh job-run.sh market-index.sh monitor-selftest.sh \
+  | tee /root/monitor-scripts.sha256.$(date +%F)
+mkdir -p /root/backup-monitor-$(date +%F)
+cp -a monitor.sh monitor-lib.sh job-run.sh market-index.sh monitor-selftest.sh \
+      /root/backup-monitor-$(date +%F)/
+```
+
+```bash
+# ── 2) 올리는 순서 — **라이브러리를 먼저, 본체를 나중에** ───────────────────
+#   근거: monitor.sh 는 monitor-lib.sh 를 source 한다. 반대로 올리면 5분 크론이
+#   그 사이에 끼어들어 **새 monitor.sh + 옛 monitor-lib.sh** 조합으로 한 번 돈다.
+#   이번 델타에는 그 조합에서 깨지는 것이 있다(monitor.sh 가 새 scrub 규칙과
+#   scrub 을 타는 log() 를 전제한다). 라이브러리를 먼저 올리면 그 반대 조합
+#   (옛 monitor.sh + 새 monitor-lib.sh)이 되는데, 그쪽은 **호환된다** —
+#   추가된 것은 규칙과 log() 세탁뿐이고 인터페이스는 그대로다.
+#
+#   ① monitor-lib.sh   ② job-run.sh   ③ market-index.sh
+#   ④ monitor.sh       ⑤ monitor-selftest.sh
+#
+#   (로컬에서 scp 로 보내거나, 저장소를 서버에서 pull 한 뒤 cp 한다)
+install -m 750 -o root -g root <새파일> /opt/realestate/scripts/<이름>
+```
+
+```bash
+# ── 3) 올린 뒤 즉시 확인 (사용자 알림 0통) ─────────────────────────────────
+cd /opt/realestate/scripts
+sha256sum monitor.sh monitor-lib.sh job-run.sh market-index.sh monitor-selftest.sh
+#   → 0) 에서 손에 들고 온 값과 **5/5 일치**해야 한다
+
+bash monitor-selftest.sh
+#   → 리눅스에서는 윈도우에서 SKIP 되던 chmod 항목 2건이 실제로 돈다.
+#     '실패 0 · 하네스오류 0' 이어야 한다.
+
+RE_MON_DRY_RUN=1 RE_MON_PRINT=1 ./monitor.sh --fast    # 알림 안 나간다
+#   눈으로 볼 줄 (이번 델타로 새로 생긴 것):
+#     SSH2차  : journald 같은 구간 0건 (auth.log 0건 · 기대 0/0)
+#   ⚠️ 여기가 'journald 교차 불가' 로 나오면 두 번째 출처가 안 잡힌 것이다.
+#      유닛 이름을 확인한다: systemctl list-units | grep -E 'ssh(d)?\.service'
+
+RE_MON_DRY_RUN=1 RE_MON_PRINT=1 ./monitor.sh --daily   # 알림 안 나간다
+#     인증서  : 4개 검사 · … (임계 21일)
+#     DB구조  : listing 신규컬럼 2/2 · CHECK 7/7 · …
+```
+
+```bash
+# ── 4) journald 교차의 **자원 비용을 서버에서 실측한다** (로컬에서는 못 잰다) ─
+#   5분마다 journalctl 을 2회 부른다. 아래가 0.5초를 넘으면 창을 줄이거나 끈다.
+time journalctl -n 1 --no-pager >/dev/null
+time journalctl -u ssh -u sshd --since "@$(( $(date +%s) - 300 ))" --no-pager -o cat \
+     | grep -cE 'Accepted (password|keyboard-interactive)'
+#   기대: 두 번째 값은 **0**(이 서버의 성공은 전부 publickey 다 — SR-039 §6 실측)
+#   ※ 이 값이 0 이 아니면 그것 자체가 트립와이어 T2 다. 먼저 SSH 를 잠근다.
+```
+
+```bash
+# ── 5) 상태 파일 정리 — **하지 않는다** ────────────────────────────────────
+#   /var/lib/realestate-monitor/kv 는 지우지 않는다. 지우면
+#     · sshpw_off 가 리셋되어 auth.log 전체를 한 번 다시 세고
+#     · first_fast_run 이 오늘로 잡혀 daily_dead 유예가 다시 시작된다
+#   새 키(sshpw_mtime · sshpw_jd · blind_daily · first_fast_run)는 **없으면 없는 대로**
+#   첫 회에 기준값만 잡고 조용히 넘어가도록 만들어져 있다(설계 확인).
+```
+
+```bash
+# ── 6) 롤백 (1분) ─────────────────────────────────────────────────────────
+cp -a /root/backup-monitor-<날짜>/*.sh /opt/realestate/scripts/
+cd /opt/realestate/scripts && sha256sum *.sh   # 1) 에서 남긴 값과 대조
+```
+
+**반영 뒤 24~48시간 안에 눈으로 확인할 것**
+1. 다음 날 아침 **일일 요약 1통**이 온다(안 오면 그 자체가 신호다).
+2. 요약에 `SSH2차 : journald 같은 구간 0건` 이 매일 있다.
+3. `authfake`·`sshjournal`·`daily_dead` 가 **뜨지 않는다**(뜨면 오탐이므로 즉시 보고).
+4. `2026-09-01 04:10` 배치 뒤 오는 것이 *"배치 실패"* 가 아니라
+   **`warn_market-index` 1통**이고, 그 뒤 **하루 한 통이 오지 않는다**.
+
+### §8 의 `db OOM-kill` 항목 보충
+`docker inspect realestate-db --format '{{.State.OOMKilled}}'` 는 지금 `true` 를 낸다.
+맞는 값이지만 **끈적한(sticky) 불리언**이라 몇 번·언제 났는지 알 수 없고, 한 번 true 가
+되면 계속 true 다 → **"또 났다"를 판별할 수 없다.** 횟수와 증가분은 여기서 본다:
+
+```bash
+ID=$(docker inspect -f '{{.Id}}' realestate-db)
+grep oom /sys/fs/cgroup/system.slice/docker-$ID.scope/memory.events   # oom_kill = 누적 횟수
+docker logs realestate-db 2>&1 | grep -E 'terminated by signal|reinitializing'
+```
+
+⚠️ 이 사고는 `docker ps` 로 절대 안 보인다 — postmaster(PID 1)는 살아 있고 백엔드만
+죽어서 크래시 복구를 하므로 컨테이너는 `Up ... (healthy)` · `RestartCount=0` 을 유지한다.

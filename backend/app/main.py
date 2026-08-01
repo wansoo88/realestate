@@ -109,10 +109,18 @@ def create_app(*, repo=None) -> FastAPI:
     async def access_log_and_headers(request: Request, call_next):
         response = await call_next(request)
 
+        # ⚠️ **이 줄은 운영에서 한 줄도 나가지 않는다** (SR33-3 · 2026-07-30 재실측)
+        # uvicorn 이 기동 시 적용하는 `LOGGING_CONFIG` 는 `uvicorn*` 로거만 설정한다.
+        # `app` 로거는 핸들러가 없고 root 도 없어 **effective level 이 WARNING** 이다 —
+        # 즉 `logger.info(...)` 는 레벨에서 걸러져 stdout 에 도달하지 않는다
+        # (`logger.warning`·`exception` 은 `logging.lastResort` 로 stderr 에 나간다).
+        # 그래서 접근 로그의 **실제** 방어는 ② uvicorn access 필터와 ③ nginx `re_noquery`
+        # 두 개이고, 여기 `log_target` 은 **테스트에서만 실행되는 예비 방어**다.
+        # 켜려면(핸들러 부착) `SR33-1`(app 로거의 마스킹 필터)을 **먼저** 닫아야 한다 —
+        # 켜는 순간 지금 안 나가던 INFO 줄들이 전부 나가기 시작한다.
         logger.info("%s %s %s", request.method,
                     log_target(request.url.path, request.url.query),
                     response.status_code)
-
 
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"

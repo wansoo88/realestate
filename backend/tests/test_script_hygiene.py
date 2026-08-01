@@ -104,6 +104,35 @@ _SECRET_ASSIGN = re.compile(
     r"[\"']?(?P<value>[^\s\"'`<>{}$|,;)\]]{8,})"
 )
 
+#: ⚠️ SR39-6 — **위 이름 목록에 `*_KEY` 가 없었다.** `_` 는 단어문자라
+#:    `api[_-]?key` 는 `NEIS_KEY`·`KAKAO_JS_APP_KEY`·`FIELD_ENCRYPTION_KEY` 를
+#:    **하나도 못 잡는다**(실측: 네 이름 전부 통과). 뒤의 둘은 이미 서버 `.env` 에
+#:    사는 실비밀이고, 앞의 둘은 지금 투입되는 키가 가질 수 있는 이름이다.
+#:    게다가 같은 파일의 `_SECRET_ENV_SLOT_RE` 는 `_KEY$` 를 **이미 비밀칸으로 인정**한다 —
+#:    한 파일 안에서 두 규칙이 서로 다른 말을 하고 있었다.
+#:
+#:    범위를 **대문자 환경변수 꼴로만** 넓힌다. 소문자 `key = ...` 까지 넣으면
+#:    산문(`sort key = name`)이 걸려 관문이 소음이 된다.
+#:
+#:    ⚠️ **오탐 비용을 실측했다**(저장소 전체 · 같은 면제 규칙 적용):
+#:      · 값 12자 이상 → **2건**. 둘 다 리뷰 원장이 결함을 설명하려고 적은 가짜값
+#:        (`code-review-log.md` 의 selftest 픽스처 인용 · `security-review-log.md` 의 예시).
+#:      · 값 **16자 이상 → 0건**.
+#:    그래서 이 규칙만 16자로 잡는다. 근거는 자릿수 취향이 아니라 **실물**이다 —
+#:    이 프로젝트가 담을 키는 전부 32자 이상이다(NEIS 32 hex · Kakao 32 hex ·
+#:    Fernet 44 · Anthropic 100+ · 텔레그램 봇토큰 45). 12~15자 구간은 이 저장소에서
+#:    언제나 설명용 예시였고, 고전적인 이름(`*_API_KEY`·`*_SECRET`·`*_TOKEN`·
+#:    `*PASSWORD*`)은 위 규칙이 **8자부터** 그대로 잡는다.
+_SECRET_ENV_ASSIGN = re.compile(
+    r"\b(?P<name>[A-Z][A-Z0-9]*(_[A-Z0-9]+)*_(KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL))"
+    r"\s*[=:]\s*[\"']?(?P<value>[^\s\"'`<>{}$|,;)\]]{16,})"
+)
+
+#: SR39-4 — **이름이 인접하지 않아도 형태만으로 비밀인 것.** 위 두 규칙은 `이름=값`
+#: 꼴만 보는데, 실제 유출은 값만 던져진다(`invalid x-api-key sk-ant-…`).
+#: 접두가 고유해서 오탐이 없다(실측: 저장소 전체 0건).
+_BARE_SECRET = re.compile(r"(sk-ant-[A-Za-z0-9_\-]{12,}|KakaoAK\s+[A-Za-z0-9]{20,})")
+
 #: 값이 아니라 자리표시자인 것들 — 문서에 이렇게 적는 건 정상이다.
 _PLACEHOLDER = re.compile(
     r"(?i)^(\*+|x+|\.{3,}|-+|_+|none|null|true|false|env|os\.environ.*|"
@@ -135,8 +164,24 @@ def test_docs_and_config_do_not_contain_secret_values():
     (실제로 SR17-2 때 리뷰 로그 2개에 평문 비밀번호가 인용돼 있었다).
     """
     targets: list[Path] = []
-    for pattern in ("docs/**/*.md", "config/**/*.yaml", "config/**/*.yml", "*.md"):
+    # ⚠️ SR38-7 — 예전 글롭은 `docs/**` 와 **루트의 `*.md`** 만 봤다. 저장소의 `.md` 66개 중
+    #    31개가 관문 밖이었고, 그 안에 **`deploy/DEPLOY.md`(서버에 키를 넣는 절차서)** 와
+    #    `team/**` 전체가 있었다. 이 저장소는 공개다. 오늘 그 31개를 같은 정규식으로 훑어
+    #    위반 0건이었지만, 사람이 키를 붙여 넣게 될 가장 그럴듯한 파일이 정확히 그 절차서다.
+    #    → 키 투입 **전에** 범위를 넓힌다.
+    for pattern in ("docs/**/*.md", "config/**/*.yaml", "config/**/*.yml", "*.md",
+                    "deploy/**/*.md", "team/**/*.md"):
         targets += [p for p in REPO_ROOT.glob(pattern) if p.is_file()]
+
+    # 관문의 **적용 범위 자체**를 못 박는다 — 글롭을 다시 좁히면 이 단언이 먼저 죽는다.
+    # (범위가 조용히 줄어드는 것은 검사가 조용히 꺼지는 것과 같다.)
+    covered = set(targets)
+    for must in ("deploy/DEPLOY.md", "team/CHARTER.md"):
+        path = REPO_ROOT / must
+        if path.is_file():
+            assert path in covered, (
+                f"{must} 가 비밀위생 관문 밖입니다 — 공개 저장소이고, "
+                "하필 서버에 키를 넣는 절차가 적히는 자리입니다(SR38-7).")
 
     offenders: list[str] = []
     for path in targets:
@@ -147,18 +192,95 @@ def test_docs_and_config_do_not_contain_secret_values():
         except (UnicodeDecodeError, OSError):
             continue
         for lineno, line in enumerate(lines, start=1):
-            m = _SECRET_ASSIGN.search(line)
+            bare = _BARE_SECRET.search(line)
+            if bare and not _MASKED.search(bare.group(0)):
+                offenders.append(f"{path.relative_to(REPO_ROOT)}:{lineno}")
+                continue
+            for rule in (_SECRET_ASSIGN, _SECRET_ENV_ASSIGN):
+                m = rule.search(line)
+                if not m:
+                    continue
+                value = m.group("value")
+                if (_PLACEHOLDER.match(value) or _MASKED.search(value)
+                        or _SYNTHETIC.fullmatch(value)):
+                    continue
+                offenders.append(f"{path.relative_to(REPO_ROOT)}:{lineno}")
+                break
+
+    assert not offenders, (
+        "문서·설정에 비밀값으로 보이는 문자열이 있습니다(공개 저장소 — 커밋되면 영구 공개):\n  "
+        + "\n  ".join(offenders))
+
+
+def test_비밀위생_규칙이_KEY_로_끝나는_환경변수_이름을_잡는다():
+    """★ 이 관문 **자신**에 대한 변이 시험 (SR39-6).
+
+    규칙을 넓혀 놓고 "넓혔다"고 적는 것으로는 부족하다 — 누가 조용히 되좁히면
+    저장소가 깨끗한 동안에는 아무도 모른다(위 검사는 위반이 0이면 초록이다).
+    그래서 **잡아야 하는 형태를 여기서 직접 먹인다.** 값은 전부 합성이다.
+    """
+    caught = []
+    for line in (
+        "NEIS_KEY=0123456789abcdef0123456789abcdef",
+        "ANTHROPIC_KEY=sk-ant-api03-Zm9vYmFyYmF6cXV4Y29ycmdl",
+        "KAKAO_JS_APP_KEY=fedcba9876543210fedcba9876543210",
+        "FIELD_ENCRYPTION_KEY=Zm9vYmFyYmF6cXV4Y29yZ2VhYmNkZWZnaGlqa2xtbm9w",
+        "echo 'invalid x-api-key sk-ant-api03-Zm9vYmFyYmF6cXV4Y29y'",
+        "curl -H 'Authorization: KakaoAK fedcba9876543210fedcba9876543210'",
+    ):
+        bare = _BARE_SECRET.search(line)
+        hit = bool(bare)
+        if not hit:
+            for rule in (_SECRET_ASSIGN, _SECRET_ENV_ASSIGN):
+                m = rule.search(line)
+                if not m:
+                    continue
+                value = m.group("value")
+                if (_PLACEHOLDER.match(value) or _MASKED.search(value)
+                        or _SYNTHETIC.fullmatch(value)):
+                    continue
+                hit = True
+                break
+        caught.append((line.split("=")[0][:40], hit))
+    missed = [name for name, hit in caught if not hit]
+    assert not missed, (
+        f"비밀위생 관문이 이 형태를 놓칩니다: {missed}. "
+        "`*_KEY` 로 끝나는 환경변수와 접두로 알아보는 키(sk-ant-·KakaoAK)는 "
+        "이름 목록에 없어도 잡아야 합니다(SR39-6 / SR39-4).")
+
+
+def test_비밀위생_규칙이_정상_문장을_막지_않는다():
+    """반대쪽 — 오탐이 결함이라는 원칙은 관문 자신에게도 적용된다.
+
+    아래는 전부 저장소에 실제로 있거나 있을 법한 **정상** 줄이다. 여기가 붉어지면
+    규칙이 너무 넓은 것이고, 그러면 사람이 관문을 끄게 된다.
+    """
+    offenders = []
+    for line in (
+        "환경변수 이름은 FIELD_ENCRYPTION_KEY 입니다",              # 값이 없다
+        "FIELD_ENCRYPTION_KEY=<서버 .env 에만>",                     # 마스킹 표기
+        "NEIS_API_KEY=${NEIS_API_KEY}",                              # 셸 참조
+        "ANTHROPIC_API_KEY=your-key-here",                           # 자리표시자
+        "SERVICE_KEY=exampleABCDEFGHIJKL",                           # 명시적 예시
+        "정렬 key = name 으로 둔다",                                 # 산문
+        "SECRET_ENV_VARS 목록에 추가한다",                           # 값 없는 이름
+    ):
+        bare = _BARE_SECRET.search(line)
+        if bare and not _MASKED.search(bare.group(0)):
+            offenders.append(line)
+            continue
+        for rule in (_SECRET_ASSIGN, _SECRET_ENV_ASSIGN):
+            m = rule.search(line)
             if not m:
                 continue
             value = m.group("value")
             if (_PLACEHOLDER.match(value) or _MASKED.search(value)
                     or _SYNTHETIC.fullmatch(value)):
                 continue
-            offenders.append(f"{path.relative_to(REPO_ROOT)}:{lineno}")
-
+            offenders.append(line)
+            break
     assert not offenders, (
-        "문서·설정에 비밀값으로 보이는 문자열이 있습니다(공개 저장소 — 커밋되면 영구 공개):\n  "
-        + "\n  ".join(offenders))
+        f"비밀위생 관문이 정상 줄을 막습니다(오탐): {offenders}")
 
 
 def test_verify_recommendation_only_purges_disposable_addresses():

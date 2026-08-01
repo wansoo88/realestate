@@ -460,10 +460,17 @@ def test_MAP2_지도_조회가_역과_정비사업을_같은_문장으로_가져
               attrs='{"lines":["2호선","수인분당선"]}')
     with engine.begin() as conn:
         pid = conn.execute(text("""
-            INSERT INTO redev_project (source, source_key, zone_name, sigungu,
-                                       raw_stage, stage, biz_type, as_of)
-            VALUES ('test', 'k1', '가나구역', '강남구', '조합설립인가',
-                    'association', 'rebuild', DATE '2026-05-31')
+            -- ⚠️ `sido`·`parse_status` 는 **NOT NULL 이고 기본값이 없다**
+            --    (migrations/014). 예전 판본은 둘을 빼서 `NotNullViolation` 으로
+            --    죽었는데, 이 파일 전체가 `TEST_DATABASE_URL` 없이 skip 되고 있어
+            --    **아무도 몰랐다**(2026-07-30 첫 실DB 실행에서 드러남).
+            --    운영 적재기(`scripts/load_redevelopment.py`)는 둘 다 채운다 —
+            --    깨진 것은 이 픽스처였다. 이 행에는 주소가 없어 파싱할 지번도 없으므로
+            --    `parse_status='no_jibun'` 이 사실이다(링크는 아래에서 수동으로 만든다).
+            INSERT INTO redev_project (source, source_key, sido, sigungu, zone_name,
+                                       raw_stage, stage, biz_type, parse_status, as_of)
+            VALUES ('test', 'k1', '서울특별시', '강남구', '가나구역', '조합설립인가',
+                    'association', 'rebuild', 'no_jibun', DATE '2026-05-31')
             RETURNING id
         """)).one().id
         conn.execute(text("""

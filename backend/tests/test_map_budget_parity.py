@@ -500,12 +500,16 @@ def test_같은_세율_구간의_면적은_한_번만_계산한다(client, monke
     500 = 375ms 로 지도 SQL(125~157ms)보다 오래 걸린다.
 
     `acquisition_area_class` 로 묶으면 운영 세율에서는 **2회**(85㎡ 이하 / 초과)면 된다.
-    변이: `_profile_budget` 의 캐시를 지우면 호출이 40회로 늘어 여기서 깨진다.
+    변이: `profile_affordability` 의 캐시를 지우면 호출이 40회로 늘어 여기서 깨진다.
+
+    ⚠️ 패치 대상이 `app.domain.affordability.budget` 인 이유(CR39-2, 2026-07-30):
+       조회기가 라우터에서 도메인 모듈로 옮겨졌고, **추천 러너도 같은 모듈을 쓴다**.
+       그래서 이 자리를 세면 지도·추천 두 경로의 계산 횟수를 같은 이름으로 잰다.
     """
-    from app.api import routes
+    from app.domain.affordability import budget as budget_mod
 
     calls: list[float] = []
-    real = routes.compute_affordability
+    real = budget_mod.compute_affordability
 
     def counted(borrower, rules, **kw):
         prop = kw.get("prop")
@@ -515,7 +519,7 @@ def test_같은_세율_구간의_면적은_한_번만_계산한다(client, monke
     token = _ready(client)
     # 40 ~ 118㎡ — **85㎡ 경계를 가로지른다**(한쪽에만 몰아 두면 1구간이라 공짜 통과).
     _seed(client.repo, [(i, 900_000_000, 40.0 + i * 2) for i in range(40)])
-    monkeypatch.setattr(routes, "compute_affordability", counted)
+    monkeypatch.setattr(budget_mod, "compute_affordability", counted)
 
     body = _map(client, token, budget="mine")
     assert len(body["items"]) == 40

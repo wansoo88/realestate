@@ -43,6 +43,7 @@ from app.agents.scoring import (
     score_item,
     summary_notes,
 )
+from app.domain.affordability.budget import BudgetFn
 from app.domain.affordability.models import AffordabilityResult
 from app.domain.listings.dedup import ListingGroup, trust_score
 from app.domain.location.analysis import evaluate_location
@@ -325,13 +326,44 @@ class AnalysisContext:
     #: 형태라 원인을 짐작할 수도 없다. `affordability` 를 조작해 우회하지 않는 이유는
     #: 그러면 finance finding 이 희망가를 "실구매 가능 금액"이라고 잘못 말하기 때문이다.
     budget_krw: int | None = None
+    #: **후보 면적별 예산 상한 조회기**(면적 → 상한). 있으면 이것이 정본이다.
+    #:
+    #: ⚠️ 왜 한 숫자로는 안 되는가 (CR39-2, 2026-07-30)
+    #: 자산으로 계산한 상한은 **전용면적의 함수**다 — 취득세 농특세가 85㎡ 를 경계로
+    #: 붙는다(운영 세율 실측 1,026,560,000 vs 1,024,580,000). 그런데 후보의 단위는
+    #: `api-spec §5` 대로 **단지 × 면적대**라서, 한 추천 안에 34㎡ 와 120㎡ 가 함께 있다.
+    #: 예전에는 `PropertyFacts()` 기본값 84.0 으로 만든 한 숫자로 전부를 판정했고,
+    #: 그 방향은 **관대**였다(84㎡ 상한이 더 크다) — 즉 *못 사는 후보가 통과*했다.
+    #: 지도는 CR37-1 에서 이미 고쳤고, 이 필드가 추천을 **같은 함수**로 데려온다
+    #: (`app/domain/affordability/budget.py` — 계산은 세율 구간별로 1회씩만 돈다).
+    #:
+    #: `None`(미지정)이면 옛 계약대로 `budget_krw`/`affordability` 의 한 숫자를 쓴다 —
+    #: 단위 테스트·구형 호출부를 위한 폴백이고, 실경로(러너)는 항상 채워 넘긴다.
+    budget_at: BudgetFn | None = None
 
     @property
     def effective_budget_krw(self) -> int:
-        """예산 판정에 실제로 쓰는 값. 0 이면 '예산 제한 없음'(자산 미입력 등)."""
+        """예산 판정에 쓰는 **한 숫자**(요약·폴백용). 0 이면 '예산 제한 없음'.
+
+        ⚠️ 후보 판정에 이 값을 직접 쓰지 말 것 — `budget_cap_krw(면적)` 을 쓴다.
+        희망 매매가를 준 경우에는 두 값이 같다(희망가는 면적과 무관한 금액 하나다).
+        """
         if self.budget_krw is not None:
             return self.budget_krw
         return self.affordability.max_purchase_krw
+
+    def budget_cap_krw(self, area_m2: float | None) -> int | None:
+        """**이 면적**에 적용할 예산 상한.
+
+        · 양수  = 그 금액이 상한
+        · `0`   = 예산 제한 없음(자산 미입력 등) — 판정하지 않고 통과시킨다
+        · `None` = 상한을 세울 수 없다(면적 미상 + 자산 기준) — **판정하지 않는다**.
+          84 를 가정해 채우면 다른 면적의 한도로 내린 판정이 그 후보의 판정이 된다.
+          호출부는 이 경우를 **세어서 말해야 한다**(조용히 통과시키지 않는다).
+        """
+        if self.budget_at is not None:
+            return self.budget_at(area_m2)
+        return self.effective_budget_krw
 
 
 # ---------------------------------------------------------------------------
@@ -1374,7 +1406,10 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
     finance = finance_finding(ctx.affordability)
     # 희망 매매가가 있으면 그것이 상한이고, 없으면 최대 실구매 가능 금액이다.
     # (예전엔 후자로 고정돼 있어 `budget_override_krw` 가 제외 판정에 닿지 못했다.)
-    budget = ctx.effective_budget_krw
+    # ⚠️ 상한은 **후보마다 그 후보의 면적으로** 세운다(`ctx.budget_cap_krw` — CR39-2).
+    #    한 숫자로 전부를 판정하면 85㎡ 를 가로지르는 목록에서 반드시 갈리고, 방향이
+    #    관대해서 **못 사는 후보가 통과**한다. 희망 매매가 기준이면 면적과 무관한 금액
+    #    하나라 후보마다 같은 값이 나온다(그때는 예전과 결과가 같다).
     avoid_tokens = _avoid_tokens(ctx.avoid)
     forbidden = _derive_forbidden(ctx)
     # 저장된 가중치는 **클라이언트의 주장**이다. 여기서 다시 정규화하고,
@@ -1390,6 +1425,10 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
     #: 분담금 방어에 걸려 재건축 블록만 내려놓은 후보 수. **0 이 아니면 반드시 말한다** —
     #: 조용히 '미확보'로 섞이면 수집 범위 밖(경기도)과 구분되지 않는다.
     cost_guard_degraded = 0
+    #: 전용면적을 몰라 **예산 상한을 세우지 못한** 후보 수(자산 기준일 때만 생긴다).
+    #: 제외하지도, 판정하지도 않고 통과시킨 후보다 — **0 이 아니면 반드시 말한다.**
+    #: 말하지 않으면 사용자는 그 후보가 예산 안이라고 읽는다(조용한 통과도 조용한 실패다).
+    budget_unknown_area = 0
 
     for cand in ctx.candidates:
         rep = cand.group.representative if cand.group is not None else None
@@ -1414,7 +1453,16 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
 
         # 하드 제외 ① — 아무리 점수가 높아도 못 사는 집은 추천이 아니다.
         # ⚠️ 실거래 기준이면 비교값이 **추정치**다. 사유 문구에 그 사실을 남긴다.
-        if budget and price > budget:
+        # ⚠️ 상한은 **이 후보의 면적**으로 세운다(CR39-2). 사유 문장에 적히는 한도도
+        #    판정에 실제로 쓴 그 숫자다 — 다른 숫자를 적으면 사용자가 되짚을 수 없다.
+        cap = ctx.budget_cap_krw(cand.area_m2)
+        if cap is None:
+            # 면적을 몰라 세율 구간을 고를 수 없다 → **판정하지 않는다.**
+            # 84 를 가정하면 *다른 면적의 한도*로 이 후보를 판정하는 것이고(CR37-1 의
+            # 본체), 그렇다고 제외하면 "판정 못 함"을 "못 산다"로 바꾸는 것이다.
+            # 그래서 통과시키되 **세어서 결과 고지로 말한다**(조용히 통과시키지 않는다).
+            budget_unknown_area += 1
+        elif cap and price > cap:
             # 실거래 기준이면 **어느 시점의 추정치인지**까지 적는다. 보정된 값을
             # 그냥 "최근 실거래 중위"라고 부르면 사용자가 원본 체결가로 읽는다.
             trade_label = (f"{band.as_of_label} 시점 환산 중위 {price:,}원(추정)"
@@ -1425,7 +1473,7 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
             #    보유현금·연소득 원본을 문장에 넣지 않는다(SR4-2).
             excluded.append(excluded_entry(
                 cand, code=EXCLUDED_OVER_BUDGET,
-                reason=f"예산 초과 ({label} > 한도 {budget:,}원)"))
+                reason=f"예산 초과 ({label} > 한도 {cap:,}원)"))
             continue
 
         # 하드 제외 ② — 기피 조건은 가점 상쇄가 아니라 제외다(F5).
@@ -1600,6 +1648,13 @@ def run_mvp_pipeline(ctx: AnalysisContext, *, llm: LLMClient | None = None,
         notes.append(
             "재건축 판정은 고시된 진행 단계만 봅니다. **추가분담금은 조합 내부 자료라 "
             "공개 데이터에 없어 반영하지 않았습니다** — 금액은 조합에 직접 확인하세요.")
+    if budget_unknown_area:
+        # 후보 전체 기준이다. **통과시킨 사실을 말하는 고지**라서 상위 N 으로 줄이면
+        # "몇 건을 판정 없이 통과시켰는가"가 사라진다(그게 이 문장의 존재 이유다).
+        notes.append(
+            f"후보 {budget_unknown_area}건은 전용면적이 확인되지 않아 예산 상한을 세우지 "
+            "못했고, 예산 판정 없이 목록에 남겨 두었습니다 — 자산 기준 상한은 면적에 따라 "
+            "달라지기 때문입니다(취득세 85㎡ 경계). '예산 안'이라는 뜻이 아닙니다.")
     if cost_guard_degraded:
         # 후보 전체(items+excluded) 기준이다. 상위 N 만 세면 "3건 보류"라고 해 놓고
         # 화면의 10건 어디에도 그 표시가 없는 상태가 생긴다.

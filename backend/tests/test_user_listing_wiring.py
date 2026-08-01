@@ -582,6 +582,42 @@ def _rising_index(region: str = "11680", scope: str = "sigungu"):
     return MarketIndex(region_code=region, scope=scope, points=points)
 
 
+def _ym_back(d: dt.date, back: int) -> dt.date:
+    """`d` 기준 `back` 개월 전의 **15일**.
+
+    일자를 15로 고정하는 이유: `TODAY - 15*i일` 로 심으면 **오늘이 며칠이냐에 따라
+    거래가 어느 달에 떨어지는지가 달라진다.** 월말에는 여러 건이 이번 달로 몰리고,
+    월초에는 지난달로 밀린다. 보정 배율은 **거래의 달**로 정해지므로 그 순간
+    검사가 재는 값이 날마다 달라진다 — 실제로 이 파일이 그렇게 깨졌다.
+    """
+    y, m = d.year, d.month - back
+    while m <= 0:
+        y, m = y - 1, m + 12
+    return dt.date(y, m, 15)
+
+
+def _seed_two_areas_monthly(repo, *, complex_id=1, name="월고정단지", months=range(2, 10)):
+    """`_seed_two_areas` 의 **달 고정판**.
+
+    거래를 전부 **기준월보다 오래된 달**(기본 2~9개월 전)에 심는다.
+    `_rising_index` 의 기준월은 '지난달'이므로, 모든 거래가 기준월보다 과거라
+    보정 배율이 **항상 1보다 크다** — 오늘이 며칠이든.
+    공용 `_seed_two_areas` 를 안 고친 이유: 19곳이 쓰고 있고 밴드 창(6·12·24·36개월)
+    구성이 달라져 다른 검사의 의미까지 바뀐다.
+    """
+    repo.add_complex(ComplexSummary(
+        id=complex_id, name=name, lon=127.05, lat=37.51, region_code=REGION,
+        built_year=2015, total_households=800,
+        recent_price_krw=int(7.0 * OKU), price_as_of=TODAY.isoformat(),
+        active_listings=0))
+    trades = []
+    for area, price_oku in ((59.94, 5.0), (84.97, 7.0)):
+        trades += [TradeRow(contract_date=_ym_back(TODAY, b),
+                            price_krw=int(price_oku * OKU), area_m2=area, floor=10)
+                   for b in months]
+    repo.add_trades(complex_id, trades)
+
+
 def test_자금계획이_API_경로에서도_추천카드와_같은_금액을_쓴다(client):
     """★ CR36-2. 두 화면의 숫자가 **HTTP 응답 안에서** 같은지 본다.
 
@@ -592,7 +628,11 @@ def test_자금계획이_API_경로에서도_추천카드와_같은_금액을_�
             `trade_band` 라 아래 단언에서 깨진다(보정이 실제로 돌았음을 못박는다).
     """
     token = _ready(client)
-    _seed_two_areas(client.repo)
+    # ⚠️ 날짜 고정 시드를 쓴다. `_seed_two_areas` 는 `TODAY - 15*i일` 이라
+    #    월말에는 거래 여러 건이 이번 달로 몰려 중위가 기준월 거래에 걸리고,
+    #    그러면 보정 배율이 1.0 이 되어 아래 마지막 단언이 **제품과 무관하게** 깨진다.
+    #    (2026-07-31 에 실제로 그렇게 깨졌고, 배포된 커밋에서도 같았다)
+    _seed_two_areas_monthly(client.repo)
     client.repo.set_market_index(_rising_index())
 
     card = _by_area(_recommend(client, token), 84.97)

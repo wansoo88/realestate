@@ -848,11 +848,17 @@ def proof_purpose_reaches_affordability(client, monkeypatch=None) -> None:
     금리 규칙을 통해서만 결과를 바꾸는데, 테스트 세율표에는 그 분기가 없어서
     "결과가 같다"가 정상이다. 그래서 값이 도메인까지 도달하는지를 직접 본다 —
     러너가 `purpose` 를 떨어뜨리면 실패한다(있는 척은 못 한다).
+
+    ⚠️ 이음매의 **위치가 옮겨졌다**(CR39-2, 2026-07-30): 러너는 이제 자금 계산을
+    직접 부르지 않고 면적별 상한 조회기(`app/domain/affordability/budget.py`)를 통해
+    부른다. 그래서 spy 도 그 모듈에 건다. 호출 **횟수**는 세율 구간 수에 따라 달라지므로
+    (구간별 1회 캐시) 개수를 못박지 않고 **모든 호출이 그 목적을 들고 갔는지**를 본다 —
+    이게 원래 명제("purpose 가 도달한다")에 더 가깝고 구간 수에 흔들리지 않는다.
     """
-    from app.agents import recommend as runner
+    from app.domain.affordability import budget as budget_mod
 
     seen: list[str] = []
-    original = runner.compute_affordability
+    original = budget_mod.compute_affordability
 
     def spy(borrower, rules, *, prop=None, **kw):
         seen.append(getattr(prop, "purpose", None))
@@ -860,14 +866,18 @@ def proof_purpose_reaches_affordability(client, monkeypatch=None) -> None:
 
     token = _ready(client)
     _seed(client.repo, complex_id=1, name="단지")
-    runner.compute_affordability = spy
+    budget_mod.compute_affordability = spy
     try:
         _run(client, token, {"region_codes": [REGION], "purpose": "invest"})
+        invest = list(seen)
+        seen.clear()
         _run(client, token, {"region_codes": [REGION], "purpose": "live"})
+        live = list(seen)
     finally:
-        runner.compute_affordability = original
+        budget_mod.compute_affordability = original
 
-    assert seen == ["invest", "live"], f"목적이 자금 계산에 도달하지 않았다: {seen}"
+    assert invest and set(invest) == {"invest"}, f"목적이 도달하지 않았다: {invest}"
+    assert live and set(live) == {"live"}, f"목적이 도달하지 않았다: {live}"
 
 
 #: 조건 → 증명 시나리오. 레지스트리가 "반영된다"고 말한 항목은 여기 이름이 있어야 한다.

@@ -912,11 +912,22 @@ def test_희망가가_없으면_차액의_기준은_최대구매가다(client):
 
 
 def test_예산이_없으면_차액은_None이다(client):
-    """자산 미입력 등으로 예산이 0 이면 '0 차이'가 아니라 **모름**이다(G2)."""
-    from app.agents.recommend import _annotate_budget_gap
+    """자산 미입력 등으로 예산이 0 이면 '0 차이'가 아니라 **모름**이다(G2).
 
-    items = [{"est_price_krw": 700_000_000}]
-    _annotate_budget_gap(items, 0)
+    ⚠️ 인자가 금액(`int`)에서 **면적별 조회기**로 바뀌었다(CR39-2) — 차액의 기준도
+    후보 면적으로 세운다. `fixed_budget(0)` 은 예전 `budget=0` 과 같은 뜻이다.
+    """
+    from app.agents.recommend import _annotate_budget_gap
+    from app.domain.affordability.budget import fixed_budget
+
+    items = [{"est_price_krw": 700_000_000, "unit_type": {"area_m2": 84.0}}]
+    _annotate_budget_gap(items, fixed_budget(0))
+    assert items[0]["budget_gap_krw"] is None
+    assert items[0]["budget_gap_pct"] is None
+
+    # 상한을 세울 수 없는 후보(면적 미상 + 자산 기준)도 **모름**이다 — 0 이 아니다.
+    items = [{"est_price_krw": 700_000_000, "unit_type": {"area_m2": None}}]
+    _annotate_budget_gap(items, lambda area: None if area is None else 900_000_000)
     assert items[0]["budget_gap_krw"] is None
     assert items[0]["budget_gap_pct"] is None
 

@@ -8,7 +8,6 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import secrets
-from collections.abc import Callable
 from typing import Annotated, Any
 
 import jwt
@@ -62,10 +61,12 @@ from app.core.security import (
     hash_password,
     verify_password,
 )
-from app.domain.affordability.engine import (
-    acquisition_area_class,
-    compute_affordability,
+from app.domain.affordability.budget import (
+    BudgetFn,
+    fixed_budget,
+    profile_budget,
 )
+from app.domain.affordability.engine import compute_affordability
 from app.domain.affordability.models import LoanTerms, PropertyFacts
 from app.domain.conditions import resolve_budget_override
 from app.domain.listings.dedup import AREA_TOLERANCE_M2
@@ -886,46 +887,12 @@ def _budget_block(applied: bool, basis: str | None = None,
 #: 한 숫자(`int`)가 아닌 이유는 위 주석(CR37-1) 그대로다 — ②(자산으로 계산한 한도)는
 #: 전용 85㎡ 경계에서 갈리는데 지도는 여러 면적을 한 화면에 담는다. 면적을 모르면
 #: `None`(판정 못 함)을 돌려준다.
-MapBudgetFn = Callable[[float | None], int | None]
-
-
-def _fixed_budget(amount_krw: int) -> MapBudgetFn:
-    """면적과 무관한 단일 상한(저장된 희망 매매가).
-
-    사용자가 "9억까지 볼래"라고 정한 금액이다. 면적이 뭐든 그 숫자가 상한이므로
-    **면적을 알 필요가 없다** — 면적 미상 단지도 판정한다.
-    """
-    def at(_area_m2: float | None) -> int | None:
-        return amount_krw
-    return at
-
-
-def _profile_budget(borrower: Any, rules: RuleSet, purpose: str) -> MapBudgetFn:
-    """자산으로 계산한 한도. **면적마다 다르다**(취득세 농특세 85㎡ 경계).
-
-    `acquisition_area_class` 로 묶어 같은 세율이 걸리는 면적은 한 번만 계산한다
-    (운영 세율이면 한 화면에 최대 2회). 캐시는 이 요청 안에서만 산다 — 사용자 자산에서
-    나온 금액이라 프로세스 전역에 남기지 않는다.
-    """
-    cache: dict[tuple[Any, ...], int] = {}
-
-    def at(area_m2: float | None) -> int | None:
-        if area_m2 is None:
-            # 어느 면적의 가격인지 모르면 그 가격에 맞는 한도도 못 세운다.
-            # 84㎡ 같은 값을 가정해 채우면 **다른 면적의 한도로 판정한 결과**를
-            # 사용자가 자기 단지의 판정으로 읽는다(그게 CR37-1 의 본체였다).
-            return None
-        key = acquisition_area_class(rules, area_m2)
-        hit = cache.get(key)
-        if hit is None:
-            hit = compute_affordability(
-                borrower, rules,
-                prop=PropertyFacts(area_m2=area_m2, purpose=purpose),
-            ).max_purchase_krw
-            cache[key] = hit
-        return hit
-
-    return at
+#:
+#: ⚠️ 조회기 **구현은 `app/domain/affordability/budget.py` 에 있다**(CR39-2, 2026-07-30).
+#:    추천 러너도 같은 판정을 해야 하는데 러너가 이 파일을 import 하면 순환이 되기
+#:    때문이다(routes → agents.recommend). 같은 계산을 두 벌 두면 반드시 다시 갈린다 —
+#:    실제로 지도만 고쳤던 동안 추천은 84㎡ 한 숫자로 후보를 제외하고 있었다.
+MapBudgetFn = BudgetFn
 
 
 def _resolve_map_budget(repo: Any, *, user: Any, settings: Settings,
@@ -945,7 +912,7 @@ def _resolve_map_budget(repo: Any, *, user: Any, settings: Settings,
     # 저장된 희망 매매가가 있으면 그것이 상한이다(추천 러너와 같은 함수·같은 순서).
     target = resolve_budget_override(None, prefer)
     if target is not None:
-        return _fixed_budget(target), _budget_block(True, BUDGET_BASIS_TARGET_PRICE)
+        return fixed_budget(target), _budget_block(True, BUDGET_BASIS_TARGET_PRICE)
 
     profile = repo.get_profile(user.id)
     if profile is None:
@@ -964,7 +931,7 @@ def _resolve_map_budget(repo: Any, *, user: Any, settings: Settings,
         logger.exception("지도 예산: 자산 복호화 실패 (user=%s)", user.id)
         return None, _budget_block(False, reason=_BUDGET_DECRYPT_FAILED)
 
-    return (_profile_budget(borrower, rules, purpose),
+    return (profile_budget(borrower, rules, purpose),
             _budget_block(True, BUDGET_BASIS_MAX_PURCHASE))
 
 
