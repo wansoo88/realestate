@@ -1,0 +1,1113 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>단지·매물 매력도 시각화 프로토타입</title>
+<!--
+  연구 프로토타입 — docs/02-design/ux/viz-research.md 의 설계를 눈으로 확인하기 위한 것.
+  · 외부 CDN·폰트·이미지 0건 (CSP 차단 대응). SVG 는 JS 로 직접 그린다. 차트 라이브러리 없음.
+  · 색·간격·폰트 토큰은 frontend/src/styles/tokens.css 와 **같은 이름·같은 값**을 쓴다.
+  · 목업 데이터는 backend/app/agents/scoring.py 의 score_axes[] 필드 모양을 그대로 따른다.
+  · 이 파일은 프로덕션이 아니다. frontend/src/** 는 건드리지 않았다.
+-->
+<style>
+/* ══════════════════════════════════════════════════════════════════
+   토큰 — tokens.css 에서 이 프로토가 쓰는 것만 복사(값 동일)
+   ══════════════════════════════════════════════════════════════════ */
+:root{
+  color-scheme: light dark;
+  --accent:#0071e3; --accent-text:#0060c7; --accent-weak:rgba(0,113,227,.12); --on-accent:#fff;
+  --bg:#fff; --bg-elev:#fff; --bg-grouped:#f2f2f7; --material:#fff;
+  --hairline:rgba(60,60,67,.18); --hairline-strong:rgba(60,60,67,.29);
+  /* 농도 3단계 = 근거의 강도. 이 프로토의 주제 그 자체다. */
+  --text:#000; --text-secondary:#636366; --text-estimated:#6b6b70;
+  --badge-bg:rgba(120,120,128,.12);
+  --warn:#ff9500; --warn-text:#b25000; --danger:#ff3b30; --danger-text:#d70015;
+  --tag-station-bg:rgba(0,122,145,.12); --tag-station-fg:#0a6c7d;
+  --tag-redev-bg:rgba(175,82,222,.12); --tag-redev-fg:#8a3fae;
+  --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px; --sp-5:20px; --sp-6:24px; --sp-8:32px;
+  --fs-caption:13px; --fs-footnote:15px; --fs-body:17px; --fs-title:20px;
+  --fs-price:26px; --fs-large-title:32px;
+  --ff:-apple-system,BlinkMacSystemFont,"SF Pro Text","Apple SD Gothic Neo",
+       system-ui,"Malgun Gothic",sans-serif;
+  --r-sheet:20px; --r-card:16px; --r-btn:12px; --r-pill:999px;
+  --shadow-1:0 1px 3px rgba(0,0,0,.06);
+  --touch-min:44px;
+  --ease-spring:cubic-bezier(.32,.72,0,1);
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --accent:#0a6fd8; --accent-text:#409fff; --accent-weak:rgba(10,111,216,.22);
+    --bg:#000; --bg-elev:#1c1c1e; --bg-grouped:#000; --material:#000;
+    --hairline:rgba(84,84,88,.4); --hairline-strong:rgba(84,84,88,.6);
+    --text:#fff; --text-secondary:#aeaeb2; --text-estimated:#8e8e93;
+    --badge-bg:rgba(120,120,128,.24);
+    --warn:#ff9f0a; --warn-text:#ffb340; --danger:#ff453a; --danger-text:#ff6961;
+    --tag-station-bg:rgba(64,200,224,.22); --tag-station-fg:#7fdcec;
+    --tag-redev-bg:rgba(191,90,242,.22); --tag-redev-fg:#dfa6f5;
+  }
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{
+  font-family:var(--ff); font-size:var(--fs-body); color:var(--text);
+  background:var(--bg-grouped); -webkit-font-smoothing:antialiased;
+  display:flex; flex-direction:column;
+}
+.num{font-variant-numeric:tabular-nums}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;
+  clip:rect(0,0,0,0);white-space:nowrap;border:0}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;animation:none!important}}
+
+/* ── 레이아웃: 모바일 퍼스트. 탭은 하단(엄지 도달 범위) ────────────── */
+header{
+  padding:var(--sp-4) var(--sp-4) var(--sp-3);
+  background:var(--bg); border-bottom:1px solid var(--hairline);
+}
+h1{font-size:var(--fs-title);font-weight:600;margin:0 0 var(--sp-1)}
+.asof{font-size:var(--fs-caption);color:var(--text-estimated);margin:0;line-height:1.5}
+main{flex:1;overflow-y:auto;padding:var(--sp-4) var(--sp-4) var(--sp-8);
+  -webkit-overflow-scrolling:touch}
+@media (min-width:760px){
+  main{max-width:1080px;margin:0 auto;width:100%;
+    display:grid;grid-template-columns:1fr;gap:var(--sp-4)}
+}
+
+/* 하단 탭 */
+nav[role=tablist]{
+  display:flex; background:var(--material); border-top:1px solid var(--hairline);
+  padding-bottom:env(safe-area-inset-bottom);
+}
+nav button{
+  flex:1; min-height:var(--touch-min); border:none; background:none; cursor:pointer;
+  font:inherit; font-size:var(--fs-caption); color:var(--text-secondary);
+  padding:var(--sp-2) var(--sp-1); border-top:2px solid transparent;
+  -webkit-tap-highlight-color:transparent;
+}
+nav button[aria-selected=true]{color:var(--accent-text);border-top-color:var(--accent);font-weight:600}
+button:focus-visible,[role=button]:focus-visible,select:focus-visible{
+  outline:2px solid var(--accent); outline-offset:2px; border-radius:var(--r-btn)}
+
+/* 카드 */
+.card{background:var(--bg-elev);border-radius:var(--r-card);padding:var(--sp-4);
+  margin-bottom:var(--sp-4);box-shadow:var(--shadow-1)}
+.card h2{font-size:var(--fs-footnote);font-weight:600;margin:0 0 var(--sp-1);
+  letter-spacing:.01em}
+.card .sub{font-size:var(--fs-caption);color:var(--text-secondary);margin:0 0 var(--sp-3);
+  line-height:1.55}
+
+/* 칩(단지 선택) */
+.chips{display:flex;gap:var(--sp-2);flex-wrap:wrap;margin-bottom:var(--sp-4)}
+.chip{min-height:var(--touch-min);padding:var(--sp-2) var(--sp-4);border-radius:var(--r-pill);
+  border:1px solid var(--hairline);background:var(--bg-elev);font:inherit;
+  font-size:var(--fs-caption);color:var(--text);cursor:pointer}
+.chip[aria-pressed=true]{background:var(--accent);color:var(--on-accent);border-color:var(--accent);
+  font-weight:600}
+
+/* 토글 스위치(텍스트형) */
+.toggles{display:flex;flex-direction:column;gap:var(--sp-2);margin-top:var(--sp-3)}
+.toggle{display:flex;align-items:center;gap:var(--sp-3);min-height:var(--touch-min);
+  border:1px solid var(--hairline);border-radius:var(--r-btn);padding:var(--sp-2) var(--sp-3);
+  background:var(--bg-elev);font:inherit;font-size:var(--fs-caption);color:var(--text);
+  cursor:pointer;text-align:left;width:100%}
+.toggle[aria-pressed=true]{border-color:var(--accent);background:var(--accent-weak)}
+.toggle .box{flex:0 0 auto;width:20px;height:20px;border-radius:6px;border:1.5px solid var(--hairline-strong);
+  display:grid;place-items:center;font-size:13px;line-height:1;color:var(--on-accent)}
+.toggle[aria-pressed=true] .box{background:var(--accent);border-color:var(--accent)}
+.toggle .t{flex:1}
+.toggle .t small{display:block;color:var(--text-secondary);font-size:12px;line-height:1.5;margin-top:2px}
+
+/* 배지 */
+.badge{display:inline-block;padding:2px var(--sp-2);border-radius:var(--r-pill);
+  font-size:var(--fs-caption);background:var(--badge-bg);color:var(--text-secondary);
+  line-height:1.4}
+.badge--estimated{color:var(--text-estimated)}
+.badge--warn{background:rgba(255,149,0,.14);color:var(--warn-text)}
+.badge--redev{background:var(--tag-redev-bg);color:var(--tag-redev-fg)}
+
+/* 축 범례 리스트 */
+.axis-list{list-style:none;margin:var(--sp-3) 0 0;padding:0;border-top:1px solid var(--hairline)}
+.axis-list li{display:flex;align-items:flex-start;gap:var(--sp-3);padding:var(--sp-3) 0;
+  border-bottom:1px solid var(--hairline)}
+.axis-mark{flex:0 0 auto;width:18px;height:18px;margin-top:2px}
+.axis-body{flex:1;min-width:0}
+.axis-name{font-size:var(--fs-footnote);font-weight:600;display:flex;align-items:center;
+  gap:var(--sp-2);flex-wrap:wrap}
+.axis-name.dim{font-weight:400;color:var(--text-estimated)}
+.axis-raw{font-size:var(--fs-caption);color:var(--text-secondary);margin-top:3px;line-height:1.55}
+.axis-miss{font-size:var(--fs-caption);color:var(--text-estimated);margin-top:3px;line-height:1.55}
+.axis-score{flex:0 0 auto;font-size:var(--fs-title);font-weight:600;
+  font-variant-numeric:tabular-nums;min-width:56px;text-align:right}
+.axis-score.dim{font-size:var(--fs-caption);font-weight:400;color:var(--text-estimated);
+  padding-top:5px}
+
+/* 총점 카드 — 레이더 '밖'에 둔다(면적=총점 오독 방지) */
+.total{display:flex;align-items:baseline;gap:var(--sp-2);margin:0}
+.total .v{font-size:var(--fs-price);font-weight:600;font-variant-numeric:tabular-nums}
+.total .u{font-size:var(--fs-footnote);color:var(--text-secondary)}
+.total .none{font-size:var(--fs-footnote);color:var(--text-estimated);font-weight:400}
+
+/* 경고/설명 상자 */
+.note{font-size:var(--fs-caption);line-height:1.6;color:var(--text-secondary);
+  background:var(--badge-bg);border-radius:var(--r-btn);padding:var(--sp-3);margin-top:var(--sp-3)}
+.note.bad{background:rgba(255,59,48,.10);color:var(--danger-text)}
+.note.warn{background:rgba(255,149,0,.12);color:var(--warn-text)}
+.note strong{font-weight:600}
+
+/* 표 대체본 */
+table.alt{width:100%;border-collapse:collapse;font-size:var(--fs-caption);margin-top:var(--sp-3)}
+table.alt th,table.alt td{text-align:left;padding:var(--sp-2);border-bottom:1px solid var(--hairline);
+  vertical-align:top}
+table.alt th{color:var(--text-secondary);font-weight:600}
+table.alt td.n{text-align:right;font-variant-numeric:tabular-nums}
+.linkbtn{background:none;border:none;font:inherit;font-size:var(--fs-caption);
+  color:var(--accent-text);cursor:pointer;padding:var(--sp-2) 0;min-height:var(--touch-min);
+  text-decoration:underline;text-underline-offset:3px}
+
+/* select */
+select{font:inherit;font-size:var(--fs-caption);min-height:var(--touch-min);
+  border:1px solid var(--hairline);border-radius:var(--r-btn);background:var(--bg-elev);
+  color:var(--text);padding:0 var(--sp-3)}
+label.fld{display:flex;align-items:center;gap:var(--sp-2);font-size:var(--fs-caption);
+  color:var(--text-secondary);margin-bottom:var(--sp-3);flex-wrap:wrap}
+
+svg{display:block;max-width:100%;height:auto;margin:0 auto}
+
+/* ── SVG 클래스(다크모드 자동 대응) ──────────────────────────────── */
+.s-grid{fill:none;stroke:var(--hairline);stroke-width:1}
+.s-spoke{stroke:var(--hairline-strong);stroke-width:1;fill:none}
+.s-spoke-miss{stroke:var(--text-estimated);stroke-width:1;fill:none;stroke-dasharray:2 4;opacity:.75}
+.s-spoke-heavy{stroke:var(--accent);stroke-width:3;fill:none;opacity:.55}
+.s-poly{fill:var(--accent);fill-opacity:.12;stroke:var(--accent);stroke-width:2;
+  stroke-linejoin:round}
+.s-poly-b{fill:none;stroke:var(--text);stroke-width:2;stroke-dasharray:6 4;stroke-linejoin:round}
+.s-ghost{fill:var(--danger);fill-opacity:.10;stroke:var(--danger);stroke-width:1.5;
+  stroke-dasharray:3 3;stroke-linejoin:round}
+.s-dot{fill:var(--accent);stroke:var(--bg-elev);stroke-width:1.5}
+.s-dot-est{fill:var(--bg-elev);stroke:var(--accent);stroke-width:2}
+.s-dot-miss{fill:none;stroke:var(--text-estimated);stroke-width:1.5;stroke-dasharray:2 2}
+.s-lab{font-size:12px;fill:var(--text);font-weight:600}
+.s-lab-dim{font-size:12px;fill:var(--text-estimated);font-weight:400}
+.s-lab-sm{font-size:11px;fill:var(--text-secondary)}
+.s-tick{font-size:10px;fill:var(--text-estimated)}
+.s-ring-full{fill:var(--accent);fill-opacity:.85;stroke:none}
+.s-ring-est{fill:var(--accent);fill-opacity:.30;stroke:var(--accent);stroke-width:1;
+  stroke-opacity:.5}
+/* '추정' 빗금. ⚠️ pattern 내부의 currentColor 는 **참조하는 요소가 아니라 pattern 자신의**
+   상속색으로 풀린다 — 그래서 참조 쪽에 color 를 줘도 안 먹는다. 여기서 직접 칠한다. */
+.s-hatch{stroke:var(--accent);stroke-width:2;opacity:.55}
+.s-ring-none{fill:none;stroke:var(--text-estimated);stroke-width:1;stroke-dasharray:3 3;
+  opacity:.8}
+.s-ring-bed{fill:var(--badge-bg);stroke:none}
+.s-bar-app{fill:var(--accent)}
+.s-bar-drop{fill:var(--text-estimated);fill-opacity:.28;stroke:var(--text-estimated);
+  stroke-width:1;stroke-dasharray:3 3}
+.s-bar-zero{fill:none;stroke:var(--hairline-strong);stroke-width:1}
+.s-axisline{stroke:var(--hairline-strong);stroke-width:1}
+.s-strip-bed{fill:var(--badge-bg)}
+.s-mid{stroke:var(--text);stroke-width:1.5;stroke-dasharray:4 3;opacity:.55}
+.s-dong{fill:var(--accent);fill-opacity:.85;stroke:var(--bg-elev);stroke-width:1.5}
+.s-dong-low{fill:var(--text-estimated);fill-opacity:.55;stroke:var(--bg-elev);stroke-width:1.5}
+.s-floor{fill:var(--tag-station-fg);fill-opacity:.85;stroke:var(--bg-elev);stroke-width:1.5}
+.s-water{fill:var(--accent);fill-opacity:.14;stroke:var(--accent);stroke-width:1;
+  stroke-dasharray:5 3}
+.s-afford{fill:var(--accent);fill-opacity:.20;stroke:var(--accent);stroke-width:1.5}
+.s-over{fill:var(--text-estimated);fill-opacity:.12;stroke:var(--text-estimated);
+  stroke-width:1;stroke-dasharray:3 3}
+.s-delta-pos{fill:var(--accent)}
+.s-delta-neg{fill:var(--text-estimated);fill-opacity:.6}
+.s-band{fill:var(--badge-bg)}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>단지·매물 매력도 시각화 <span class="badge">프로토타입</span></h1>
+  <p class="asof">
+    실거래 기준일 <b class="num">2026-07-25</b> · 신고 지연 최대 30일 →
+    <b>현재 시세는 항상 추정치</b>입니다. 목업 데이터이며 실제 단지가 아닙니다.
+  </p>
+</header>
+
+<main id="main"></main>
+
+<nav role="tablist" aria-label="시각화 뷰 전환">
+  <button role="tab" id="tab-profile" aria-controls="p" aria-selected="true">단지 프로필</button>
+  <button role="tab" id="tab-compare" aria-controls="p" aria-selected="false" tabindex="-1">단지 비교</button>
+  <button role="tab" id="tab-unit"    aria-controls="p" aria-selected="false" tabindex="-1">매물 위치</button>
+  <button role="tab" id="tab-budget"  aria-controls="p" aria-selected="false" tabindex="-1">예산 수면선</button>
+</nav>
+
+<script>
+"use strict";
+/* ══════════════════════════════════════════════════════════════════════════
+   1. 목업 데이터 — 실제 스키마 모양
+   ──────────────────────────────────────────────────────────────────────────
+   profileAxes[] : 레이더용 "측정 가능한" 4축. viz-research.md §1-C 의 채택 기준
+                   (단조 · 커버리지 ≥50% · 단지 품질을 잼) 을 통과한 것만.
+   scoreAxes[]   : backend/app/agents/scoring.py 의 score_axes[] **필드 그대로**.
+                   ⚠️ 레이더 축과 **다른 집합**이다 — 그게 이 설계의 핵심이다.
+                      레이더는 '성격', scoreAxes 는 '총점의 근거'. 섞지 않는다.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/** 축 순서는 상수로 **고정**한다. 정렬 UI 를 주지 않는다 —
+ *  순서를 바꾸면 다각형 넓이가 바뀌고, 넓이는 아무 의미도 없기 때문이다(함정 ①). */
+const PROFILE_AXES = ["school", "transit", "infra", "liquidity"];
+const AXIS_LABEL = { school:"학군", transit:"교통", infra:"생활 인프라", liquidity:"환금성" };
+
+/* 미확보(no_signal) 축은 score:null 이고 missing 사유가 있다. **0 을 쓰지 않는다.** */
+const COMPLEXES = {
+  A: {
+    id: 1024, name: "대치 목업1차", region: "서울 강남구", built: 1999, households: 1284,
+    geom_confidence: "surveyed",
+    profileAxes: [
+      { axis:"school", score:88, confidence:0.90, status:"applied",
+        raw:"대치목업초 학구도 내 · 340m", capped:false, missing:[] },
+      { axis:"transit", score:82, confidence:0.90, status:"applied",
+        raw:"학여울역 420m (도보 6분)", capped:false, missing:[] },
+      { axis:"infra", score:76, confidence:0.85, status:"applied",
+        raw:"마트 380m · 공원 210m · 병원 900m", capped:false, missing:[] },
+      { axis:"liquidity", score:100, confidence:0.70, status:"applied",
+        raw:"12개월 회전율 6.2%", capped:true, missing:[] }
+    ],
+    scoreAxes: [
+      { axis:"price", label:"가격", weight:0.255, applied_weight:0, score:null,
+        confidence:0, status:"no_signal", coverage:"partial",
+        missing:["활성 호가가 없어 호가–적정가 갭을 계산할 수 없습니다 (공공 오픈API 에는 호가가 포함되지 않고, 포털 매물 수집은 약관·판례상 하지 않습니다). 이 단지의 호가를 알고 계시면 '내 매물'에서 직접 입력하시면 가격 축이 반영됩니다."] },
+      { axis:"location", label:"입지", weight:0.255, applied_weight:0.5455, score:84,
+        confidence:0.88, status:"applied", coverage:"full", missing:[] },
+      { axis:"value", label:"가치(시세)", weight:0.2125, applied_weight:0.4545, score:100,
+        confidence:0.70, status:"applied", coverage:"partial",
+        missing:[] },
+      { axis:"risk", label:"리스크", weight:0.1275, applied_weight:0, score:null,
+        confidence:0, status:"no_signal", coverage:"partial",
+        missing:["평가할 활성 호가가 없어 매물 신뢰도를 판정할 수 없습니다"] },
+      { axis:"redevelopment", label:"재건축", weight:0.15, applied_weight:0, score:null,
+        confidence:0, status:"no_signal", coverage:"partial",
+        missing:["정비사업 구역 정보가 확인되지 않았습니다 — '정비사업이 없다'는 뜻이 아닙니다(수집 범위: 서울·인천. 경기도는 미수집)."] }
+    ],
+    total_score: 91.3, score_basis:"user_weighted", coverage_pct:46.8,
+    dong: { available:true, method:"실측(aptDong)", period_months:24, coverage_pct:88.4,
+      area_m2:84.97, overall_median_ppm_krw:29540000,
+      dongs:[
+        { dong:"101동", ratio:1.082, sample_size:12 },
+        { dong:"103동", ratio:1.041, sample_size:8 },
+        { dong:"105동", ratio:0.995, sample_size:15 },
+        { dong:"107동", ratio:0.958, sample_size:6 },
+        { dong:"109동", ratio:0.921, sample_size:4 }
+      ],
+      skipped:[{ dong:"110동", sample_size:2 }] },
+    floors: [
+      { band:"1~2층", ratio:0.912, sample_size:5 },
+      { band:"3~5층", ratio:0.964, sample_size:11 },
+      { band:"6~10층", ratio:1.008, sample_size:18 },
+      { band:"11~15층", ratio:1.052, sample_size:14 },
+      { band:"16층~", ratio:1.086, sample_size:7 }
+    ],
+    band: { available:true, area_m2:84.97, sample_size:37, period_months:12,
+      p25:2380000000, median:2510000000, p75:2690000000, p10:2240000000, p90:2850000000 },
+    redev: null
+  },
+
+  /* ⭐ 이 프로토의 주인공 — 4축 중 2축이 미확보다.
+        다각형이 '움푹 파이지' 않고 그 축을 **건너뛴다**. */
+  B: {
+    id: 2048, name: "외곽 목업2단지", region: "경기 ○○시", built: 2004, households: null,
+    geom_confidence: "surveyed",
+    profileAxes: [
+      { axis:"school", score:71, confidence:0.85, status:"applied",
+        raw:"관산목업초 학구도 내 · 610m", capped:false, missing:[] },
+      { axis:"transit", score:null, confidence:0, status:"no_signal", raw:null, capped:false,
+        missing:["반경 1km 내 지하철역이 수집 데이터에 없습니다. '교통이 나쁘다'가 아니라 '역이 확인되지 않았다'입니다 — 버스·광역버스는 아직 수집 범위 밖입니다."] },
+      { axis:"infra", score:44, confidence:0.80, status:"applied",
+        raw:"마트 1.4km · 공원 520m · 병원 미확인", capped:false, missing:[] },
+      { axis:"liquidity", score:null, confidence:0, status:"no_signal", raw:null, capped:false,
+        missing:["단지 세대수를 알 수 없어 거래회전율(환금성)을 계산할 수 없습니다"] }
+    ],
+    scoreAxes: [
+      { axis:"price", label:"가격", weight:0.255, applied_weight:0, score:null, confidence:0,
+        status:"no_signal", coverage:"partial",
+        missing:["활성 호가가 없어 호가–적정가 갭을 계산할 수 없습니다. 이 단지의 호가를 알고 계시면 '내 매물'에서 직접 입력하시면 가격 축이 반영됩니다."] },
+      { axis:"location", label:"입지", weight:0.255, applied_weight:1.0, score:58,
+        confidence:0.62, status:"applied", coverage:"full",
+        missing:[] },
+      { axis:"value", label:"가치(시세)", weight:0.2125, applied_weight:0, score:null,
+        confidence:0, status:"no_signal", coverage:"partial",
+        missing:["단지 세대수를 알 수 없어 거래회전율(환금성)을 계산할 수 없습니다"] },
+      { axis:"risk", label:"리스크", weight:0.1275, applied_weight:0, score:null, confidence:0,
+        status:"no_signal", coverage:"partial",
+        missing:["평가할 활성 호가가 없어 매물 신뢰도를 판정할 수 없습니다"] },
+      { axis:"redevelopment", label:"재건축", weight:0.15, applied_weight:0, score:null,
+        confidence:0, status:"no_signal", coverage:"partial",
+        missing:["정비사업 구역 정보가 확인되지 않았습니다 — 수집 범위는 서울·인천이며 경기도는 미수집이라, 경기 단지의 '정보 없음'은 '정비사업이 없다'는 뜻이 아닙니다."] }
+    ],
+    total_score: 58.0, score_basis:"user_weighted", coverage_pct:25.5,
+    dong: { available:false, method:"동정보없음", period_months:24, coverage_pct:0.0,
+      area_m2:59.94, reason:"실거래에 동 정보가 없습니다(좌표추정으로 폴백)." },
+    floors: [
+      { band:"1~2층", ratio:0.958, sample_size:4 },
+      { band:"3~5층", ratio:0.991, sample_size:7 },
+      { band:"6~10층", ratio:1.019, sample_size:9 }
+    ],
+    band: { available:true, area_m2:59.94, sample_size:20, period_months:24,
+      p25:498000000, median:527000000, p75:559000000, p10:472000000, p90:588000000 },
+    redev: null
+  },
+
+  C: {
+    id: 3072, name: "계양 목업3차", region: "인천 계양구", built: 2011, households: 642,
+    geom_confidence: "estimated",   /* 좌표가 추정 → 거리 기반 축이 전부 '추정' 등급 */
+    profileAxes: [
+      { axis:"school", score:65, confidence:0.55, status:"applied",
+        raw:"계양목업초 학구도 내 · 약 780m (좌표 추정)", capped:false, missing:[] },
+      { axis:"transit", score:58, confidence:0.60, status:"applied",
+        raw:"계양역 약 940m (좌표 추정)", capped:false, missing:[] },
+      { axis:"infra", score:81, confidence:0.85, status:"applied",
+        raw:"마트 240m · 공원 410m · 병원 660m", capped:false, missing:[] },
+      { axis:"liquidity", score:62, confidence:0.70, status:"applied",
+        raw:"12개월 회전율 3.1%", capped:false, missing:[] }
+    ],
+    scoreAxes: [
+      { axis:"price", label:"가격", weight:0.255, applied_weight:0, score:null, confidence:0,
+        status:"no_signal", coverage:"partial",
+        missing:["활성 호가가 없어 호가–적정가 갭을 계산할 수 없습니다. '내 매물'에서 직접 입력하시면 가격 축이 반영됩니다."] },
+      { axis:"location", label:"입지", weight:0.255, applied_weight:0.5455, score:67,
+        confidence:0.58, status:"applied", coverage:"full", missing:[] },
+      { axis:"value", label:"가치(시세)", weight:0.2125, applied_weight:0.4545, score:62,
+        confidence:0.70, status:"applied", coverage:"partial", missing:[] },
+      { axis:"risk", label:"리스크", weight:0.1275, applied_weight:0, score:null, confidence:0,
+        status:"no_signal", coverage:"partial",
+        missing:["평가할 활성 호가가 없어 매물 신뢰도를 판정할 수 없습니다"] },
+      { axis:"redevelopment", label:"재건축", weight:0.15, applied_weight:0, score:null,
+        confidence:0, status:"no_signal", coverage:"partial",
+        missing:["이 단지는 정비구역과 매칭되었으나 원문 단계를 분류하지 못했습니다 — 점수를 만들지 않았습니다."] }
+    ],
+    total_score: 64.7, score_basis:"user_weighted", coverage_pct:46.8,
+    dong: { available:true, method:"실측(aptDong)", period_months:24, coverage_pct:79.1,
+      area_m2:59.94, overall_median_ppm_krw:8120000,
+      dongs:[
+        { dong:"201동", ratio:1.021, sample_size:5 },
+        { dong:"202동", ratio:1.004, sample_size:7 },
+        { dong:"203동", ratio:0.988, sample_size:6 }
+      ], skipped:[] },
+    floors: [
+      { band:"1~2층", ratio:0.971, sample_size:4 },
+      { band:"3~5층", ratio:0.994, sample_size:9 },
+      { band:"6~10층", ratio:1.012, sample_size:10 },
+      { band:"11~15층", ratio:1.028, sample_size:5 }
+    ],
+    band: { available:true, area_m2:59.94, sample_size:24, period_months:12,
+      p25:462000000, median:487000000, p75:512000000, p10:441000000, p90:534000000 },
+    redev: { stage:"unknown", raw_stage:"정비구역지정(추진위승인)", zone_name:"계양목업1구역" }
+  }
+};
+
+/** 사용자 가중치 — user_preference.weights 모양. 레이더 '반지름'에는 절대 곱하지 않는다. */
+const USER_WEIGHTS = { school:0.30, transit:0.34, infra:0.16, liquidity:0.20 };
+
+/** finance-tax-advisor 산출 — 취득세·LTV/DSR 반영 후 **실구매 가능액**.
+ *  ⚠️ 한도 자체가 추정이므로 **밴드**로 그린다(선 하나로 그으면 없는 확신이 생긴다). */
+const BUDGET = { low: 2360000000, mid: 2420000000, high: 2480000000,
+  note: "자기자본 9.4억 + 주담대 한도(LTV 50%·DSR 40%) 기준, 취득세·중개비 포함 추정" };
+
+/* ══════════════════════════════════════════════════════════════════════════
+   2. 소도구
+   ══════════════════════════════════════════════════════════════════════════ */
+const NS = "http://www.w3.org/2000/svg";
+function el(tag, attrs, kids){
+  const n = document.createElementNS(NS, tag);
+  for (const k in (attrs||{})) if (attrs[k] !== null && attrs[k] !== undefined)
+    n.setAttribute(k, attrs[k]);
+  (kids||[]).forEach(c => n.appendChild(c));
+  return n;
+}
+function txt(tag, attrs, s){ const n = el(tag, attrs); n.textContent = s; return n; }
+function h(tag, attrs, kids){
+  const n = document.createElement(tag);
+  for (const k in (attrs||{})){
+    if (k === "html") n.innerHTML = attrs[k];       /* 목업 문자열만. 사용자 입력 없음 */
+    else if (k === "text") n.textContent = attrs[k];
+    else if (k.startsWith("on")) n.addEventListener(k.slice(2), attrs[k]);
+    else if (attrs[k] !== null && attrs[k] !== undefined) n.setAttribute(k, attrs[k]);
+  }
+  (kids||[]).forEach(c => c && n.appendChild(c));
+  return n;
+}
+/** 억 단위 표기. 이 앱의 금액 규칙(숫자 + 한글). */
+function eok(krw){
+  if (krw === null || krw === undefined) return "—";
+  const v = krw / 1e8;
+  return (v >= 10 ? v.toFixed(1) : v.toFixed(2)) + "억";
+}
+function pct(x){ return (Math.round(x * 10) / 10) + "%"; }
+/** 신뢰도 → 3단계. **형태가 아니라 이 등급이 확신을 말한다.**
+ *  경계는 임의로 정하지 않았다 — backend/app/agents/base.py 의
+ *  `ESTIMATE_CONFIDENCE_CAP = 0.6` 이 정본이다. 추정 기반 판단(basis 가 "estimated…")은
+ *  검증 단계에서 **0.6 으로 강제 캡**되므로, 0.6 초과 = 실측 기반이라는 뜻이 된다.
+ *  ⚠️ 여기에 0.75 같은 숫자를 새로 만들면 백엔드가 "실측"이라 부른 값(회전율 0.7)이
+ *     화면에서만 "추정"이 된다 — 같은 데이터에 두 개의 진실이 생긴다. */
+const ESTIMATE_CONFIDENCE_CAP = 0.6;
+function grade(ax){
+  if (ax.score === null || ax.status === "no_signal") return "missing";
+  return ax.confidence > ESTIMATE_CONFIDENCE_CAP ? "measured" : "estimated";
+}
+const GRADE_LABEL = { measured:"실측", estimated:"추정", missing:"미확보" };
+
+/* ══════════════════════════════════════════════════════════════════════════
+   3. 레이더 + 확신 링
+   ──────────────────────────────────────────────────────────────────────────
+   설계 근거(viz-research.md §3):
+   ① 면적을 총점으로 쓰지 않는다 → 총점 숫자를 도형 안에 넣지 않고, 축 순서를 고정한다.
+   ③ 가중치는 **반지름이 아니라** 라벨 굵기·스포크 두께로만 표현한다.
+   ④ 미확보 축은 다각형이 **건너뛴다**(원점으로 들어가지 않는다).
+   ══════════════════════════════════════════════════════════════════════════ */
+function radar(cx, opts){
+  opts = opts || {};
+  const SZ = 300, C = SZ / 2, R = 96, RING_IN = R + 16, RING_OUT = R + 30;
+  const axes = PROFILE_AXES.map(a => cx.profileAxes.find(x => x.axis === a));
+  const n = axes.length;
+  const ang = i => (-Math.PI / 2) + (i * 2 * Math.PI / n);
+  const pt = (i, r) => [C + Math.cos(ang(i)) * r, C + Math.sin(ang(i)) * r];
+
+  const g = el("svg", { viewBox:`0 0 ${SZ} ${SZ}`, width:SZ, height:SZ, role:"img",
+    "aria-label": radarAria(cx, axes) });
+
+  /* 빗금 패턴 — '추정'을 색이 아닌 **패턴**으로도 구분(색맹 접근성) */
+  const uid = "p" + cx.id;
+  const defs = el("defs");
+  const pat = el("pattern", { id:uid, width:6, height:6, patternUnits:"userSpaceOnUse",
+    patternTransform:"rotate(45)" });
+  pat.appendChild(el("line", { x1:0, y1:0, x2:0, y2:6, class:"s-hatch" }));
+  defs.appendChild(pat); g.appendChild(defs);
+
+  /* 격자 링 25/50/75/100 */
+  [25, 50, 75, 100].forEach(v => {
+    const p = [];
+    for (let i = 0; i < n; i++) p.push(pt(i, R * v / 100).join(","));
+    g.appendChild(el("polygon", { points:p.join(" "), class:"s-grid" }));
+  });
+  g.appendChild(txt("text", { x:C + 3, y:C - R + 11, class:"s-tick" }, "100"));
+  g.appendChild(txt("text", { x:C + 3, y:C - R / 2 + 11, class:"s-tick" }, "50"));
+
+  /* ── 확신 링(새 뷰 ①) — 안쪽 다각형(점수)과 **다른 도형**이라 절대 섞이지 않는다 ── */
+  const seg = 2 * Math.PI / n, pad = 0.045;
+  axes.forEach((ax, i) => {
+    const a0 = ang(i) - seg / 2 + pad, a1 = ang(i) + seg / 2 - pad;
+    g.appendChild(el("path", { d: arcBand(C, C, RING_IN, RING_OUT, a0, a1), class:"s-ring-bed" }));
+    const gr = grade(ax);
+    if (gr === "missing"){
+      g.appendChild(el("path", { d: arcBand(C, C, RING_IN, RING_OUT, a0, a1), class:"s-ring-none" }));
+    } else {
+      const frac = Math.max(.12, ax.confidence);
+      const aMid = a0 + (a1 - a0) * frac;
+      g.appendChild(el("path", { d: arcBand(C, C, RING_IN, RING_OUT, a0, aMid),
+        class: gr === "measured" ? "s-ring-full" : "s-ring-est",
+        /* 빗금은 불투명하게 얹는다 — 클래스의 fill-opacity .3 을 그대로 두면 너무 흐리다 */
+        style: gr === "estimated" ? `fill:url(#${uid});fill-opacity:1` : null }));
+    }
+  });
+
+  /* 스포크 — 가중치는 여기(두께)로만 보인다. 반지름은 건드리지 않는다(함정 ③) */
+  axes.forEach((ax, i) => {
+    const [x, y] = pt(i, R);
+    const miss = grade(ax) === "missing";
+    if (opts.showWeights && !miss){
+      const w = USER_WEIGHTS[ax.axis] || 0;
+      g.appendChild(el("line", { x1:C, y1:C, x2:x, y2:y, class:"s-spoke-heavy",
+        "stroke-width": (2 + w * 16).toFixed(1) }));
+    }
+    g.appendChild(el("line", { x1:C, y1:C, x2:x, y2:y, class: miss ? "s-spoke-miss" : "s-spoke" }));
+    /* 미확보 축 끝의 ⌀ 마커 — 부재가 아니라 **표식**으로 보이게 */
+    if (miss) g.appendChild(el("circle", { cx:x, cy:y, r:5, class:"s-dot-miss" }));
+  });
+
+  /* ❌ 대조군: 미확보를 0 으로 그렸을 때 (요청서가 금지한 그림을 눈으로 확인) */
+  if (opts.showZeroGhost){
+    const gp = axes.map((ax, i) => pt(i, R * ((ax.score === null ? 0 : ax.score) / 100)).join(","));
+    g.appendChild(el("polygon", { points:gp.join(" "), class:"s-ghost" }));
+  }
+
+  /* ── 다각형: 미확보 축은 좌표를 만들지 않고 **건너뛴다** ── */
+  const present = [];
+  axes.forEach((ax, i) => { if (grade(ax) !== "missing") present.push(pt(i, R * ax.score / 100)); });
+  if (present.length >= 3){
+    g.appendChild(el("polygon", { points: present.map(p => p.join(",")).join(" "),
+      class: opts.dashed ? "s-poly-b" : "s-poly" }));
+  } else if (present.length === 2){
+    /* 축이 2개면 면이 만들어지지 않는다. 억지로 채우지 않고 **선분**으로 둔다. */
+    g.appendChild(el("line", { x1:present[0][0], y1:present[0][1],
+      x2:present[1][0], y2:present[1][1],
+      class: opts.dashed ? "s-poly-b" : "s-poly", fill:"none" }));
+  }
+
+  /* 꼭짓점 — 실측=채운 점 / 추정=빈 점 / 미확보=점 없음 */
+  axes.forEach((ax, i) => {
+    const gr = grade(ax);
+    if (gr === "missing") return;
+    const [x, y] = pt(i, R * ax.score / 100);
+    g.appendChild(el("circle", { cx:x, cy:y, r:5, class: gr === "measured" ? "s-dot" : "s-dot-est" }));
+  });
+
+  /* 축 라벨 — 가중치는 굵기·크기로 (반지름 아님) */
+  axes.forEach((ax, i) => {
+    const [x, y] = pt(i, RING_OUT + 14);
+    const miss = grade(ax) === "missing";
+    const anchor = Math.abs(x - C) < 6 ? "middle" : (x > C ? "start" : "end");
+    const w = USER_WEIGHTS[ax.axis] || 0;
+    const t = txt("text", { x, y: y + 4, class: miss ? "s-lab-dim" : "s-lab",
+      "text-anchor":anchor }, AXIS_LABEL[ax.axis]);
+    if (opts.showWeights && !miss){
+      t.setAttribute("font-size", (11 + w * 14).toFixed(1));
+      t.setAttribute("font-weight", w >= 0.28 ? 700 : 500);
+    }
+    g.appendChild(t);
+    g.appendChild(txt("text", { x, y: y + 18, class:"s-lab-sm", "text-anchor":anchor },
+      miss ? "미확보" : String(ax.score) + (ax.capped ? " ↑" : "")));
+  });
+  return g;
+}
+/** 도넛 조각 path */
+function arcBand(cx, cy, r0, r1, a0, a1){
+  const p = (r, a) => [cx + Math.cos(a) * r, cy + Math.sin(a) * r];
+  const large = (a1 - a0) > Math.PI ? 1 : 0;
+  const [x0, y0] = p(r1, a0), [x1, y1] = p(r1, a1), [x2, y2] = p(r0, a1), [x3, y3] = p(r0, a0);
+  return `M${x0},${y0} A${r1},${r1} 0 ${large} 1 ${x1},${y1} L${x2},${y2} `
+       + `A${r0},${r0} 0 ${large} 0 ${x3},${y3} Z`;
+}
+function radarAria(cx, axes){
+  const parts = axes.map(a => AXIS_LABEL[a.axis] + " "
+    + (a.score === null ? "미확보" : a.score + "점 " + GRADE_LABEL[grade(a)]));
+  return `${cx.name} 축별 프로필. ${parts.join(", ")}. 이 도형의 넓이는 총점이 아닙니다.`;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   4. 총점 재정규화 막대 — **총점의 그림은 이것이지 레이더 면적이 아니다**
+   ══════════════════════════════════════════════════════════════════════════ */
+function renormBar(cx){
+  const W = 320, ROW = 26, PAD = 4;
+  const axes = cx.scoreAxes;
+  const svg = el("svg", { viewBox:`0 0 ${W} ${ROW * 2 + 34}`, width:W, height:ROW * 2 + 34,
+    role:"img", "aria-label":
+      `총점 가중치 재정규화. 요청 가중치 대비 실제 반영 ${pct(cx.coverage_pct)}.` });
+
+  let x = 0;
+  svg.appendChild(txt("text", { x:0, y:10, class:"s-tick" }, "요청한 가중치"));
+  axes.forEach(a => {
+    const w = a.weight * W;
+    if (w <= 0) return;
+    svg.appendChild(el("rect", { x, y:16, width:Math.max(0, w - PAD), height:ROW - 8, rx:4,
+      class: a.status === "applied" ? "s-bar-app" : "s-bar-drop" }));
+    if (w > 46) svg.appendChild(txt("text", { x: x + 5, y: 16 + ROW - 16, class:"s-tick",
+      fill: a.status === "applied" ? "var(--on-accent)" : "var(--text-estimated)" }, a.label));
+    x += w;
+  });
+
+  x = 0;
+  svg.appendChild(txt("text", { x:0, y: ROW + 26, class:"s-tick" },
+    `재정규화 후 (반영 ${pct(cx.coverage_pct)})`));
+  axes.forEach(a => {
+    const w = (a.applied_weight || 0) * W;
+    if (w <= 0) return;
+    svg.appendChild(el("rect", { x, y: ROW + 32, width:Math.max(0, w - PAD), height:ROW - 8,
+      rx:4, class:"s-bar-app" }));
+    if (w > 46) svg.appendChild(txt("text", { x: x + 5, y: ROW + 32 + ROW - 16, class:"s-tick",
+      fill:"var(--on-accent)" }, a.label));
+    x += w;
+  });
+  return svg;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   5. 매물 위치 스트립 — **고정 절대 스케일 0.85~1.15**
+   ──────────────────────────────────────────────────────────────────────────
+   단지마다 스케일을 다시 잡으면 4.7% 편차와 20% 편차가 같은 그림이 된다.
+   "이 단지는 동 차이가 거의 없다"도 중요한 정보이므로 그 사실이 폭으로 보여야 한다.
+   ══════════════════════════════════════════════════════════════════════════ */
+const SC_MIN = 0.85, SC_MAX = 1.15;
+function strip(rows, opts){
+  const W = 320, H = 34 + rows.length * 0 + 56, PADL = 8, PADR = 8;
+  const iw = W - PADL - PADR;
+  const xOf = r => PADL + (Math.min(SC_MAX, Math.max(SC_MIN, r)) - SC_MIN) / (SC_MAX - SC_MIN) * iw;
+  const svg = el("svg", { viewBox:`0 0 ${W} ${H}`, width:W, height:H, role:"img",
+    "aria-label": opts.aria });
+
+  svg.appendChild(el("rect", { x:PADL, y:26, width:iw, height:16, rx:8, class:"s-strip-bed" }));
+  /* 눈금 */
+  [0.85, 0.90, 0.95, 1.00, 1.05, 1.10, 1.15].forEach(t => {
+    const x = xOf(t);
+    svg.appendChild(el("line", { x1:x, y1:22, x2:x, y2:46, class:"s-axisline",
+      opacity: t === 1 ? 0 : .5 }));
+    svg.appendChild(txt("text", { x, y:58, class:"s-tick", "text-anchor":"middle" },
+      t.toFixed(2)));
+  });
+  /* 단지 중위 = 1.00 기준선 */
+  const xm = xOf(1);
+  svg.appendChild(el("line", { x1:xm, y1:14, x2:xm, y2:50, class:"s-mid" }));
+  svg.appendChild(txt("text", { x:xm, y:10, class:"s-tick", "text-anchor":"middle" }, "단지 중위"));
+
+  rows.forEach(r => {
+    const x = xOf(r.ratio);
+    const rad = 4 + Math.min(6, Math.sqrt(r.sample_size));   /* 점 크기 = 표본 수 */
+    const clipped = r.ratio < SC_MIN || r.ratio > SC_MAX;
+    svg.appendChild(el("circle", { cx:x, cy:34, r:rad,
+      class: opts.kind === "floor" ? "s-floor" : (r.ratio < 1 ? "s-dong-low" : "s-dong") }));
+    svg.appendChild(txt("text", { x, y:20, class:"s-lab-sm", "text-anchor":"middle" },
+      (clipped ? (r.ratio < SC_MIN ? "‹" : "›") : "") + (r.dong || r.band)));
+  });
+  return svg;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   6. 예산 수면선 (새 뷰 ②)
+   ══════════════════════════════════════════════════════════════════════════ */
+function waterline(cx){
+  const W = 320, H = 260, TOP = 24, BOT = H - 30, PADL = 62, PADR = 88;
+  const b = cx.band, d = cx.dong;
+  const lo = Math.min(b.p10, BUDGET.low) * 0.97, hi = Math.max(b.p90, BUDGET.high) * 1.03;
+  const yOf = v => BOT - (v - lo) / (hi - lo) * (BOT - TOP);
+  const svg = el("svg", { viewBox:`0 0 ${W} ${H}`, width:W, height:H, role:"img",
+    "aria-label": `${cx.name} ${b.area_m2}제곱미터 실거래 분포와 내 예산 한도 밴드 `
+      + `${eok(BUDGET.low)}~${eok(BUDGET.high)} 비교` });
+
+  /* 실거래 분포 밴드(p10~p90, p25~p75) */
+  svg.appendChild(el("rect", { x:PADL, y:yOf(b.p90), width:W - PADL - PADR,
+    height: yOf(b.p10) - yOf(b.p90), rx:6, class:"s-band" }));
+  svg.appendChild(el("rect", { x:PADL + 10, y:yOf(b.p75), width:W - PADL - PADR - 20,
+    height: yOf(b.p25) - yOf(b.p75), rx:5, class:"s-over" }));
+
+  /* 수면 아래(살 수 있는 구간)를 채운다 */
+  const yTopAfford = yOf(BUDGET.mid);
+  svg.appendChild(el("rect", { x:PADL, y:yTopAfford, width:W - PADL - PADR,
+    height: Math.max(0, yOf(b.p10) - yTopAfford), rx:6, class:"s-afford" }));
+
+  /* ⚠️ 한도는 **선이 아니라 밴드** — 한도 자체가 추정이다 */
+  svg.appendChild(el("rect", { x:0, y:yOf(BUDGET.high), width:W,
+    height: yOf(BUDGET.low) - yOf(BUDGET.high), class:"s-water" }));
+  svg.appendChild(txt("text", { x:4, y: yOf(BUDGET.mid) - 5, class:"s-lab" },
+    "내 한도 " + eok(BUDGET.mid)));
+  svg.appendChild(txt("text", { x:4, y: yOf(BUDGET.mid) + 11, class:"s-tick" }, "(추정 밴드)"));
+
+  /* 눈금 */
+  [b.p10, b.median, b.p90].forEach(v => {
+    svg.appendChild(txt("text", { x:PADL - 6, y: yOf(v) + 4, class:"s-tick",
+      "text-anchor":"end" }, eok(v)));
+    svg.appendChild(el("line", { x1:PADL, y1:yOf(v), x2:W - PADR, y2:yOf(v),
+      class:"s-axisline", opacity:.35 }));
+  });
+
+  /* ★ 동 마커를 같은 축 위에 — "내 예산으로 닿는 동"이 그림 하나로 나온다 */
+  if (d.available){
+    const xs = W - PADR + 8;
+    d.dongs.forEach((dg, i) => {
+      const v = b.median * dg.ratio;
+      const y = yOf(v);
+      const ok = v <= BUDGET.mid;
+      svg.appendChild(el("circle", { cx:xs, cy:y, r:5, class: ok ? "s-dong" : "s-dong-low" }));
+      svg.appendChild(txt("text", { x: xs + 9, y: y + 4,
+        class: ok ? "s-lab" : "s-lab-dim" }, `${dg.dong} ${eok(v)}`));
+    });
+  }
+  svg.appendChild(txt("text", { x:PADL, y:H - 8, class:"s-tick" },
+    `${b.area_m2}㎡ · 실거래 ${b.sample_size}건 / 최근 ${b.period_months}개월`));
+  return svg;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   7. 화면
+   ══════════════════════════════════════════════════════════════════════════ */
+let state = { tab:"profile", cx:"A", cmpA:"A", cmpB:"B",
+  showWeights:false, showZeroGhost:false, unit:"A" };
+
+function axisList(cx){
+  const ul = h("ul", { class:"axis-list" });
+  PROFILE_AXES.forEach(k => {
+    const ax = cx.profileAxes.find(a => a.axis === k), gr = grade(ax);
+    const mark = el("svg", { viewBox:"0 0 18 18", width:18, height:18, "aria-hidden":"true" });
+    if (gr === "measured") mark.appendChild(el("circle", { cx:9, cy:9, r:6, class:"s-dot" }));
+    else if (gr === "estimated") mark.appendChild(el("circle", { cx:9, cy:9, r:6, class:"s-dot-est" }));
+    else mark.appendChild(el("circle", { cx:9, cy:9, r:6, class:"s-dot-miss" }));
+
+    const name = h("div", { class:"axis-name" + (gr === "missing" ? " dim" : "") },
+      [ h("span", { text: AXIS_LABEL[k] }),
+        h("span", { class:"badge" + (gr === "measured" ? "" : " badge--estimated"),
+          text: GRADE_LABEL[gr] }),
+        ax.capped ? h("span", { class:"badge badge--warn", text:"상한 도달" }) : null ]);
+
+    const body = h("div", { class:"axis-body" }, [
+      name,
+      ax.raw ? h("p", { class:"axis-raw num", text: ax.raw }) : null,
+      gr === "missing" ? h("p", { class:"axis-miss", text: ax.missing[0] }) : null,
+      ax.capped ? h("p", { class:"axis-miss",
+        text:"회전율 5% 이상은 모두 100점으로 잘립니다 — 실제로 얼마나 더 높은지는 이 점수로 알 수 없습니다." }) : null
+    ]);
+    const sc = h("div", { class:"axis-score" + (gr === "missing" ? " dim" : ""),
+      text: gr === "missing" ? "미확보" : String(ax.score) });
+    ul.appendChild(h("li", {}, [ h("div", { class:"axis-mark" }, [mark]), body, sc ]));
+  });
+  return ul;
+}
+
+function altTable(cx){
+  const t = h("table", { class:"alt" });
+  t.appendChild(h("thead", {}, [ h("tr", {}, [
+    h("th", { text:"축" }), h("th", { text:"점수" }), h("th", { text:"확신" }),
+    h("th", { text:"근거 / 사유" }) ]) ]));
+  const tb = h("tbody");
+  PROFILE_AXES.forEach(k => {
+    const a = cx.profileAxes.find(x => x.axis === k), g = grade(a);
+    tb.appendChild(h("tr", {}, [
+      h("td", { text: AXIS_LABEL[k] }),
+      h("td", { class:"n", text: a.score === null ? "미확보" : String(a.score) }),
+      h("td", { text: GRADE_LABEL[g] }),
+      h("td", { text: a.raw || a.missing[0] || "—" }) ]));
+  });
+  t.appendChild(tb);
+  return t;
+}
+
+function viewProfile(){
+  const cx = COMPLEXES[state.cx];
+  const wrap = h("div");
+
+  wrap.appendChild(h("div", { class:"chips", role:"group", "aria-label":"단지 선택" },
+    Object.keys(COMPLEXES).map(k => h("button", {
+      class:"chip", "aria-pressed": String(state.cx === k),
+      text: COMPLEXES[k].name + (k === "B" ? " (미확보 2축)" : ""),
+      onclick: () => { state.cx = k; render(); } }))));
+
+  /* ── 레이더 카드 ── */
+  const c1 = h("div", { class:"card" }, [
+    h("h2", { text: cx.name + " — 축별 프로필" }),
+    h("p", { class:"sub", html:
+      `${cx.region} · ${cx.built}년 · ${cx.households ? cx.households + "세대" : "<b>세대수 미상</b>"}`
+      + `<br>안쪽 다각형 = <b>점수</b> · 바깥 고리 = <b>확신</b>(우리가 얼마나 아는가).`
+      + ` <b>이 도형의 넓이는 총점이 아닙니다.</b>` })
+  ]);
+  c1.appendChild(radar(cx, { showWeights: state.showWeights, showZeroGhost: state.showZeroGhost }));
+
+  const present = cx.profileAxes.filter(a => grade(a) !== "missing").length;
+  if (present <= 2){
+    c1.appendChild(h("div", { class:"note warn", html:
+      `측정된 축이 <b>${present}개</b>뿐이라 <b>면이 만들어지지 않습니다.</b> `
+      + `억지로 다각형을 만들지 않고 선분으로 둡니다 — `
+      + `없는 축을 0 으로 채워 모양을 완성하면 그건 "모른다"를 "나쁘다"로 바꾸는 것입니다.` }));
+  }
+
+  c1.appendChild(h("div", { class:"toggles" }, [
+    h("button", { class:"toggle", "aria-pressed": String(state.showWeights),
+      onclick: () => { state.showWeights = !state.showWeights; render(); } }, [
+      h("span", { class:"box", text: state.showWeights ? "✓" : "" }),
+      h("span", { class:"t", html: "내 가중치 표시<small>라벨 굵기·스포크 두께로만 바뀝니다. "
+        + "<b>반지름(모양)은 그대로</b> — 가중치를 곱하면 '데이터가 없어 커진 축'이 "
+        + "'좋은 축'으로 보입니다.</small>" })
+    ]),
+    h("button", { class:"toggle", "aria-pressed": String(state.showZeroGhost),
+      onclick: () => { state.showZeroGhost = !state.showZeroGhost; render(); } }, [
+      h("span", { class:"box", text: state.showZeroGhost ? "✓" : "" }),
+      h("span", { class:"t", html: "❌ 대조군: 미확보를 0 으로 그리기<small>붉은 점선이 "
+        + "그 결과입니다. 움푹 팬 자국이 <b>'그 항목이 나쁘다'</b>로 읽힙니다 — "
+        + "이 프로토가 피하려는 바로 그 그림.</small>" })
+    ])
+  ]));
+
+  if (state.showZeroGhost && present < 4){
+    c1.appendChild(h("div", { class:"note bad", html:
+      "붉은 점선을 보세요. <b>같은 데이터</b>인데 단지가 훨씬 나빠 보입니다. "
+      + "실제로 달라진 것은 우리의 수집 상태뿐입니다." }));
+  }
+
+  const tblId = "alt-" + cx.id;
+  c1.appendChild(h("button", { class:"linkbtn", "aria-expanded":"false",
+    "aria-controls":tblId, text:"표로 보기 (스크린리더 대체본)",
+    onclick: (e) => {
+      const t = document.getElementById(tblId);
+      const open = t.hasAttribute("hidden");
+      if (open) t.removeAttribute("hidden"); else t.setAttribute("hidden", "");
+      e.currentTarget.setAttribute("aria-expanded", String(open));
+    } }));
+  const at = altTable(cx); at.id = tblId; at.setAttribute("hidden", ""); c1.appendChild(at);
+  c1.appendChild(axisList(cx));
+  wrap.appendChild(c1);
+
+  /* ── 총점: 레이더 밖 별도 카드 ── */
+  const c2 = h("div", { class:"card" }, [
+    h("h2", { text:"총점 — 레이더가 아니라 이 막대가 총점의 그림입니다" }),
+    h("p", { class:"sub", html:
+      "총점은 <b>재정규화 가중평균</b>입니다. 근거가 없는 축은 빼고 남은 축의 비중을 키웁니다."
+      + " 축이 빠지면 <b>면적은 줄지만 총점은 오를 수 있습니다</b> — 방향이 반대라 "
+      + "면적을 총점으로 읽으면 안 됩니다." }),
+    h("p", { class:"total" }, [
+      cx.total_score === null
+        ? h("span", { class:"none", text:"점수를 만들지 않았습니다 (0점이 아니라 '모름')" })
+        : h("span", { class:"v num", text: String(cx.total_score) }),
+      cx.total_score === null ? null : h("span", { class:"u", text:"/ 100" }),
+      h("span", { class:"badge", text: cx.score_basis })
+    ])
+  ]);
+  c2.appendChild(renormBar(cx));
+  c2.appendChild(h("div", { class:"note", html:
+    `요청한 가중치 중 <b>${pct(cx.coverage_pct)}</b>만 실제로 반영됐습니다. `
+    + `나머지는 근거가 없어 제외하고 남은 축으로 재정규화했습니다.` }));
+
+  cx.scoreAxes.filter(a => a.status === "no_signal" && a.weight > 0).forEach(a => {
+    c2.appendChild(h("div", { class:"note", html:
+      `<strong>${a.label} ${pct(a.weight * 100)}</strong> 미반영 — ${a.missing[0]}` }));
+  });
+  wrap.appendChild(c2);
+
+  /* ── 동별 편차: 축이 아니라 '칩'으로 (비단조라 레이더에 못 올린다) ── */
+  const d = cx.dong;
+  const c3 = h("div", { class:"card" }, [ h("h2", { text:"이 단지, 동을 따져야 하나?" }) ]);
+  if (!d.available){
+    c3.appendChild(h("p", { class:"sub", html:
+      `<b>판단 불가</b> — ${d.reason} 동별 비교를 제공하지 않습니다.` }));
+  } else {
+    const rs = d.dongs.map(x => x.ratio);
+    const sp = Math.max.apply(null, rs) / Math.min.apply(null, rs);
+    const big = sp >= 1.10;
+    c3.appendChild(h("p", { class:"sub", html:
+      big ? `<b>네 — 동별 차이가 큽니다(최대 ×${sp.toFixed(3)}).</b> 동을 확인하세요.`
+          : `<b>아니오 — 동별 차이가 작습니다(최대 ×${sp.toFixed(3)}).</b> `
+            + `동보다 층·향을 보는 게 낫습니다. <b>이 말이 시간을 아껴 줍니다.</b>` }));
+    c3.appendChild(h("div", { class:"note", html:
+      `편차가 크다고 좋은 단지가 아니고 작다고 나쁜 단지가 아닙니다 — `
+      + `<b>단조가 아니라서 레이더 축으로 쓸 수 없습니다.</b> 그래서 칩으로 냅니다.` }));
+  }
+  if (cx.redev){
+    c3.appendChild(h("p", { class:"sub", html:
+      `<span class="badge badge--redev">정비사업</span> ${cx.redev.zone_name} · `
+      + `원문 "${cx.redev.raw_stage}" — <b>단계 미분류라 점수를 만들지 않았습니다.</b> `
+      + `재건축은 목적(실거주/투자)에 따라 같은 단계가 정반대 신호라 레이더 축이 될 수 없습니다.` }));
+  }
+  wrap.appendChild(c3);
+
+  /* ── 아직 못 보는 것: 레이더에 '빈 축'으로 두지 않고 글자로 ── */
+  wrap.appendChild(h("div", { class:"card" }, [
+    h("h2", { text:"우리가 아직 못 보는 것" }),
+    h("p", { class:"sub", html:
+      "이 항목들은 <b>전 단지에서 0%에 가까워</b> 레이더 축으로 두지 않았습니다. "
+      + "모든 단지에서 똑같이 비어 있는 축은 변별력이 없으면서 모두를 나쁘게만 보이게 합니다." }),
+    h("ul", { class:"axis-list" }, [
+      h("li", {}, [ h("div", { class:"axis-body" }, [
+        h("div", { class:"axis-name dim", text:"가격 매력도 (호가 − 적정가 갭)" }),
+        h("p", { class:"axis-miss", text:
+          "커버리지 0.0% — 공공 오픈API 에 호가가 없고 포털 수집은 하지 않습니다. "
+          + "'내 매물'에서 호가를 입력하시면 이 축이 살아납니다." }) ]) ]),
+      h("li", {}, [ h("div", { class:"axis-body" }, [
+        h("div", { class:"axis-name dim", text:"매물 리스크 (허위·미끼 탐지)" }),
+        h("p", { class:"axis-miss", text:
+          "커버리지 0.0% — 같은 이유. 권리관계·근저당·깡통전세는 애초에 2차 기능입니다." }) ]) ]),
+      h("li", {}, [ h("div", { class:"axis-body" }, [
+        h("div", { class:"axis-name dim", text:"매수 타이밍" }),
+        h("p", { class:"axis-miss", text:
+          "전세가율·미분양·매수우위지수·입주물량 미수집 — 2차 기능이라 "
+          + "지금 그리면 없는 기능을 있는 척하는 것입니다." }) ]) ])
+    ])
+  ]));
+  return wrap;
+}
+
+function viewCompare(){
+  const A = COMPLEXES[state.cmpA], B = COMPLEXES[state.cmpB];
+  const wrap = h("div");
+  const sel = (which, val) => h("select", {
+    "aria-label": which === "cmpA" ? "비교 단지 1" : "비교 단지 2",
+    onchange: e => { state[which] = e.target.value; render(); } },
+    Object.keys(COMPLEXES).map(k => {
+      const o = h("option", { value:k, text: COMPLEXES[k].name });
+      if (k === val) o.setAttribute("selected", "");
+      return o;
+    }));
+
+  const c = h("div", { class:"card" }, [
+    h("h2", { text:"두 단지 겹쳐 보기 (최대 2개)" }),
+    h("p", { class:"sub", html:
+      "3개 이상은 미확보 패턴이 엇갈려 읽히지 않습니다(<b>미검증 판단</b>). "
+      + "실선+채움 = 첫째, 파선 = 둘째. <b>색만으로 구분하지 않습니다.</b>" }),
+    h("label", { class:"fld" }, [ h("span", { text:"실선" }), sel("cmpA", state.cmpA),
+      h("span", { text:"파선" }), sel("cmpB", state.cmpB) ])
+  ]);
+
+  /* 두 레이더를 한 좌표계에 겹친다 */
+  const holder = h("div", { style:"position:relative" });
+  const ra = radar(A, {});
+  const rb = radar(B, { dashed:true });
+  rb.style.position = "absolute"; rb.style.left = "0"; rb.style.top = "0";
+  rb.style.right = "0"; rb.style.margin = "0 auto";
+  /* 겹칠 때 격자·링·라벨이 두 번 그려지지 않게 둘째는 다각형/점만 남긴다 */
+  rb.querySelectorAll(".s-grid,.s-spoke,.s-ring-full,.s-ring-est,.s-ring-none,.s-ring-bed,"
+    + ".s-tick,.s-lab,.s-lab-sm,.s-spoke-miss").forEach(n => n.remove());
+  holder.appendChild(ra); holder.appendChild(rb);
+  c.appendChild(holder);
+
+  /* 어느 한쪽이라도 미확보인 축은 비교하지 않는다 */
+  const blocked = PROFILE_AXES.filter(k =>
+    grade(A.profileAxes.find(x => x.axis === k)) === "missing" ||
+    grade(B.profileAxes.find(x => x.axis === k)) === "missing");
+  if (blocked.length){
+    c.appendChild(h("div", { class:"note warn", html:
+      `<b>${blocked.map(k => AXIS_LABEL[k]).join(" · ")}</b> 축은 한쪽이 미확보라 `
+      + `<b>비교하지 않습니다.</b> 한쪽만 값이 있으면 그 '우세'는 실력 차이가 아니라 `
+      + `우리 수집 상태의 차이입니다.` }));
+  }
+
+  /* 델타 막대 — 실제로 읽히는 그림. 레이더는 성격 파악용. */
+  const W = 320, ROW = 30;
+  const rows = PROFILE_AXES.filter(k => !blocked.includes(k));
+  if (rows.length){
+    const svg = el("svg", { viewBox:`0 0 ${W} ${rows.length * ROW + 22}`, width:W,
+      height: rows.length * ROW + 22, role:"img",
+      "aria-label":`${A.name} 대비 ${B.name} 축별 차이` });
+    const mid = W / 2, unit = (W / 2 - 66) / 100;
+    svg.appendChild(el("line", { x1:mid, y1:14, x2:mid, y2: rows.length * ROW + 8,
+      class:"s-axisline" }));
+    rows.forEach((k, i) => {
+      const a = A.profileAxes.find(x => x.axis === k).score;
+      const b = B.profileAxes.find(x => x.axis === k).score;
+      const dv = b - a, y = 20 + i * ROW;
+      const w = Math.abs(dv) * unit;
+      svg.appendChild(el("rect", { x: dv >= 0 ? mid : mid - w, y, width:w, height:14, rx:3,
+        class: dv >= 0 ? "s-delta-pos" : "s-delta-neg" }));
+      svg.appendChild(txt("text", { x:4, y: y + 11, class:"s-lab-sm" }, AXIS_LABEL[k]));
+      svg.appendChild(txt("text", { x: dv >= 0 ? mid + w + 5 : mid - w - 5, y: y + 11,
+        class:"s-lab-sm", "text-anchor": dv >= 0 ? "start" : "end" },
+        (dv >= 0 ? "+" : "") + dv));
+    });
+    svg.appendChild(txt("text", { x:mid, y:10, class:"s-tick", "text-anchor":"middle" },
+      "← " + A.name + " 우세  |  " + B.name + " 우세 →"));
+    c.appendChild(h("p", { class:"sub", style:"margin-top:16px", html:
+      "<b>판단은 이 막대로 하세요.</b> 레이더 넓이 비교는 축 순서에 따라 달라져 의미가 없습니다." }));
+    c.appendChild(svg);
+  }
+  wrap.appendChild(c);
+  return wrap;
+}
+
+function viewUnit(){
+  const cx = COMPLEXES[state.unit];
+  const wrap = h("div");
+  wrap.appendChild(h("div", { class:"chips", role:"group", "aria-label":"단지 선택" },
+    Object.keys(COMPLEXES).map(k => h("button", { class:"chip",
+      "aria-pressed": String(state.unit === k), text: COMPLEXES[k].name,
+      onclick: () => { state.unit = k; render(); } }))));
+
+  const d = cx.dong;
+  const c = h("div", { class:"card" }, [
+    h("h2", { text:"이 매물이 단지 안에서 어디쯤인가" }),
+    h("p", { class:"sub", html:
+      `가로축은 <b>단지 중위 ₩/㎡ 대비 배율</b>이고 눈금은 <b>0.85~1.15 고정</b>입니다. `
+      + `단지마다 스케일을 다시 잡으면 5% 편차와 20% 편차가 같은 그림이 됩니다. `
+      + `<b>같은 면적(${d.area_m2}㎡) 안에서만</b> 비교합니다 — 면적을 섞으면 `
+      + `"큰 평형이 많은 동"이 입지와 무관하게 비싸 보입니다.` })
+  ]);
+
+  if (!d.available){
+    c.appendChild(h("div", { class:"note warn", html:
+      `<b>${d.method}</b> — ${d.reason}<br>`
+      + `동별 비교를 <b>그리지 않습니다.</b> 좌표 추정으로 순서를 지어내지 않습니다.` }));
+  } else {
+    c.appendChild(h("p", { class:"sub", style:"margin-top:14px",
+      html:`<b>동별</b> — 실측(aptDong) · 동 정보 ${d.coverage_pct}% · 최근 ${d.period_months}개월` }));
+    c.appendChild(strip(d.dongs, { kind:"dong",
+      aria: cx.name + " 동별 제곱미터당 가격 배율: "
+        + d.dongs.map(x => `${x.dong} ${x.ratio.toFixed(3)}배 ${x.sample_size}건`).join(", ") }));
+    const t = h("table", { class:"alt" });
+    t.appendChild(h("thead", {}, [ h("tr", {}, [ h("th", { text:"동" }),
+      h("th", { text:"배율" }), h("th", { text:"₩/㎡ 대비" }), h("th", { text:"표본" }) ]) ]));
+    const tb = h("tbody");
+    d.dongs.forEach(x => {
+      const diff = (x.ratio - 1) * d.overall_median_ppm_krw * d.area_m2;
+      tb.appendChild(h("tr", {}, [
+        h("td", { text:x.dong }),
+        h("td", { class:"n", text:"×" + x.ratio.toFixed(3) }),
+        h("td", { class:"n", text:(diff >= 0 ? "+" : "−") + eok(Math.abs(diff)) }),
+        h("td", { class:"n", text:x.sample_size + "건" }) ]));
+    });
+    t.appendChild(tb); c.appendChild(t);
+    if (d.skipped && d.skipped.length){
+      c.appendChild(h("div", { class:"note", html:
+        `<b>${d.skipped.map(s => s.dong).join(" · ")}</b> 는 표본이 3건 미만이라 `
+        + `<b>그리지 않았습니다.</b> 빼서 숨긴 게 아니라 여기 적어 둡니다.` }));
+    }
+  }
+
+  /* 층대 — 실측상 층 효과가 동 효과보다 크다. 동만 보여주면 더 큰 축을 숨기는 것. */
+  c.appendChild(h("p", { class:"sub", style:"margin-top:20px", html:
+    "<b>층대별</b> — 운영 DB 실측에서 <b>층 효과(중위 6.8%)가 동 효과(4.7%)보다 큽니다.</b> "
+    + "그래서 동과 나란히 놓습니다." }));
+  c.appendChild(strip(cx.floors, { kind:"floor",
+    aria: cx.name + " 층대별 배율: "
+      + cx.floors.map(x => `${x.band} ${x.ratio.toFixed(3)}배`).join(", ") }));
+
+  c.appendChild(h("div", { class:"note", html:
+    "표기는 <b>인과가 아니라 사실</b>입니다 — \"이 동이 좋아서 비싸다\"가 아니라 "
+    + "<b>\"이 동의 최근 실거래가 단지 중위보다 X% 높았다\"</b>. "
+    + "향·시점 차이는 통제하지 못했습니다." }));
+  wrap.appendChild(c);
+  return wrap;
+}
+
+function viewBudget(){
+  const cx = COMPLEXES.A;
+  const wrap = h("div");
+  const c = h("div", { class:"card" }, [
+    h("h2", { text:"예산 수면선 — 내 돈으로 이 단지에서 뭘 살 수 있나" }),
+    h("p", { class:"sub", html:
+      "경쟁 서비스의 가격 필터는 <b>내가 입력한 숫자</b>로 자릅니다. "
+      + "여기서는 <b>취득세·LTV·DSR 을 계산한 실구매 가능액</b>으로 자릅니다 — "
+      + "그건 사용자가 스스로 모르는 숫자입니다." })
+  ]);
+  c.appendChild(waterline(cx));
+  c.appendChild(h("div", { class:"note", html:
+    `<b>한도는 선이 아니라 밴드</b>입니다 — ${BUDGET.note}. `
+    + `실선 하나로 그으면 "${eok(BUDGET.mid)}까지 확실히 된다"는 없는 확신이 생깁니다.` }));
+
+  const d = cx.dong, b = cx.band;
+  const ok = d.dongs.filter(x => b.median * x.ratio <= BUDGET.mid);
+  c.appendChild(h("div", { class:"note", html: ok.length
+    ? `이 단지 ${b.area_m2}㎡ 에서 <b>내 한도 안에 들어오는 동은 `
+      + `${ok.map(x => x.dong).join(" · ")}</b> 입니다 `
+      + `(${d.dongs.length}개 중 ${ok.length}개). 나머지는 흐리게 두되 <b>숨기지 않습니다</b> — `
+      + `협상·조건 변화 여지가 있습니다.`
+    : `이 단지 ${b.area_m2}㎡ 는 <b>모든 동이 한도를 넘습니다.</b>` }));
+  c.appendChild(h("div", { class:"note warn", html:
+    `이 분포는 <b>실거래</b>이지 현재 호가가 아닙니다. 신고 지연 최대 30일 + `
+    + `수집 기준일 <b class="num">2026-07-25</b> — <b>현재 시세는 더 높거나 낮을 수 있습니다.</b>` }));
+  wrap.appendChild(c);
+  return wrap;
+}
+
+const VIEWS = { profile:viewProfile, compare:viewCompare, unit:viewUnit, budget:viewBudget };
+
+function render(){
+  const m = document.getElementById("main");
+  m.innerHTML = "";
+  m.appendChild(VIEWS[state.tab]());
+  document.querySelectorAll('nav [role=tab]').forEach(b => {
+    const on = b.id === "tab-" + state.tab;
+    b.setAttribute("aria-selected", String(on));
+    b.tabIndex = on ? 0 : -1;
+  });
+}
+
+/* 탭: 클릭 + 좌우 화살표 키(WAI-ARIA tabs 패턴) */
+const tabs = Array.from(document.querySelectorAll('nav [role=tab]'));
+tabs.forEach((b, i) => {
+  b.addEventListener("click", () => { state.tab = b.id.replace("tab-", ""); render(); });
+  b.addEventListener("keydown", e => {
+    let j = null;
+    if (e.key === "ArrowRight") j = (i + 1) % tabs.length;
+    if (e.key === "ArrowLeft")  j = (i - 1 + tabs.length) % tabs.length;
+    if (e.key === "Home") j = 0;
+    if (e.key === "End")  j = tabs.length - 1;
+    if (j === null) return;
+    e.preventDefault();
+    state.tab = tabs[j].id.replace("tab-", "");
+    render(); tabs[j].focus();
+  });
+});
+render();
+</script>
+</body>
+</html>
