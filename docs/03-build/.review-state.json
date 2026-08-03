@@ -1,246 +1,294 @@
 {
  "code_review": {
   "status": "passed",
-  "id": "CR-044",
-  "date": "2026-08-02",
-  "at": "2026-08-02T02:20:00+09:00",
-  "deploy_ready": true,
-  "previous": "CR-043",
-  "scope": [
-   "deploy/**",
-   "docs/**",
-   "backend/tests/test_script_hygiene.py"
-  ],
-  "resolved_from_previous": [
-   "CR43-1",
-   "CR43-2",
-   "CR43-4",
-   "CR43-5"
-  ],
-  "partially_resolved_from_previous": {
-   "CR43-3": "절반. nz()/harn_if() 가 T2·T3b 에는 들어갔으나 이번 라운드가 새로 쓴 T10 에는 없다 -> CR44-3"
+  "id": "CR-048",
+  "date": "2026-08-04",
+  "at": "2026-08-04T17:20:00+09:00",
+  "reviewer": "code-reviewer",
+  "deploy_ready": false,
+  "previous": "CR-047 (failed · 차단 CR47-1 · CR47-2)",
+  "scope": "PM 지시로 **하루 발송 상한 하나**로 좁힘 — deploy/monitor-lib.sh(_send_quota_check/_send_quota_commit/send_telegram) + deploy/monitor-selftest.sh 의 (발송 상한) 7경로. CR-047 의 비차단 이월분(CR47-3~CR47-10)은 이번 판정 대상 아님 = 미검증 이월.",
+  "reviewed_sha256": {
+   "monitor.sh": "83bda3dd324b8509af840d58358d93166d15fc195ed4edd3a27a8e7f049ffad6",
+   "monitor-lib.sh": "7f8a35aa2db900b1a358e6aeda85cfa7811b13d1a0e8e70d93985d74edc58f6c",
+   "monitor-selftest.sh": "6c67f837d82b3374ecacbad8d58a06e575e6754a0992d683d4efe7e31aff6610",
+   "note": "PM 동결 해시와 시작·종료 모두 3/3 일치. 리뷰 중 트리 변경 0"
+  },
+  "baseline_selftest": "서버 격리 사본 /root/rev48/base — 통과 231 · 실패 0 · 건너뜀 1 · HARN 0 · rc=0 (55초). 판정 기준(실패 0·HARN 0·rc=0)은 PM 보고와 일치하나 숫자는 불일치(PM 226/0/3) → CR48-4",
+  "resolved_from_previous": {
+   "CR47-1": "해소. _send_quota_commit 호출 전수 2곳이 성공 경로(:277 DRY-RUN · :296 HTTP200)에 정확히 있고, 실패 경로 3곳(:268 억제 · :285 자격증명없음 · :304 curl 3연속실패)에 정확히 없다. send_capped=1 도 commit 안(:256)으로 옮겨져 상한 통보가 나간 뒤에만 잠긴다 — 통보 유실 시 재시도된다. fail-open 3중(비숫자→60 · 0→60 · send_count 손상→통과) 확인.",
+   "CR47-2": "해소. 지정 변이 3종이 전부 죽는다. CR-047 에서 생존했던 M13(=C) · M15(=B) 가 이번엔 죽는다. HARN 4회 실행 전부 0."
+  },
+  "mutations": {
+   "총계": "3종 지정 — 3 죽음 / 0 생존 (전부 서버 격리 사본 · 기준선 231/0/1 HARN0 rc=0 · monitor-lib.sh 한 파일만 치환)",
+   "A commit 을 check 직후로 이동 + 성공 2곳 제거(CR47-1 옛 결함 복원)": "230/1/1 rc=1 죽음 — '(발송 상한) 발송 실패도 상한으로 센다'",
+   "B SEND_MAX_DAY 기본값 60→0 + case 의 |0 제거(전 경보 영구 침묵)": "229/2/1 rc=1 죽음 — '(대조군) 평범한 실행에서 경보가 억제된다' + '평시에 상한 통보가 나간다'",
+   "C commit 안의 kv_set send_count 증가 삭제": "230/1/1 rc=1 죽음 — '(발송 상한) send_count 가 안 오른다'"
   },
   "blocking": [],
-  "notes": "PASS · 차단 0건. CR43-1(모드 대칭)·CR43-2(방향 대칭) 둘 다 해소 — 리뷰어 독립 하네스로 재현. M1(극성 반전) 156/7 rc=1 · M2(쿨다운 1년) 162/1 rc=1 로 각각 죽는다. 그러나 M3(판정 불가 -> 거짓 해소)는 관문 163/0/3 rc=0 으로 생존 = clear 경로 무관측(CR44-2). sshjournal 에 해소 경로가 없어 journald 1회 실패 뒤 영영 안 꺼진다(CR44-1). 지적 11건(중 3 · 하 3 · 정보 5), 전부 비차단. 수렴 아직 — 심각도는 내려갔으나(차단 3->2->0) 새 지적이 전부 같은 두 집안(clear 자격 · 관문이 자기 실패를 검사 결과와 섞음)이다.",
-  "verified_claims": {
-   "mut_grep": "grep -rn 'MUT-' deploy/ = 0 (시작·종료). 변이 M1~M4 는 스크래치패드 사본에만",
-   "bash_n": "deploy/*.sh 8파일 exit 0",
-   "selftest": "통과 167 · 실패 0 · 건너뜀 2 · 하네스오류 0 · rc=0 (주장 일치)",
-   "pytest": "수집 1,571 = 1,468 passed · 103 skipped · 0 failed (주장 일치 · --collect-only 합계로 교차 확인)",
-   "scope_check": "오늘(08-01~02) mtime 변경은 deploy/{monitor,monitor-lib,monitor-selftest}.sh · deploy/DEPLOY.md · docs/05-monitoring/{monitoring,monitoring-plan}.md · backend/tests/test_script_hygiene.py 뿐",
-   "CR43-1": "리뷰어 하네스 재현 — daily(LE_DIR 0개) -> logblind 뜸 · kv/blind_daily 저장 / 5분 뒤 fast: ALERT-CLEARED 0 · 해소 0통 · .active AND .sent 생존(쿨다운 유지) · 요약이 사유를 말함 / fast 8회 더: clear 0 raise 1 / 인증서 복귀 daily: 실제 해소 + kv/blind_daily 비움(영구 봉인 없음) / 그 뒤 fast 0건. 되돌린 사본(M4)은 clear 1 · 해소 1통 · .active/.sent 삭제로 결함 재현",
-   "CR43-2": "check_market_stale 을 관문과 같은 ext 방식으로 뽑아 T10 단언 6개를 돌림 — 대조군 6/0 · M1 2/4 · M2 5/1. 관문 전체: 대조군 163/0/3 rc0 · M1 156/7/3 rc1(그중 5건이 T10) · M2 162/1/3 rc1(상한 단언 1건). 상한과 쿨다운 일치 단언이 각각 다른 변이를 잡는다. docker/psql 없이 돈다",
-   "M3_survives": "판정 불가 조기 반환(monitor.sh:1144) 제거 -> ref=n/a/none 에서 clear_alert 2회(거짓 해소 '시장지수 기준월 회복 (n/a >= 기대 ...)'). 관문 163/0/3 rc=0 으로 대조군과 한 자리도 다르지 않다. 원인: T10 이 clear_alert() { :; } 로 물림(:1392) · 구조 검사(:1564)는 raise 쪽만 본다. 실린 코드는 옳다(대조군 clear 0회)",
-   "CR43-3_partial": "T10 두 방향 실측 — FROZEN_REF(:1472) 한 번 비면 실패 3 · HARN 0(없는 결함 보고) / 스테일 달 dexp(:1424) 한 번 비면 볼륨 모형 91->61통으로 조용히 약해지고 전건 통과 · HARN 0(있는 결함 놓침). 별개로 M1 관문 실행에서 SR39-1 교차 2건이 부하로 붉었는데 want() 는 로그 파일이 있으므로 HARN 이 아니라 FAIL 로 보고",
-   "SR39-1": "가짜 journalctl 배선 실측 — (A) 정상 10회 SSH 경보 0건(오탐 없음) (C) journald 에만 성공 흔적이면 sshpw 뜨고 본문에 '두 출처의 수가 다르다' (B) journald 1회 실패 -> sshjournal 뜸 (B') 복귀+정상 3회 뒤에도 .active 생존 = 해소 경로 없음. 비교가 아니라 각자 세는 설계 판단은 옳고 한계 서술도 정직하다",
-   "SR39-6": "리뷰어 독립 측정 — 관문 대상 68파일 / _SECRET_ENV_ASSIGN 값 12자 2건(둘 다 원장의 설명용 가짜값: code-review-log.md:8137 · security-review-log.md:9388) / 14자·16자 0건 / _BARE_SECRET 0건. 16자 선 타당(담을 키는 전부 32자 이상). 정상 줄을 막지 않는다. 단 _BARE_SECRET 에 _SYNTHETIC/_PLACEHOLDER 면제가 없어 설명용 가짜값이 관문을 붉힌다",
-   "mutation15": "check_peer_alive 조치·30시간 유예 타당(DAILY_MAX_HOURS 와 같은 값) · T6b 3케이스 충분(설치직후 무경보 + 40시간 경보 + 반대쪽 fast_dead). 다만 근거 문장 '지금 배포가 크론 2줄을 새로 넣는 일' 은 CR-041(우리 3줄)·SR-038(realestate 3줄)·DEPLOY.md 9-1(crontab 단계 없음)과 어긋난다",
-   "log_scrub": "행동으로 확인 — 배치가 DSN/SERVICE_KEY/금액을 찍게 하니 감시 로그에 're:<redacted>@' · 'SERVICE_KEY=<redacted>' · '한도 <num>원'. 닫혔다. 다만 관문은 구조(grep '| scrub')로만 본다",
-   "deploy_procedure": "순서(라이브러리 먼저)·묶음(5개 함께)·롤백 판단 전부 옳다. 새 본체+옛 lib 은 '깨지는' 것이 아니라 log() 세탁과 새 비밀 규칙이 빠진 채 도는 것(과장). 빠진 단계: install/cp 가 돌고 있는 스크립트를 제자리에서 덮어씀(mv -f 로) · 롤백 뒤 재확인 없음 · 서버 selftest 기대 숫자가 다름(167/0/2 -> 163/0/3, T7 은 SKIP 없이 사라짐) · deploy 셸 5개가 아직 git 미추적"
+  "findings": {
+   "CR48-1 (M)": "HTTP 200 성공 경로의 commit(monitor-lib.sh:296)은 관문이 한 번도 안 밟는다 — run_mon(:333)이 항상 DRY_RUN=1 이고, 유일한 DRY_RUN=0 인 (사)(:1543)는 빈 자격증명 파일로 curl 미도달, 내부 직접 호출(:1807)도 DRY_RUN=1. 그 한 줄만 지우는 변이는 생존한다(운영에서 상한 무력화). 차단 아님 — 지워져도 경보는 계속 나간다(소음 쪽). 수정: :1558 의 sshpw 900 검사와 같은 구조 검사 1줄(code=200 블록 안에 _send_quota_commit 이 있는가).",
+   "CR48-2 (M)": "일일 요약(monitor.sh:1512-1516)이 send_telegram 을 그대로 타서 상한에 막힌다. 그 본문이 '이 메시지가 아침에 오지 않으면 감시나 서버가 멈춘 것이다' 이고 monitor-lib.sh:283 도 같은 논리를 최후 안전장치로 쓴다 → 상한 소진일에는 소음 사고가 서버 사망처럼 보인다. 수정: 요약(과 :1456 채널시험)은 상한 밖으로(하루 1통이라 폭주 위험 없음).",
+   "CR48-3 (M)": "운영자 손검사 레시피(DEPLOY.md:1296 · :1348)에 RE_MON_STATE 가 없어 운영 상태 디렉터리(monitor-lib.sh:21)에 쓴다. ① 이번에 생긴 것: send_count 를 깎는다. ② 전부터 있고 더 큰 것: DRY-RUN 이 return 0 이라 raise_alert(:327)가 운영 alerts/<key>.sent 를 찍어 진짜 경보를 쿨다운만큼(대부분 6시간, cert·pgcrash·jsonlog·sshjournal·dbstruct_cfg 는 24시간) 억제한다. 자체검사는 결백 — :126 이 source 앞에서 RE_MON_STATE 를 격리하고, 실측으로 4회 실행 후 운영 kv 의 send_* 파일 0개 확인. 수정: 코드 아님, 문서에 RE_MON_STATE=$(mktemp -d) 한 줄.",
+   "CR48-4 (L)": "PM 보고 226/0/3 과 실측 231/0/1 불일치. DEPLOY.md:1292-1294 가 '숫자는 판정 기준이 아니다'를 못 박아 판정 영향은 없다. 실측의 유일한 SKIP 은 oomkill(cgroup/docker 필요)이고 서버엔 둘 다 있으므로 PM 쪽 SKIP 3 은 반출 사본의 파일 누락으로 보인다. 자체검사가 읽는 파일은 monitor.sh · monitor-lib.sh · market-index.sh · job-run.sh · ../docs/05-monitoring/monitoring.md 5개 전부 — DEPLOY.md 격리 실행 절차에 못 박을 것."
   },
-  "findings": [
-   {
-    "id": "CR44-1",
-    "severity": "medium",
-    "title": "sshjournal 에 clear_alert 경로가 없다 — journald 1회 실패 뒤 영영 안 꺼진다",
-    "where": "deploy/monitor.sh:799 (clear_alert sshjournal 이 파일 전체에 없음 · 형제 authfresh 는 :604 에서 꺼진다)"
-   },
-   {
-    "id": "CR44-2",
-    "severity": "medium",
-    "title": "check_market_stale 의 clear 경로가 관문에서 무관측 — M3 생존(거짓 해소)",
-    "where": "deploy/monitor-selftest.sh:1392 (clear_alert 를 : 로 물림) · :1564 (구조 검사가 raise 쪽만 봄)"
-   },
-   {
-    "id": "CR44-3",
-    "severity": "medium",
-    "title": "CR43-3 절반 — 새로 쓴 T10 에 nz()/harn_if() 가드가 없고, 픽스처 실행 실패도 FAIL 로 보고된다",
-    "where": "deploy/monitor-selftest.sh:1402-1514 · want() 의 HARN 그물은 로그 파일만 덮는다"
-   },
-   {
-    "id": "CR44-4",
-    "severity": "low",
-    "title": "'지금 배포가 크론 2줄을 새로 넣는 일' 이 자기 실측과 어긋난다",
-    "where": "deploy/monitor.sh:906-907 · docs/05-monitoring/monitoring.md:621-622"
-   },
-   {
-    "id": "CR44-5",
-    "severity": "low",
-    "title": "_BARE_SECRET 에 합성값 면제가 없어 설명용 가짜값이 관문을 붉힌다",
-    "where": "backend/tests/test_script_hygiene.py:134 · :195-198"
-   },
-   {
-    "id": "CR44-6",
-    "severity": "low",
-    "title": "DEPLOY 9-1 이 돌고 있는 스크립트를 제자리에서 덮어쓴다(install/cp) — mv -f 로 · 롤백 뒤 재확인 없음 · '깨진다' 과장",
-    "where": "deploy/DEPLOY.md:1220-1230 · :1273-1276"
-   },
-   {
-    "id": "CR44-7",
-    "severity": "info",
-    "title": "log() 세탁을 관문이 구조로만 본다(이웃은 행동으로 본다)",
-    "where": "deploy/monitor-selftest.sh:1242"
-   },
-   {
-    "id": "CR44-8",
-    "severity": "info",
-    "title": "monitoring.md 8-4 '아직 안 고친 것' 이 이번에 닫힌 SR36-3 잔여·SR36-4 를 여전히 적는다",
-    "where": "docs/05-monitoring/monitoring.md:433-436"
-   },
-   {
-    "id": "CR44-9",
-    "severity": "info",
-    "title": "api5xx 만 형제 검사 중 유일하게 clear 경로가 없다(이번 라운드 변경 아님)",
-    "where": "deploy/monitor.sh:489-492"
-   },
-   {
-    "id": "CR44-10",
-    "severity": "info",
-    "title": "check_peer_alive 가 kv 값을 숫자 가드 없이 산술에 쓴다(:783 은 case 가드를 쓴다)",
-    "where": "deploy/monitor.sh:911-919"
-   },
-   {
-    "id": "CR44-11",
-    "severity": "info",
-    "title": "deploy 셸 5개가 git 미추적 — DEPLOY 9-1 의 'pull 해서 cp' 는 커밋 뒤에만 성립",
-    "where": "git status: ?? deploy/{monitor,monitor-lib,monitor-selftest,job-run,market-index}.sh"
-   }
+  "pm_questions": {
+   "Q1 DRY-RUN 을 '나간 것'으로 세는 결정의 부작용": "수용 가능 — 단 CR48-3 의 문서 1줄 조건. ① 관문은 상태를 격리하므로 운영 상한을 안 깎는다(실측 확인). ② 남은 노출인 운영자 손검사는 상한보다 훨씬 큰 부작용(쿨다운 .sent 오염, 최대 24시간 침묵)을 이미 갖고 있어, 고칠 지점은 상한이 아니라 손검사 격리다. ③ 상한만 DRY-RUN 예외로 빼면 commit 의 유일한 실행 커버리지가 0 이 된다(CR48-1) — 이 프로젝트가 두 라운드 싸운 '관문이 못 밟는 경로'를 다시 만드는 셈.",
+   "Q2 상한을 빼는 것이 더 안전한가": "두세요(유지 권고). ① 쿨다운은 대체재가 아니다 — clear_alert(:339)가 .active 와 .sent 를 함께 지워 해소 직후 재발화는 쿨다운을 안 거친다. 플래핑은 --fast 1분 주기에서 왕복 2통 x 1440 = 하루 2880통이 이론상 가능하고 sshpw 900 과 무관하다. ② 앵커는 원격 위조를 막는 것이지 우리 쪽 폭주를 막는 게 아니다. ③ 텔레그램 봇을 pjt12-adsense 와 공유해 읽으므로(:31-32) 폭주가 남의 채널까지 묻는다. ④ 상한이 낸 결함은 이번에 둘 다 닫혔고 fail-open 이 3중이라 최악 경로가 좁아졌다 — 지금 빼면 닫힌 결함 때문에 살아 있는 방어를 버리는 것. 단 다음 라운드 후보 둘: (ㄱ) CR48-2 일일 요약을 상한 밖으로 (ㄴ) clear_alert 에도 최소 지속시간을 둬 플래핑 근원을 막고 상한을 진짜 마지막 방어선으로 내릴 것."
+  },
+  "unresolved_carryover": [
+   "CR47-3~CR47-10 (이번 범위 밖 · 미검증 이월)",
+   "CR46-4 / CR46-8 / CR46-9 / CR46-10 (CR-047 이월분 그대로)",
+   "CR45-5 / CR46-6 kv fail-open",
+   "CR40-8 (전송 실패·억제여도 clear_alert 가 .active 를 지운다 — 이번 CR48-2/Q2 근거와 같은 뿌리)"
   ],
-  "next_round_before_deploy": [
-   "CR44-1 clear_alert sshjournal (2줄) — 서버에 올리기 전에 같이 가는 것이 낫다",
-   "CR44-2 T10 의 clear_alert 가짜를 세는 것으로 바꾸고 n/a·none 에서 0 단언 (2줄) — 합격선은 M3",
-   "CR44-3 T10 에 nz/harn_if · 픽스처 실패를 harn 으로 · 그 전에는 문서의 'HARN 0 이면 근거' 문장을 좁힐 것",
-   "CR44-6 install -> mv -f (배포 절차라 올리기 전에)"
-  ],
-  "convergence": "아직. 차단은 3(CR-042) -> 2(CR-043) -> 0(CR-044) 으로 내려갔으나 지적 수는 안 줄었고(11건), 새 지적이 전부 두 집안이다. ① clear_alert 를 부를 자격(CR-040 -> CR42-3 -> CR43-1 -> CR44-2/CR44-1) ② 관문이 자기 실패를 검사 결과와 섞는다(CR41-6 -> SR38-9 -> CR43-3 -> CR44-3). clear 경로를 관문이 실제로 보는 것은 logperm·logleak·logfresh·cert·logblind·warn_* 여섯뿐이고, 값이 비었을 때의 처리를 정한 것은 T2·T3b 뿐이다. 두 목록이 다 차면 수렴이다.",
-  "hygiene": "grep MUT- 시작 0 종료 0 · 변이는 스크래치패드 사본에만 · 실패 주입 0 · 서버 무접속 · ALERT-SENT 0건 · 사용자 알림 0통 · git status 는 리뷰 전과 같다(원장·상태파일 제외). M1 관문 실행 때 pytest 를 동시에 돌린 사실은 CR44-3 증거로 그대로 적었다."
+  "hygiene": "트리 동결 해시 3/3 시작·종료 일치 · 저장소 소스 수정 0 · git checkout -- 미사용 · 커밋 0 · frontend/** · docs/02-design/** 무접촉 · LF 유지 · /opt/realestate/scripts/** 무접촉(참조 명령 0건) · 격리 /root/rev48/ 사용 후 삭제 · 텔레그램 0통(자체검사 DRY_RUN=1 · DRY_RUN=0 실험은 빈 자격증명 파일로 curl 미도달) · 윈도우에서 selftest 미실행 · 변이는 python 문자열 치환으로만 생성 후 tar|ssh 반출 · 자체검사 실행 4회(기준 1 + 변이 3)",
+  "notes": "PASS · 차단 0 (M3 · L1). CR47-1 은 호출부 전수(성공 2 · 실패 3)로 해소 확인, CR47-2 는 지정 변이 A/B/C 가 전부 죽어 해소 확인(CR-047 생존분 M13·M15 포함). 기준선 231/0/1 HARN0 rc=0. 남은 지적은 셋 다 작다: HTTP200 커밋 지점이 관문 밖(CR48-1) · 일일 요약이 상한에 막혀 침묵 신호가 오염(CR48-2) · 운영자 DRY-RUN 손검사가 운영 상태를 오염(CR48-3, 상한보다 쿨다운 쪽 피해가 큼 · 문서 1줄로 해결). PM 질문 답: DRY-RUN 계수는 수용 가능(문서 조건부), 상한은 유지 권고 — clear_alert 가 쿨다운을 리셋해 플래핑 폭주를 쿨다운으로 막을 수 없기 때문.",
+  "log": "docs/03-build/code-review-log.md §CR-048",
+  "previous_round": {
+   "id": "CR-047",
+   "note": "failed · 차단 2건(CR47-1 · CR47-2). 둘 다 이번에 해소 확인"
+  }
  },
  "security_review": {
   "status": "passed",
-  "id": "SR-040",
-  "date": "2026-08-02",
-  "at": "2026-08-02T00:40:00+09:00",
-  "reviewer": "security-reviewer (herdr re-review 대행)",
-  "scope": "deploy/**(monitor.sh · monitor-lib.sh · monitor-selftest.sh · job-run.sh · market-index.sh · DEPLOY.md) · docs/**(monitoring.md · monitoring-plan.md) + backend/tests/test_script_hygiene.py. SR-039 지적 7건(SR39-1 journald 교차 · SR39-2 authfake · SR39-3 .1.gz · SR39-4 scrub 확장 · SR39-5 전송경로 구조검사 · SR39-6 위생관문 *_KEY · SR39-7 미구현 판단) 재검증 + 담당자 자기인정(log() 세탁) 실측 + CR43-1/2/3 · 15번째(daily_dead) 델타 + 서버 읽기전용 실측. 백엔드 앱 델타는 범위 밖 — CR-044 담당(인증/인가 무변경만 확인).",
-  "previous": "SR-039 (passed 조건부 · 차단 0 · 조건 33건 · 키 투입 false)",
+  "id": "SR-044",
+  "date": "2026-08-04",
+  "at": "2026-08-04T10:05:00+09:00",
+  "reviewer": "security-reviewer",
+  "scope": "SR-043 PASS 이후 변경분만 — deploy/monitor.sh · deploy/monitor-lib.sh · deploy/monitor-selftest.sh. 동결 해시 3/3 시작·종료 모두 일치(83bda3dd… / 7f8a35aa… / 6c67f837…). 코드 읽기 + 짧은 읽기 전용 서버 실측. monitor-selftest.sh 미실행(윈도우 금지 지시 준수). /opt/realestate/scripts/** 수정·삭제 0 · 텔레그램 0통 · 격리 디렉터리 생성 0. frontend/** 와 docs/02-design/** 미열람.",
+  "previous": "SR-043 (passed · 차단 0 · SR43-1 Medium 이월)",
   "blocking": [],
-  "deploy_approved": true,
-  "deploy_approved_note": "차단 0건 · 조건 36건. fail 조건 5개 전부 미해당 — ① 인증/인가 결함 0(범위 안 변화 없음 · 백엔드 델타도 인증 키워드 0줄 확인) ② 인젝션 0(eval 없음 · 신규 외부호출 journalctl 의 인자는 -u ssh -u sshd 고정문자열 + @epoch 이고 그 epoch 는 숫자만 통과시키는 분기를 거친 값 · SQL 보간값 EXPECTED 는 date 출력이라 도달 불가) ③ 비밀 하드코딩 0(델타 5규칙 스캔 · 위생관문 28 passed) ④ 민감정보 로그 노출 — 이번 라운드에 실제로 좋아졌다(log() 세탁으로 측정된 유출 경로 1건 폐쇄 · 12형태 x 2목적지 실측 전부 차단 · 서버 운영로그 2종 재실측 0건) ⑤ 전송 암호화 유지. ⚠️ 서버는 여전히 SR-038 시점 코드(sha256 5/5 SR-039 기록과 동일 — 무단/부분 배포 없음)라 조건 #37(작업본 반영)이 최우선이다.",
-  "deploy_approved_conditional_on": [
-   "#37 medium 유지·최우선 — 작업본 스크립트 5개를 서버에 반영(서버 해시 5/5 가 SR-038 그대로. SR38-1/2/3 이 운영에서 아직 열려 있다)",
-   "#40 medium 유지 · 키 투입과 함께 — .env 키 이름 집합 감시(SR39-7). 구현 주의 2건: 첫 실행 기준값 분기 필요(안 하면 설치 당일 오탐 1통) · 이름 시작을 ^[A-Za-z_] 로 제한(주석 줄이 개수에 섞인다) · 알림 본문은 개수만",
-   "#43 medium 신규·다음 라운드 최우선 — journald 가 '응답은 하는데 ssh 메시지 0줄' 인 상태를 blind 로 잡고 요약 문구를 '교차 실질 불가' 로(SR40-1). 오늘 서버 값 5분 257줄·24시간 26,528줄이라 0 은 정상 운영에 없다 = 오탐 0",
-   "#44 medium 신규 · 키 투입과 함께 — job-run.sh:89 cat \"$TMP\" 가 배치 원문을 세탁 없이 크론 로그로 흘린다(실측 DSN 평문 1건). 앱/배치 로그에 sk-ant-·KakaoAK·DSN 형태 스캔 추가",
-   "#45 low 신규 — 위생 관문에 마크다운 표기(표 칸 · **이름** · 백틱 · 한국어 이름표). 오탐 비용 실측 0건(68파일 전수 · 후보 정규식 2종)",
-   "#46 low 신규 — timeout 5 journalctl(SR40-7: fast 경로에서 유일하게 시간제한 없는 외부 호출) · clear_alert 의 rm 을 전송 성공에 조건화(SR40-6)",
-   "#47 info 신규 — 문서 3줄 정정: authfake 사정거리(SR40-3) · journalctl --vacuum 주의(SR40-2) · daily_dead 근거의 '크론 2줄 신규'(SR40-8 — 실측상 두 줄 다 이미 걸려 있다)",
-   "#29 info 유지 — /etc/logrotate.d/realestate 여전히 미생성(SR38-6). 만들 때 create 0640 root adm",
-   "#35 low — 리눅스(서버)에서 monitor-selftest.sh 재실행. #37 직후(윈도우 SKIP 2건이 거기서 돈다)",
-   "#36 info — flock 0600 은 코드 해소, 서버는 0644 실측(옛 코드) → #37 로 해소",
-   "#0'''' — SR36-1 위험수용 유지. T1/T2/T3 오늘 전부 미발동 실측",
-   "#1~#25 · #26 · #30~#33 — SR-036R·SR-037·SR-038 조건 그대로 유지"
-  ],
-  "closed_this_round": [
-   "#28 (SR39-4) — scrub 이 이름 인접 없는 비밀까지 덮는다. 12형태 x 2목적지(텔레그램·감시로그) 실측 전부 차단",
-   "SR36-4 / log() 세탁 — 담당자가 스스로 찾아 닫았고 내가 실측 확인. 감시로그에 DSN·sk-ant-·KakaoAK·Basic·JWT·NEIS_KEY= 전부 잔재 0",
-   "#38 (SR39-1) — journald 교차. x9 를 '로그가 계속 자라는' 운영 조건에서 재현했고 journald 가 잡는다. 오탐 0(경보 조건이 OR 이라 두 수의 어긋남만으로는 안 운다)",
-   "#39 (SR39-6) — 위생 관문 이름 규칙. 지목 4이름 전부 차단 · 막으면 안 되는 7형태 전부 통과 · 자기시험 2건 추가",
-   "#41 (SR39-2 · SR39-3) — x10(동결+touch) 에서 authfake 발동 · 대조군(동결만) 은 authfresh · .1.gz 판정은 '설정이 아니라 관측' 이라 compress 서버에서 오탐 불가",
-   "#42 (SR39-5) — 전송 경로 구조 검사. SR-039 에서 초록이던 변이 M2 가 이제 검출된다(사본 변이로 확인)",
-   "#34 (SR38-9) HARN — 167 · 0 · 2 · HARN 0 으로 3라운드 연속 관문이 근거가 됐다",
-   "SR-039 could_not_verify 4번째 — 'journald 교차의 오탐률은 담당자 몫' 을 이번에 내가 쟀다. 0 이다"
-  ],
-  "key_insertion_approved": false,
-  "key_insertion_note": "저장소 쪽 조건(#32 관문 범위 · #39 관문 이름 규칙)은 **둘 다 해소**됐다. 남은 사유는 SR-039 와 똑같이 하나뿐이다 — SSH 비밀번호 로그인이 아직 켜져 있다(오늘 2026-08-02 00:15 실측: passwordauthentication yes · permitrootlogin yes). PasswordAuthentication no 를 적용하는 순간 승인이다(공개키로 접속되는 세션을 하나 열어 둔 채 바꾸고, 새 세션으로 접속을 확인한 뒤 옛 세션을 닫을 것). 그날 함께 지킬 것 4가지 — ① 이름은 반드시 ANTHROPIC_API_KEY · NEIS_API_KEY. 이유가 둘이다: ⓐ 위생 관문(#39) ⓑ 앱 마스킹 masking.SECRET_ENV_VARS 가 '정확한 이름 목록' 이라 다른 이름이면 앱 로그·오류 본문에서 그 값이 마스킹되지 않는다(SR40-5). ② 값은 /opt/realestate/.env(0600 root)에만 — DEPLOY.md·원장·채팅·커밋 메시지에 적지 않는다(관문은 마크다운 표기를 못 본다 — SR40-4. 절차가 1차 통제다). ③ .env.example 에 칸을 만들면 SECRET_ENV_VARS 에도 같이 넣는다. ④ SR39-7(#40)과 #44(배치 로그 비밀 스캔)를 같은 변경에 넣는다.",
-  "key_insertion_conditional_on": [
-   "선행 필수(유일한 차단 사유) — 공개키 접속 확인 → sshd_config PasswordAuthentication no → 재적용 → 그 다음 키. 이행되면 즉시 승인",
-   "이름을 *_API_KEY 로. *_KEY 로 지어도 위생 관문은 이제 잡지만(#39 해소), 앱 마스킹 SECRET_ENV_VARS 는 정확한 이름이라 안 잡는다(SR40-5)",
-   "#40(.env 키 집합 감시) · #44(배치 로그 비밀 스캔)을 같은 날 함께 넣는다"
-  ],
-  "sr39_judgement_review": {
-   "SR39-1_journald_교차": "조치 확인 · 효과 실물. 다만 두 번째 출처가 조용히 0 이 되는 칸이 남았다(SR40-1). authfake 는 로그가 자라는 동안 발동하지 않아, 운영에서 x9 를 잡는 것은 journald 하나뿐이다",
-   "SR39-1_오탐": "0. 구조적으로 두 수의 어긋남은 경보가 될 수 없다(OR 조건). 서버 실측도 auth.log 0 / journald 0",
-   "SR39-2_x10": "잡힌다(authfake). 대조군(동결만)은 authfresh",
-   "SR39-3_gz": "'설정이 아니라 관측' 으로 판정한 것이 맞다 — compress 서버는 평문 .1 을 본 적이 없어 이 case 에 못 들어온다. 서버 logrotate 재실측(rotate 4 · weekly · compress · delaycompress)으로 전제 확인",
-   "SR39-4_scrub": "닫혔다(12형태 x 2목적지)",
-   "SR39-5_전송경로": "닫혔다. 변이 M2 가 이제 검출된다",
-   "SR39-6_관문": "지목 4이름 확실히 차단. 남는 것은 마크다운 표기(SR40-4 · 오탐 비용 0)",
-   "SR39-7_미구현_판단": "옳다. 근거 셋 — ① SR-039 자신이 #40 을 '키 투입과 함께' 로 잡았다 ② 오늘 T3 는 잡을 것이 0 이다(.env 16키 · ANTHROPIC/NEIS/CLAUDE 계열 0) ③ 이번 라운드가 닫은 것은 전부 '오늘 열려 있는 것' 이다. 다만 조건 #40 은 그대로 살려 두고 구현 주의 2건을 붙였다",
-   "자원_실측_절차위임": "타당했고, 값도 통과다. 내가 서버에서 쟀다 — journalctl -n 1 = 0.088초 · ssh 유닛 5분 조회 = 0.015초(합 ≈0.10초, --fast 전체 0.36초). DEPLOY.md §9-1 ④ 의 임계 0.5초를 크게 밑돈다. 남는 것은 평균이 아니라 꼬리라 timeout 5 가 답이다(#46)"
+  "deploy_approved": false,
+  "deploy_approved_note": "보안 게이트는 PASS(Critical/High 0). 배포 승인은 별개 — 운영본이 3라운드째 앵커 없는 옛 SSHPW_RE(:567 · sha256 b0001419… 불변)이고 kv/send_day·send_count·send_capped 가 전부 비어 있어 상한 기능은 아직 운영에 없다. ⚠️ 선결조건: 상한 코드를 옛 정규식 위에 먼저 얹지 말 것 — 앵커 없는 판에서는 미인증 원격 공격자가 SSH 사용자명 주입으로 sshpw 경보를 만들어 60통 상한을 임의 소진, 다른 모든 경보를 침묵시킬 수 있다(SR44-1 을 High 로 격상시키는 조합). 앵커 판과 상한을 같은 배포에 함께 올릴 것.",
+  "resolved_from_previous": {
+   "SR43-1(무발화 소진)": "부분 해소. _send_quota_commit 이 HTTP 200 이후에만 카운터를 올리고(monitor-lib.sh:296), 상한 통보도 나간 뒤에야 send_capped=1 을 찍는다(:256). 한 통도 도달 없이 채널이 죽는 은밀한 무력화 경로 제거 — 이제 소진에는 사람이 실제 60통을 받는다. 잔존분은 SR44-1 로 재기재.",
+   "CR47-1(상한값 위생)": "해소. RE_MON_SEND_MAX_DAY 가 비숫자·0 이면 기본 60 복귀(:221-223). 방향 승인(안전한 실패=더 시끄러운 쪽). 주입 경로 실측 0건 — RE_MON_* 를 세팅하는 crontab/cron.d/systemd 유닛 없음, monitor.sh 0750 root:root 라 비-root 교체 불가 = 이미 root 여야 함.",
+   "CR47-1(fail-open)": "타당 판정. send_count 손상 시 fail-open 은 비-root 로 악용 불가 — 실측 /var/lib/realestate-monitor 0700 root · kv 0700 root · kv/* 0600 root · /var/lib 0755 root. 동거계정 ubuntu(1000)·autobtc(1001) 접근 전무. 손상 가능 주체는 root 뿐이고 root 는 이미 monitor.sh 자체를 고칠 수 있어 신뢰경계를 넘지 않는다.",
+   "억제 로그 분리": "해소. ALERT-SUPPRESSED-CAP 낱말 분리(:268)로 쿨다운 억제(ALERT-SUPPRESSED)와 관문이 엉키지 않는다.",
+   "sshpw 쿨다운 900": "확인. raise_alert sshpw 900 2곳. 첫 통은 .sent 부재라 즉시 발화(트립와이어 즉시성 유지)."
   },
-  "artifacts_judged_sha256": {
-   "deploy/monitor.sh": "6db8fef287bd8fc0",
-   "deploy/monitor-lib.sh": "a392fef0ac7775ba",
-   "deploy/monitor-selftest.sh": "9fcea947aa5dca8f",
-   "deploy/job-run.sh": "d05750d8a003ea16",
-   "deploy/market-index.sh": "85caa76b462702f5",
-   "changed_this_round": "monitor.sh · monitor-lib.sh · monitor-selftest.sh 3개만(job-run·market-index 는 SR-039 와 동일) — DEPLOY.md §9-1 서술과 일치",
-   "server_still_running": "SR-039 기록과 완전히 동일(monitor 56877480 · monitor-lib 6287631d · job-run 6798a2fa · market-index f62a3db4 · selftest ec24b6d2) = 무단/부분 배포 없음"
-  },
-  "tests": {
-   "pytest": "1,468 passed · 103 skipped · 실패 0 (단독 실행)",
-   "test_script_hygiene": "28 passed (원장 SR-040 추가 후 재실행도 28 passed)",
-   "monitor-selftest": "통과 167 · 실패 0 · 건너뜀 2(윈도우 chmod) · 하네스오류 0",
-   "bash -n": "8파일 실패 0",
-   "MUT-": "시작 0건 / 종료 0건",
-   "harness_note": "첫 pytest 가 14건 실패로 나왔으나 selftest 동시 실행으로 fork 가 고갈된 하네스 사고였다(child_copy: cygheap read copy failed). 단독 재실행 1,468 passed · 해당 3파일 단독 51 passed. 코드 문제 아님 — 이 저장소가 HARN 을 만든 이유와 같은 형태라 같은 규칙으로 기록한다."
-  },
-  "probes_run": [
-   "log() 세탁 침투 — 12형태(DSN·봇토큰·PGPASSWORD·맨 sk-ant-·KakaoAK·Basic·맨 JWT·NEIS_KEY=·ANTHROPIC_KEY=·FIELD_ENCRYPTION_KEY=·credential=·금액) x 2목적지(텔레그램 DRY-RUN 본문 / 감시로그). 전부 차단",
-   "check_sshlogin 원문 추출 드라이버 + 가짜 journalctl(4모드) — x9 운영조건 · x9 동결 · x10 · x10대조 · 정상성장 · 무기록 · journald hit/empty/dead 전이",
-   "위생 관문 재침투 21형태(잡아야 하는 14 · 막으면 안 되는 7)",
-   "위생 관문 확장안의 오탐 비용 — 관문 대상 68파일 전수 x 후보 정규식 2종 = 0건",
-   "관문 변이시험 2종 — log() 의 scrub 파이프 제거 / curl --data-urlencode 를 원문 변수로. 둘 다 검출(NG)",
-   "CR40-8 피해 실측 — 채널 다운 상태에서 raise/clear 의 .active/.sent 처리 비대칭",
-   "서버 읽기전용 실측 — T1/T2(5회전본 전수)/T3 · sshd -T · logrotate · journald(유닛명·5분/24시간 줄수·자원비용) · crontab · 운영로그 권한과 금액/DSN 잔재 · kv 권한 · 감시 스크립트 sha256",
-   "백엔드 델타 인증/인가 키워드 스캔(Depends·current_user·token·owner·user_id·401/403) — 해당 변경 0줄"
+  "findings": [
+   {
+    "id": "SR44-1",
+    "severity": "medium",
+    "cwe": "CWE-703 · CWE-400 · OWASP A09",
+    "title": "발송 상한에 보안 트립와이어 예약 쿼터가 없다 — 공격자 유발 폭주로 당일 로그 전용화(요란한 무력화, 은밀 무력화는 아님)",
+    "where": "deploy/monitor-lib.sh:266 (_send_quota_check 를 키 구분 없이 전 발송에 적용) · deploy/monitor.sh:303 (raise_alert \"oom_$name\" 0 — 유일한 쿨다운 0)",
+    "evidence": "서버 실측 crontab: --fast 가 */5 = 288회/일. 쿨다운 전수 확인 결과 0 인 경보는 oom 단 1종(나머지 900~604800). 컨테이너당 최대 288통/일 → 상한 60을 약 5시간에 소진. 소진 후 sshpw·authedit·authfake·authshrink·logperm·logleak 이 텔레그램에서 사라지고 로그 전용. api5xx 는 쿨다운 3600(24통/일)이라 단독 소진 불가.",
+    "why_not_high": "사람이 먼저 60통을 실제로 받으므로 은밀하지 않다. 원문은 억제 이전에 monitor-lib.sh:326 log \"ALERT $key :: $msg\" 로 항상 로그에 남고, 상한은 자정(send_day 교체)에 자동 해제된다.",
+    "fix": "보안 키(sshpw·sshjournal·authedit·authfake·authshrink·logperm·logleak)를 상한에서 면제. 이들은 쿨다운 900~86400 으로 이미 자체 상한(최대 96통/일)이 있어 폭주 위험이 없다. send_telegram 은 키를 모르므로 raise_alert 에서 플래그(예: RE_MON_SEND_EXEMPT=1)를 넘겨 _send_quota_check 를 건너뛰게 하면 수 줄로 닫힌다. 대안으로 oom 쿨다운을 0→3600 으로."
+   },
+   {
+    "id": "SR44-2",
+    "severity": "low",
+    "cwe": "CWE-703",
+    "title": "send_count fail-open 이 '이번 한 통 통과'가 아니라 카운터 리셋이다",
+    "where": "deploy/monitor-lib.sh:244",
+    "evidence": "비숫자 감지 시 kv_set send_count 0 후 return 0 — 그날 누적분이 통째로 사라진다. kv 가 0600 root 라 공격자 악용 경로는 없으나, 디스크 부분기록이 반복되면 상한이 사실상 무한이 된다.",
+    "fix": "리셋 대신 이번 호출만 통과시키고 blind_add/log 로 손상 사실을 남길 것(monitor.sh:666 의 sshpw_off 처리와 동일 패턴)."
+   },
+   {
+    "id": "SR44-3",
+    "severity": "low",
+    "cwe": "CWE-1188",
+    "title": "SEND_MAX_DAY 에 하한이 없다 — 0 은 막지만 1 은 허용(침묵 효과 유사)",
+    "where": "deploy/monitor-lib.sh:221-223",
+    "evidence": "case 문이 ''|*[!0-9]*|0 만 60 으로 되돌린다. 1~9 같은 유효 소수값은 그대로 수용되어 사실상 전면 침묵에 가깝다. 다만 환경변수 주입 경로 실측 0건(root 한정)이라 잔여 위험은 낮다.",
+    "fix": "하한 도입 — 10 미만이면 10(또는 60)으로 올림."
+   },
+   {
+    "id": "SR44-4",
+    "severity": "medium",
+    "carryover_of": "SR42-5",
+    "cwe": "CWE-116 · OWASP A09",
+    "title": "운영본이 3라운드째 앵커 없는 취약 정규식 — 배포로만 닫힌다",
+    "where": "서버 /opt/realestate/scripts/monitor.sh:567",
+    "evidence": "읽기 전용 실측: SSHPW_RE='Accepted (password|keyboard-interactive)' (줄머리 앵커 없음). sha256 b00014192b5d8576e8d88806e2113c634e61e68d92964b09612cac1e231a7a80 — SR-043 때와 동일 = 그사이 배포 0. monitor-lib.sh a392fef0… 구판. kv/send_day·send_count·send_capped 전부 빈 값 = 상한 기능 운영 미적용. kv/fast_runs_today=275 로 감시 자체는 정상 가동.",
+    "not_blocking_reason": "게이트 통과 전 배포 금지 원칙(CR45-6①)으로 생긴 상태 — SR-043 과 동일 논리로 이번 판정을 차단하지 않는다.",
+    "fix": "게이트 통과 후 앵커 판과 상한을 같은 배포로 동시에 올릴 것(순서 역전 금지)."
+   }
   ],
-  "new_findings": [
-   "SR40-1 medium CWE-778/A09 — 두 번째 출처(journald)가 '살아 있는데 ssh 조회만 0줄' 인 상태를 아무도 못 본다. journalctl --rotate --vacuum-time=1s 는 journalctl 을 죽이지 않으므로 sshjournal 이 안 뜨고, 요약은 'journald 같은 구간 0건 (기대 0/0)' 로 무사고를 선언한다. 코드 주석(monitor.sh:772-775)이 바로 그 명령을 적으면서 sshjournal 이 대응한다고 했는데 대응하지 못한다. 유닛명 변경/소켓 활성화(ssh@0-...service)·Storage=none 으로도 같은 상태가 된다. 무게가 큰 이유: authfake 는 '크기 == 직전 오프셋' 일 때만 발동하는데 이 서버는 auth.log 가 분당 ~9줄 자라므로(Failed 92,349) 그 조건이 성립하지 않는다 = 운영에서 x9 를 잡는 것은 journald 하나뿐이다. 가장 날카로운 증거는 자체검사 안에 있다 — monitor-selftest.sh:1071-1079 의 '(교차 대조군) 두 출처가 다 0 이면 침묵(오탐 0)' 이 바로 이 상태를 '정상' 으로 인증한다. 수정안 5줄(창 안 ssh 메시지 총 줄수를 함께 세고 0 이면 blind). 오늘 값 5분 257줄·24시간 26,528줄이라 오탐 0",
-   "SR40-2 low — monitoring.md:292 가 '높음' 으로 권하는 journalctl --vacuum-size=200M 과 같은 문서 :239-240 의 'journald = T2 두 번째 출처' 가 서로를 모른다. --vacuum-size=200M 자체는 안전하다(내가 쟀다) 그러나 --vacuum-time= 계열은 SR40-1 에 의해 조용히 지나간다. 덧붙여 디스크 92%(여유 2.1G) 는 systemd 기본 SystemKeepFree 15%(3.75G)보다 낮아 journald 가 이미 압박 아래 회수 중이다",
-   "SR40-3 low — authfake 의 사정거리가 주석·문서(monitoring.md 7b-②)가 적은 것보다 좁다. 'x9 같은 길이 덮어쓰기' 는 로그가 자라는 동안 발동하지 않는다(실측: x9 운영조건에서 안 뜸). 구멍이 새로 생긴 것은 아니고(journald 가 덮는다) 문서가 방어를 과장한 것이다 — 이 원장이 세 라운드 연속 교정해 온 잘못과 같은 형태",
-   "SR40-4 low CWE-540 — 위생 관문이 놓치는 7형태가 전부 마크다운이다(표 칸 | NAME | VALUE | · - **NAME** : `v` · `NAME` = v · 한국어 이름표 · 소문자/대시 이름). SR38-7 이 DEPLOY.md 를 범위에 넣은 근거가 '사람이 키를 붙여 넣을 가장 그럴듯한 파일' 인데 그 파일은 78KB 의 마크다운 표다. 오탐 비용 실측 0건(68파일 전수 x 후보 2종). 덧붙여 이 관문은 pytest 이지 커밋 훅이 아니다(.git/hooks 에 비-sample 훅 0개)",
-   "SR40-5 info — 이름 규칙이 관문 말고 한 군데 더 있다. masking.SECRET_ENV_VARS 는 정확한 이름 목록이라 NEIS_KEY/ANTHROPIC_KEY 로 지으면 앱 계층 마스킹이 그 값을 모른다(셸 scrub 은 KEY 접미를 일반 규칙으로 잡으므로 감시·알림은 안전 — 실측). .env.example 대조 검사는 저장소 예시 파일만 보고 서버 /opt/realestate/.env 는 어떤 관문의 시야에도 없다",
-   "SR40-6 info — CR40-8(monitoring.md §8-4 가 세 라운드째 이월) 피해 실측. clear_alert 는 전송 실패해도 .active/.sent 를 지운다. 잃는 것은 '해소 한 통' 이 아니라 사건 자체다 — .active 가 사라지면 일일 요약의 '미해소 경보 N건' 에서도 빠진다. raise_alert 는 정반대(성공할 때만 .sent)라 같은 파일 안에서 대칭이 깨져 있다. 실해는 작다(채널이 죽으면 일일 요약도 안 오므로 사용자는 부재로 안다)",
-   "SR40-7 info — journalctl 이 fast 경로에서 유일하게 시간 제한 없는 외부 호출이다(curl 은 전부 --max-time 8). journald 가 물리면 fast 가 flock 을 쥔 채 멈추고 이후 크론은 rc=0 으로 건너뛰며, fast_dead 를 판정하는 것은 --daily(하루 1회)뿐이라 최대 ~24시간 침묵한다. 자원은 오늘 문제가 아니다(합 ≈0.10초 실측) — 문제는 꼬리다",
-   "SR40-8 info — daily_dead 의 근거 문장이 서버 사실과 다르다. monitor.sh:905-908 과 monitoring.md 8b 는 '크론 2줄을 새로 넣는 배포가 눈앞' 을 긴급성의 근거로 적는데, crontab -l 실측상 */5 와 5 9 * * * 두 줄 다 이미 걸려 있다. 이번 배포는 스크립트 교체다(DEPLOY.md §9-1 도 그렇게 적어 두 문서가 어긋난다). 검사와 유예값(30시간)은 그대로 타당하다"
-  ],
-  "reviewer_self_correction": "첫 pytest 실행을 selftest 와 동시에 돌려 14건 실패를 만들었고, 하마터면 그것을 코드 결함으로 적을 뻔했다. 단독 재실행으로 1,468 passed 임을 확인하고 하네스 사고로 기록했다 — 이 저장소가 HARN 을 만든 이유와 정확히 같은 형태이므로 리뷰어에게도 같은 규칙을 적용한다.",
-  "tripwire_status_today": {
-   "measured_at": "2026-08-02 00:15 KST · 읽기 전용",
-   "T1_app_user": "1건 — 미발동",
-   "T2_password_login": "auth.log 0 · .1 0 · .2/.3/.4.gz 0·0·0 — 미발동. 성공은 전부 publickey(현재 2 · 직전 회전본 1,479) · Failed password 239 + 92,349",
-   "T3_env_keys": "16키 · ANTHROPIC/NEIS/CLAUDE 계열 0 · -rw------- root root — 미발동",
-   "sshd": "permitrootlogin yes · passwordauthentication yes · kbdinteractive no · permitemptypasswords no · pubkeyauthentication yes",
-   "journald_2nd_source": "ssh.service 단일 · 5분 창 257줄 · 24시간 26,528줄 / Accepted 261 / Accepted password 0 · /var/log/journal 영구 2.0G · 자원 0.088+0.015초",
-   "logrotate": "rotate 4 · weekly · compress · delaycompress (실측 — .1 평문 46MB · .2~.4 는 .gz). SR39-3 의 오탐 0 근거 재확인",
-   "ops_logs": "감시로그 444KB · 배치로그 둘 다 9자리수 0 · 쉼표금액 0 · '원' 0 · 평문 DSN 0 · 0640 root:root. nginx 0640 www-data:adm. kv 전부 0600. flock 3개는 0644(옛 코드 — #37 로 해소)",
-   "active_alerts": "0건 · market-index.status last_rc=0 · 51초 · 2026-08-01 04:10:52",
-   "cron": "monitor --fast(*/5) · monitor --daily(5 9 * * *) · market-index(10 4 1 * *) 전부 설치돼 있음"
+  "cap_feature_recommendation": {
+   "verdict": "두라(조건부 존치) — 결정은 PM",
+   "rationale": [
+    "폭주 방어가 실제로 필요하다: oom 쿨다운 0 이 살아 있고 --fast 는 288회/일. 상한을 빼면 컨테이너 1개당 288통, 2개면 576통/일이 가능하며 이는 가정이 아니라 현재 코드에서 직접 도출되는 값이다.",
+    "2라운드 차단의 원인은 기능이 아니라 배치였다 — '판정과 소진을 묶어 보내지도 못한 통을 셌다'는 결함이며 check/commit 분리로 정확히 해소됐다.",
+    "남은 결함(SR44-1)의 해법은 제거가 아니라 예약 쿼터 수 줄이다. 빼면 SR44-1 은 사라지지만 폭주 방어가 0 이 되어 순 손실이다.",
+    "sshpw 쿨다운 900 과 앵커는 위조 유입을 막는 장치이지 볼륨을 막는 장치가 아니다 — oom(쿨다운 0)에는 효과가 없으므로 '이미 막혀 있다'는 근거로 부족하다."
+   ],
+   "conditions": [
+    "(a) 보안 키 상한 면제(SR44-1 해소) 후 배포",
+    "(b) 앵커 판(SR42-1 조치)과 같은 배포로 동시 반영 — 순서 역전 시 미인증 원격 소진이 열린다"
+   ],
+   "if_removed": "상한을 정 뺀다면 최소한 oom 쿨다운을 0→3600 으로 올려 폭주 상한을 대체할 것. 그냥 빼기만 하는 선택지는 권하지 않는다."
   },
-  "risk_acceptance": {
-   "SR36-1": "OPEN / ACCEPTED_RISK 유지 — root SSH + 비밀번호 로그인 허용",
-   "조건": "T1/T2/T3 셋 다 오늘 미발동 실측. T1·T2 는 기계가 지고 T3 만 여전히 사람의 기억(#40 이 그것을 내려놓는다)",
-   "이번_라운드의_변화": "T2 를 지키는 기계가 두 출처가 됐다(journald 교차). 다만 두 번째 출처가 조용히 0 이 될 수 있어(SR40-1) 아직 완전한 이중화가 아니다"
+  "server_measurements": {
+   "state_perms": "/var/lib/realestate-monitor 0700 root:root · kv 0700 · alerts 0700 · kv/* 0600 root · /var/lib 0755 root",
+   "cohabiting_users": "ubuntu(1000) · autobtc(1001) — 둘 다 kv 접근 불가",
+   "cron": "*/5 * * * * monitor.sh --fast (288회/일) · 5 9 * * * monitor.sh --daily",
+   "env_injection": "RE_MON_* 설정 crontab/cron.d/systemd 0건",
+   "script_perms": "/opt/realestate/scripts/monitor.sh · monitor-lib.sh · monitor-selftest.sh 모두 0750 root:root · 상위 디렉터리 0755 root(비-root 교체 불가)",
+   "deployed_hashes": "monitor.sh b00014192b5d8576e8d88806e2113c634e61e68d92964b09612cac1e231a7a80 · monitor-lib.sh a392fef0ac7775bac0946143433f3f3b0709c516aac0c3816a54f4227fbbff64",
+   "quota_state": "kv/send_day · send_count · send_capped 전부 빈 값(상한 미배포) · kv/fast_runs_today=275",
+   "safety": "읽기 전용만. /opt/realestate/scripts/** 수정·삭제 0 · 텔레그램 0통 · monitor-selftest.sh 미실행 · 격리 디렉터리 생성 0(불필요)"
   },
-  "false_positive_verdict": {
-   "journald_교차": "0 — 경보 조건이 OR 이라 두 수의 어긋남만으로는 울지 않는다. 창 경계 ±1 은 구조적으로 경보 불가. 서버 실측도 양쪽 0",
-   "authfake": "0 — 크기·inode·mtime 을 한 번의 stat 으로 읽어 정상 쓰기가 같은 모양을 못 만든다. 대조군(정상 성장·5분 무기록) 침묵 확인",
-   "daily_dead": "0 — 유예 30시간 > 일일 최악 대기 ~24시간. 서버에 last_daily_run 이 이미 있어 배포 당일도 조용하다",
-   "배포당일_전반": "새 kv 5키가 서버에 전부 없지만 각 사용처가 빈 값 검사로 막혀 있어 첫 실행에서 우는 것이 하나도 없다(코드 경로 확인). auth.log 가 오늘 00:00 에 회전했는데 그 상태도 how=grown 이라 조용하다"
-  },
-  "convergence_opinion": "코드는 수렴했고, 남은 발산은 서술이다. 신규 지적 수는 9→7→8 로 줄지 않았지만 등급이 바뀌었다 — 이번 8건 중 medium 은 1건(SR40-1)뿐이고 나머지는 low 3 · info 4 이며 그중 4건은 코드가 아니라 문서·절차 문장이다(SR40-2/3/8 · SR40-5). 근거 셋: ① 이번에 시험한 회피 중 새로 뚫린 것은 SR40-1 하나이고 x9·x9b·x10 은 전부 잡혔다 ② 자체검사가 78~80 요동 → 139 → 167·HARN 0 으로, 관문이 3라운드 연속 변이로 죽는 것이 확인됐다 ③ SR-039 가 '담당자 몫' 으로 남긴 오탐률을 이번에 쟀고 0 이다. 다음 라운드는 SR40-1 하나로 좁힐 수 있다고 본다. 실제 위험은 이제 코드가 아니라 '배포되지 않은 상태'(#37)와 'PasswordAuthentication yes' 에 있다.",
-  "could_not_verify": [
-   "ext4 inode 재사용 — 로컬은 NTFS/MSYS. 서버는 읽기 전용 지시라 재현하지 않았다(SR-038 의 정황 판단 유지)",
-   "리눅스(서버)에서의 monitor-selftest.sh 재실행 — 서버가 아직 옛 코드라 이번 델타의 근거가 못 된다. #35 로 #37 직후에 둔다(윈도우 SKIP 2건이 거기서 돈다)",
-   "CR41-7 의 stat↔읽기 경합 — 결정적 재현 불가라 구조 검사로 남겨 둔 것 그대로. 최악이 중복 계수(오탐)이지 누락이 아님",
-   "journald 의 rate limit(RateLimitBurst) 이 Accepted 를 떨어뜨릴 가능성 — 서버 설정이 기본값이라 이론상 가능하나 실측 창에서 관측되지 않았다. 방향이 '과소 계수' 라 오탐이 아니라 탐지 약화이고, SR40-1 의 수정안(총 줄수 계수)이 같이 덮는다",
-   "SR40-1 수정안의 실서버 오탐률 — 5분 257줄·24시간 26,528줄 실측으로 '0줄' 이 정상에 없다는 것만 확인했다. 구현·측정은 담당자 몫"
-  ],
-  "log": "docs/03-build/security-review-log.md #SR-040",
-  "revision": "SR-039 — SR-038 지적 3건 조치 재검증. 조건 33건 · 키 투입 false(사유: PasswordAuthentication no 미이행)."
+  "note": "fail2ban 은 사용자 지시에 따라 이번 결론에 포함하지 않았다."
  },
  "open_findings": [
+  {
+   "id": "SR41-1",
+   "verdict": "OPEN",
+   "severity": "high",
+   "blocks": "차단 — 다음 라운드 최우선",
+   "title": "journald 교차의 눈멂 탐지(jtot==0)가 '저널을 지웠다'를 못 잡는데, 문서 3곳이 잡는다고 적었다",
+   "where": "deploy/monitor.sh:876 · docs/05-monitoring/monitoring.md 7b-4 · 8-6 · deploy/DEPLOY.md 9-1",
+   "found_by": "SR-041",
+   "cwe": "CWE-778 / CWE-223",
+   "owasp": "A09:2021",
+   "evidence": [
+    "서버 24h 실측: ssh 유닛 37,632줄 · 평균 간격 2.30초 · 최장 무음 104초 · 간격 120초 이상 0회",
+    "--vacuum-time 은 과거만 지운다: --since @(now-3s)=4줄 · -10s=8줄 · -60s=51줄 (즉시 재충전)",
+    "5분 버킷 289개의 '마지막 메시지→버킷 끝' 무음 평균 13.2초(최대 95초) → 무작위 vacuum 탐지확률 13.2/300 = 약 4.4%",
+    "공격자가 vacuum 직후 ssh 이벤트 1회를 만들면 0% — ssh 접속 1회가 ssh 유닛 2줄(Accepted publickey · session opened)을 만든다(실측)",
+    "monitoring.md 7b-4 는 한 문장 안에서 '새 메시지가 즉시 들어온다' 와 'ssh 조회만 0줄이 된다' 를 함께 적어 스스로 모순",
+    "자체검사 (교차 j2) 픽스처는 FAKE_JOURNAL=none.txt = 창 전체가 0줄인 저널 — 현실의 vacuum 후 상태가 아니다"
+   ]
+  },
+  {
+   "id": "SR41-2",
+   "verdict": "OPEN",
+   "severity": "high",
+   "blocks": "차단 — 다음 라운드 최우선",
+   "title": "SSHPW_RE 에 앵커가 없어 원격 미인증 공격자가 T2 트립와이어(sshpw)를 무한히 헛울리게 만들 수 있다 · 두 출처가 같은 오염을 공유한다",
+   "where": "deploy/monitor.sh:567(SSHPW_RE) · :843(journald 계수) · :889(jd_gap) · :933(raise_alert sshpw 0)",
+   "found_by": "SR-041",
+   "cwe": "CWE-117 / CWE-93 / CWE-400",
+   "owasp": "A09:2021",
+   "evidence": [
+    "실증(안전 문자열): ssh 'sr41 probe spaced'@host → auth.log 와 journald -o cat 양쪽에 'Invalid user sr41 probe spaced from ...' 원문 그대로",
+    "실증(인증 시도조차 불필요): TCP 배너 한 줄 → 'client sent invalid protocol identifier \"sr41 banner probe spaced\"' 양쪽에 원문 그대로",
+    "문자열을 'Accepted password' 로 바꾸면 delta 1 이상 → raise_alert sshpw 0 = 쿨다운 0 = 5분마다 매번 발송(하루 288통)",
+    "전역 발송 상한 SR36-5 는 monitoring.md 8-4 에 아직 열린 것으로 남아 있다 · 봇은 동거 서비스 pjt12-adsense 와 공유",
+    "이번 델타가 추가한 jd_gap('auth.log 가 사후에 편집됐을 수 있다')도 창 경계 타이밍으로 원격 위조 가능 = 거짓 포렌식",
+    "실제 발화 실증은 사용자 텔레그램이 울기 때문에 일부러 하지 않았다"
+   ]
+  },
+  {
+   "id": "SR41-3",
+   "verdict": "OPEN",
+   "severity": "medium",
+   "blocks": "비차단 — 문서 정정 + 검사 1줄",
+   "title": "'두 번째 출처' 는 수집 경로가 독립이 아니다 — journald 를 내리면 auth.log 도 함께 멈추고 jd_blind 가 구조적으로 발동 불가",
+   "where": "docs/05-monitoring/monitoring.md 7b-3 · deploy/monitor.sh:876(new_sshd 2줄 이상 조건)",
+   "found_by": "SR-041",
+   "cwe": "CWE-654",
+   "owasp": "A09:2021",
+   "evidence": [
+    "서버 실측: /dev/log -> /run/systemd/journal/dev-log · syslog.socket active · /etc/rsyslog.conf 는 imuxsock 만 로드(imjournal 없음)",
+    "즉 auth.log 는 journald 의 ForwardToSyslog 산물 — 보관은 독립이나 수집은 공유",
+    "journald 를 소켓까지 정지하면 auth.log 도 얼어 new_sshd=0 → jd_blind 조건 불성립 → authfresh 6시간이 유일한 신호"
+   ]
+  },
+  {
+   "id": "SR41-4",
+   "verdict": "OPEN",
+   "severity": "medium",
+   "blocks": "비차단",
+   "title": "new_sshd 가 grown 분기에서만 계산돼 auth.log 가 흔들린 바로 그 실행에서 교차 눈멂 판정이 꺼진다",
+   "where": "deploy/monitor.sh:700-706",
+   "found_by": "SR-041",
+   "cwe": "CWE-223",
+   "owasp": "A09:2021",
+   "evidence": [
+    "case how in grown) 안에만 new_sshd 계산이 있다. rotated/rotated_gz/replaced/shrunk 는 초기값 0",
+    "결과: auth.log truncate/교체 + 저널 손보기를 같은 실행에 하면 저널 쪽 신호 없음(authshrink 만 뜬다)",
+    "주간 로테이션(일요일 00:00)마다도 한 번씩 꺼진다"
+   ]
+  },
+  {
+   "id": "SR41-5",
+   "verdict": "OPEN",
+   "severity": "medium",
+   "blocks": "비차단",
+   "title": "미래창 프로브가 시계 되돌림에서 교차 판정을 스스로 영구 보류시킨다",
+   "where": "deploy/monitor.sh:834-841",
+   "found_by": "SR-041",
+   "cwe": "CWE-754",
+   "owasp": "A09:2021",
+   "evidence": [
+    "프로브 창 [now+3600, now+3660]. 시계가 1시간 이상 뒤로 점프하면 점프 전 항목이 그 창에 들어와 jd_probe_bad=1",
+    "그 상태에서 경보도 해소도 안 한다 = 탐지 무력화. root 공격자가 시계로 유도 가능",
+    "안전 방향 확인: jd_win 이 음수가 되어 120초 이상 조건이 거짓 → sshjournal 오탐은 안 난다",
+    "사실이 logblind 한 줄(쿨다운 6시간)에 묻힌다"
+   ]
+  },
+  {
+   "id": "SR41-6",
+   "verdict": "OPEN",
+   "severity": "low",
+   "blocks": "비차단",
+   "title": "새 '판정 보류' 안내 명령의 epoch 이 scrub 에 잘려 실행 불가",
+   "where": "deploy/monitor.sh:874 · deploy/monitor-lib.sh scrub 금액 규칙 1",
+   "found_by": "SR-041",
+   "cwe": "CWE-1078",
+   "owasp": "-",
+   "evidence": [
+    "로컬 재현: 해당 문자열을 scrub 에 통과시키면 --since '@<num>' 이 된다(10자리 epoch 이 9자리 이상 규칙에 걸린다)",
+    "그 상태에서 사람이 받는 유일한 조치 안내가 실행 불가",
+    "수정: date -d @... '+%F %T' 로 사람이 읽는 시각을 쓴다(9자리 연속 숫자가 안 생긴다)"
+   ]
+  },
+  {
+   "id": "SR41-7",
+   "verdict": "OPEN",
+   "severity": "low",
+   "blocks": "비차단",
+   "title": "배포 절차가 스테이지 사본을 sha256 대조 전에 root 로 실행한다 · 스테이지 정리 단계 없음",
+   "where": "deploy/DEPLOY.md 9-1 단계 2/3",
+   "found_by": "SR-041",
+   "cwe": "CWE-494",
+   "owasp": "A08:2021",
+   "evidence": [
+    ".stage → 검사 → mv -f 전환 자체는 개선(제자리 덮어쓰기 제거 · install -m 750 root:root · rename 원자성 · 롤백 동일)",
+    "그러나 sha256 5/5 대조는 3단계(교체 뒤)에 있고 2단계는 검증 없이 bash monitor-selftest.sh 를 root 로 실행한다",
+    "/root/monitor-stage 정리 단계가 없어 옛 감시 스크립트 사본이 /root 에 쌓인다(/root 0700 이라 노출은 아님 — 위생)"
+   ]
+  },
+  {
+   "id": "SR41-8",
+   "verdict": "OPEN",
+   "severity": "low",
+   "blocks": "비차단",
+   "title": "DEPLOY.md 기대 숫자 표가 CR45-1 반영 전 값이다",
+   "where": "deploy/DEPLOY.md 9-1 기대 숫자 표",
+   "found_by": "SR-041",
+   "cwe": "CWE-1059",
+   "owasp": "-",
+   "evidence": [
+    "표: 서버 임시 사본 193/0/1. 오늘 실측(/root/sec-sr41/copy): 197 · 0 · 1 · HARN 0 · rc=0",
+    "CR45-1 이 검사 4건(교차 j3)을 더한 뒤 표 미갱신 — 제자리(/opt) 행 197 도 같은 이유로 낡았을 것(201 예상)",
+    "문서가 스스로 '판정은 실패 0 · HARN 0 · rc=0' 이라 적었으므로 차단은 아니다"
+   ]
+  },
+  {
+   "id": "SR41-9",
+   "verdict": "OPEN",
+   "severity": "medium",
+   "blocks": "프로세스 — 차단은 아니나 반복되면 게이트가 무의미해진다",
+   "title": "이 델타가 보안 게이트 통과 전에 이미 운영 서버에 반영돼 있다",
+   "where": "/opt/realestate/scripts/monitor*.sh · deploy/DEPLOY.md 9-1 · CLAUDE.md",
+   "found_by": "SR-041",
+   "cwe": "CWE-1188",
+   "owasp": "A08:2021",
+   "evidence": [
+    "sha256 3/3 로컬 작업트리 == 서버(b0001419... · a392fef0... · 58f5a279...) · 서버 mtime Aug 3 17:57",
+    "DEPLOY.md 9-1: '게이트(code-review / security-review)가 둘 다 통과한 뒤에만 실행한다'",
+    "CLAUDE.md: 3단계 리뷰 게이트는 하드 스톱",
+    "code-review-log.md 에 CR-045 항목 없음(최신은 CR-044 · 2026-08-02)",
+    "SR-040 은 같은 항목을 관문으로 두고 '무단/부분 배포 없음' 을 확인했었다 — 이번에는 붉다"
+   ]
+  },
   {
    "id": "SR37-1",
    "verdict": "OPEN",
@@ -4118,11 +4166,23 @@
   }
  ],
  "deployment_readiness": {
-  "status": "APPROVED_CONDITIONAL",
-  "verified_by": "SR-036R (security, passed · 차단 0 · 조건 22건) · CR-039 (code, passed). code_review 는 건드리지 않았다.",
-  "date": "2026-08-01",
-  "scope": "a76d698 이후 미커밋 델타 — 운영 감시 시스템(root 크론 3건, 이미 가동 중) · CR39-2 예산 상한 조회기 · 날짜 취약 테스트 수정",
-  "note": "게이트 열림. 커밋을 먼저 하는 것이 지금 가장 큰 보안 이득이다 — 서버에서 root 로 도는 스크립트 4개가 git 밖 untracked 다(오늘 sha256 4/4 일치는 오늘의 스냅숏일 뿐). SR36-1(root 비밀번호 SSH)은 소유자 위험수용으로 열려 있고 T1~T3 가 걸려 있다 — 특히 '나 말고 다른 사람 계정을 승인하는 날'에는 SSH 를 먼저 잠가야 한다. SR36-2(배치 로그 0644)는 지금 처리 권고."
+  "status": "APPROVED",
+  "verified_by": "CR-048 (passed · H 0) · SR-044 (passed · Critical/High 0)",
+  "date": "2026-08-04",
+  "scope": "커밋 전 델타 — deploy/monitor.sh · monitor-lib.sh · monitor-selftest.sh · DEPLOY.md · docs/05-monitoring/monitoring.md",
+  "precondition": "⛔ SR44-4 — **앵커 판과 발송 상한을 같은 배포에 함께 올릴 것.** 상한만 옛(앵커 없는) 정규식 위에 얹으면, 미인증 원격 공격자가 사용자명에 'Accepted password for root' 를 넣어 60통을 임의로 태우고 **다른 모든 경보를 침묵**시킬 수 있다 (SR44-1 Medium → High 로 격상되는 조합). 이 델타는 둘을 함께 담고 있으므로 통째로 올린다.",
+  "carried_over": [
+   "SR44-1 보안 키 상한 면제(M)",
+   "CR48-2 일일 요약 상한 면제(M)",
+   "CR48-1 HTTP200 커밋 경로 관문 0(M)",
+   "CR48-3 DEPLOY.md 손검사에 RE_MON_STATE 누락(M)",
+   "SR41-3/4/5 · SR41-7/8 · SR42-4 · SR43-2/3 · CR46-4 · CR47-6 · CR47-8~10"
+  ],
+  "previous": {
+   "status": "BLOCKED",
+   "verified_by": "SR-041 (security, FAILED · 차단 2건). code_review 는 건드리지 않았다.",
+   "date": "2026-08-03"
+  }
  },
  "needs_db_carryover": {
   "recorded_by": "SR-031 (security-reviewer, herdr re-review 대행)",

@@ -79,6 +79,12 @@ ACCESS_FRESH_MAX_HOURS="${RE_MON_ACCESS_FRESH_MAX_HOURS:-24}"
 #   서버는 `Failed password` 가 88,316건 쌓여 있어 auth.log 가 상시 갱신된다 —
 #   6시간이면 오탐이 사실상 0이고, rsyslog 정지/파이프 파손은 확실히 잡힌다.
 AUTH_FRESH_MAX_HOURS="${RE_MON_AUTH_FRESH_MAX_HOURS:-6}"
+# journald 교차가 **실질적으로** 도는지 판정하는 두 문턱 (SR40-1).
+#   근거·실측은 check_sshlogin ③b 주석에 있다. 요약: 5분 창에서 ssh 유닛 메시지가
+#   0줄인 것은 이 서버에 존재하지 않지만(288버킷 중 0개), 1분 창은 0줄일 수 있다
+#   (1,440버킷 중 30개). 그래서 **창 길이**와 **auth.log 쪽 sshd 줄 수**를 함께 본다.
+JD_MIN_WINDOW="${RE_MON_JD_MIN_WINDOW:-120}"   # 이보다 짧은 창은 판정하지 않는다
+JD_MIN_SSHD="${RE_MON_JD_MIN_SSHD:-2}"         # 경계 ±1 줄을 흡수한다
 # 시장지수 배치의 job 이름 — 감시가 '이번 달에 배치가 돌았는가'를 여기서 읽는다(CR42-1).
 MARKET_JOB_NAME="${RE_MON_MARKET_JOB:-market-index}"
 
@@ -268,6 +274,17 @@ check_oom() {
     cur=$(awk '$1=="oom_kill"{print $2}' "$p/memory.events" 2>/dev/null)
     [ -n "$cur" ] || { add "OOM     : $name memory.events 를 못 읽음"; continue; }
     prev=$(kv_get "oomkill_$name")
+    # ⛔ CR47-4 — 상태가 숫자가 아니면 아래 `-lt`·`$((…))` 가 터져 **감시가 죽는다**.
+    #    죽은 감시는 침묵과 구별되지 않는다. 기준값을 다시 잡되 **그렇다고 말한다.**
+    case "$prev" in
+      ''|*[!0-9]*)
+        if [ -n "$prev" ]; then
+          blind_add "kv/oomkill_$name 가 손상됐다 — 그 사이 OOM 을 셀 수 없다(기준값을 다시 잡는다)"
+          add "OOM     : $name 저장된 카운터가 숫자가 아니다 — 기준값을 다시 잡는다"
+        fi
+        prev=""
+        ;;
+    esac
     if [ -z "$prev" ]; then
       kv_set "oomkill_$name" "$cur"
       add "OOM     : $name 기준값 설정 (누적 oom_kill=$cur · 이 값 자체는 알리지 않는다)"
@@ -473,6 +490,16 @@ check_api5xx() {
   cur=$(grep -cE '"(GET|POST|PUT|PATCH|DELETE) /api/[^ "]* HTTP/[0-9.]+" 5[0-9][0-9] ' "$ACCESS_LOG" 2>/dev/null)
   cur=${cur:-0}
   prev=$(kv_get api5xx); prev=${prev:-}
+  # ⛔ CR47-4 — 같은 이유. 숫자가 아니면 기준값을 다시 잡고 **그렇다고 말한다.**
+  case "$prev" in
+    ''|*[!0-9]*)
+      if [ -n "$prev" ]; then
+        blind_add "kv/api5xx 가 손상됐다 — 그 사이 5xx 를 셀 수 없다(기준값을 다시 잡는다)"
+        add "API 5xx : 저장된 카운터가 숫자가 아니다 — 기준값을 다시 잡는다"
+      fi
+      prev=""
+      ;;
+  esac
   kv_set api5xx "$cur"
   if [ -z "$prev" ]; then
     add "API 5xx : 기준값 설정 (현재 파일 누적 ${cur}건)"
@@ -489,6 +516,12 @@ check_api5xx() {
   add "API 5xx : 이번 구간 ${delta}건 (현재 파일 누적 ${cur}건)"
   if [ "$delta" -ge "$API5XX_MIN" ]; then
     raise_alert api5xx 3600 "/api/ 응답에 5xx ${delta}건 — 헬스체크가 200 이어도 기능이 죽었을 수 있다(지도·추천). 확인: grep ' 5[0-9][0-9] ' $ACCESS_LOG | tail"
+  else
+    # ⛔ CR44-9 — 형제(`logperm`·`logleak`·`logfresh`)는 다 꺼지는데 이것만 안 꺼져서
+    #    5xx 가 한 번 나면 일일 요약 머리말이 계속 `미해소` 였다. `API5XX_MIN=1` 이라
+    #    문턱도 낮다. 여기까지 왔다는 것은 **로그를 실제로 읽고 델타를 쟀다**는 뜻이므로
+    #    (못 읽었으면 위에서 blind_add 하고 돌아갔다) clear 를 부를 자격이 있다.
+    clear_alert api5xx "/api/ 5xx 이번 구간 ${delta}건 (누적 ${cur}건)"
   fi
 }
 
@@ -552,13 +585,62 @@ check_api5xx() {
 #
 #    **회전본으로 설명되지 않으면 조용히 넘기지 않는다.** 못 본 것은 못 본 것이다.
 # ============================================================================
-SSHPW_RE='Accepted (password|keyboard-interactive)'
-_sshpw_grep() { grep -cE "$SSHPW_RE" 2>/dev/null; }
+# ⛔ SR41-2 — **앵커가 없으면 공격자가 원격에서 이 경보를 켤 수 있다.**
+#    예전 정규식은 `Accepted (password|keyboard-interactive)` 로 **줄 어디에 있든** 걸렸다.
+#    그런데 사용자명·프로토콜 식별자는 **공격자가 정하고**, sshd 는 그것을 로그에 적는다:
+#      `sshd[…]: Invalid user <공격자가 고른 문자열> from <IP> port <N>`
+#      `sshd[…]: client sent invalid protocol identifier "<공격자가 고른 문자열>"`
+#    거기에 `Accepted password` 를 넣으면 `raise_alert sshpw` 가 뜬다 — 그리고 그 경보는
+#    **쿨다운 0**(T2 트립와이어라 즉시·매번)이라 5분마다, 하루 **288통**이 나간다.
+#    텔레그램 봇은 동거 서비스와 공유다. 즉 **원격에서 우리 경보 채널을 죽일 수 있었다.**
+#    보안리뷰가 안전한 문자열(`sr41 probe spaced`)로 두 경로 모두 실증했다.
+#    → sshd 가 **직접 쓴 줄의 머리**에만 걸리게 앵커한다. 사용자명은 항상 `Invalid user `·
+#      `for invalid user ` 뒤에 오므로 접두부 앵커를 통과할 수 없다.
+# ⛔ SR42-1 — **접두부만 붙이는 것으로는 부족했다.** `grep -E` 는 **부분일치**라
+#    공격자가 접두부까지 통째로 보내면 그대로 걸린다(보안리뷰 실증 · 인증 없이 TCP 1회):
+#      TCP 로 붙어 `sshd[9]: Accepted password for q` 를 프로토콜 식별자로 보내면:
+#      → `… sshd[3775353]: error: kex_exchange_identification: client sent invalid
+#         protocol identifier "sshd[9]: Accepted password for q"`
+#      안쪽 `sshd[9]: Accepted password for ` 가 일치한다. 앵커가 아니었다.
+#    → **줄의 진짜 머리**부터 고정한다. syslog 접두부(월 일 시각 호스트)를 지나
+#      **첫 번째** `sshd[pid]: ` 바로 뒤가 `Accepted` 여야 한다. 주입된 문자열은 항상
+#      `error:` · `Invalid user ` 같은 것 뒤에 오므로 이 형태를 만들 수 없다.
+#    실측(이 서버): 이 앵커가 실제 sshd 줄 **62,110개 전부**를 잡는다(손실 0).
+# ⛔ CR46-2 — 데몬 이름을 `sshd` 로 박아 두면 **OpenSSH 9.8+ 에서 전부 0 이 된다**
+#    (9.8 부터 성공 로그를 `sshd-session[…]` 가 쓴다). 그러면 새 프로브는 `0/0` 이라
+#    **침묵**하고 — 옛 프로브는 같은 파일에서 울었다 — 진짜 비밀번호 로그인을 놓친 채
+#    요약은 `이번 구간 0건 (기대 0)` 이라고 적는다. 즉 **개선이 퇴행이었다**(리뷰 실측).
+SYSLOG_HEAD='^[A-Z][a-z][a-z] [ 0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9] [^ ]+ '
+# ⛔ SR42-2 — OpenSSH 실제 문자열은 `Accepted keyboard-interactive/pam for` 다.
+#    `keyboard-interactive for` 만 적었더니 **PAM 경유 로그인을 통째로 놓쳤다**(퇴행).
+#    이 서버는 `kbdinteractiveauthentication no` 라 잠복이었지만,
+#    **PAM 2FA 도입이 정확히 그 설정을 켜는 일**이다 — 보안을 높이는 변경이 트립와이어를 끈다.
+SSHPW_METHOD='(password|keyboard-interactive(/[a-z]+)?)'
+SSHPW_RE="${SYSLOG_HEAD}sshd(-session)?\[[0-9]+\]: Accepted ${SSHPW_METHOD} for "
+# ⚠️ journald `-o cat` 은 **메시지 본문만** 준다(접두부가 없다) — 같은 정규식을 쓰면
+#    영영 0건이 되어 교차가 조용히 무력해진다. 그래서 줄 **머리**에 앵커한 짝을 따로 둔다.
+#    이쪽은 `^` 가 곧 메시지 머리라 주입이 불가능하다(주입된 줄은 `error:`/`Invalid` 로 시작한다).
+SSHPW_JD_RE="^Accepted ${SSHPW_METHOD} for "
+_sshpw_grep()    { grep -cE "$SSHPW_RE" 2>/dev/null; }
+_sshpw_grep_jd() { grep -cE "$SSHPW_JD_RE" 2>/dev/null; }
+# 이번 구간에 auth.log 가 받은 **sshd 줄**을 센다(③b 의 교차 실효성 판정에 쓴다).
+# auth.log 는 sshd 말고도 자란다 — 실측(서버 auth.log 최근 5,000줄 중 sshd 아닌 79줄):
+# `CRON[…]: pam_unix(cron:session)` · `systemd-logind[…]: Removed session` ·
+# `systemd: pam_unix(systemd-user:session)`. 그래서 "auth.log 가 자랐다" 는 근거가 못 된다.
+SSHD_RE='sshd(-session)?\[[0-9]+\]'
+# ⛔ CR45-1 — **ssh 저널 조회는 반드시 이 함수를 통한다.** 출력 형식(`-o cat`)이 여기
+#    한 곳에만 있어야, 프로브(빈 결과가 정말 빈 출력인가)와 본질의가 **같은 형식**을 쓴다.
+#    둘이 갈라지면 프로브는 깨끗한데 본질의만 메타줄을 받는 상태가 만들어지고,
+#    그때 `jtot` 은 늘 ≥1 이라 눈멂 탐지가 **조용히 죽는다**(리뷰어가 그 변이로 재현했다).
+#    ⚠️ 여기에 `-o` 를 추가로 붙여 부르지 말 것 — 나중 것이 이기므로 프로브만 무력화된다.
+_jssh() { journalctl -u ssh -u sshd --no-pager -o cat "$@" 2>/dev/null; }
 check_sshlogin() {
   local size off ino prev_ino prev_at now_s cand cmt delta base old_size how explained=0 tail_old=0
   local rot_strong=0 rot_weak=0 gz_only=0 old_short=0 r1_ino="" r1_size="" prev_r1_ino prev_r1_size
-  local amt a_age=0 auth_frozen=0 edit_why="" gap_why=""
+  local amt a_age=0 auth_frozen=0 edit_why="" gap_why="" new_sshd=0
   local prev_amt auth_fake=0 jd="" jd_ok=0 jd_txt="교차 불가" jd_gap="" prev_jd since
+  local jbuf="" jtot=0 jd_blind=0 jd_win=0 jprobe="" jd_probe_bad=0
+  local _anchor_sshd=0 _anchor_head=0 _m_unknown=""
   if ! readable "$AUTH_LOG"; then
     add "SSH     : 검사 못 함 — $AUTH_LOG 없음/못 읽음"
     blind_add "SSH 비밀번호 로그인 감시 대상 없음/못읽음($AUTH_LOG)"
@@ -572,6 +654,20 @@ check_sshlogin() {
   size=${size:-0}
   now_s=$(date +%s)
   off=$(kv_get sshpw_off)
+  # ⛔ CR46-6 — **상태가 깨졌을 때 조용히 기준값으로 돌아가면 안 된다.**
+  #    `kv/sshpw_off` 가 숫자가 아니면(디스크 손상 · 부분 기록 · 손댐) 예전에는
+  #    빈 값처럼 취급돼 **기준값 재설정**으로 흘렀고, 요약은 `이번 구간 0건 (기대 0)`
+  #    이라고 적었다 — 그 사이 구간을 **아무도 안 센 채로** 무사고를 선언한 것이다.
+  #    (리뷰가 두 라운드 연속 같은 형태를 지적했다: 못 읽은 것이 '없음'으로 보인다.)
+  case "$off" in
+    ''|*[!0-9]*)
+      if [ -n "$off" ]; then
+        add "SSH     : 저장된 오프셋이 숫자가 아니다 — 못 본 구간을 셀 수 없다(기준값을 다시 잡는다)"
+        blind_add "kv/sshpw_off 가 손상됐다 — 그 사이 구간의 비밀번호 로그인 성공을 셀 수 없다($AUTH_LOG)"
+      fi
+      off=""
+      ;;
+  esac
   prev_ino=$(kv_get sshpw_ino)
   prev_at=$(kv_get sshpw_at)
   prev_r1_ino=$(kv_get sshpw_r1_ino)
@@ -616,6 +712,15 @@ check_sshlogin() {
   #       바꾼다. 크기·inode 는 보존되고 **mtime 만 바뀐다**. 그 하나가 유일한 증거다.
   #   ⚠️ 오탐 0의 조건이 위의 **한 번의 stat** 이다(따로 읽으면 정상 쓰기가 이 모양이 된다).
   #   ⚠️ 회전·교체·축소는 크기나 inode 가 달라지므로 여기 안 걸린다 — 그쪽은 ①②가 본다.
+  #   ⛔ **사정거리를 과장하지 않는다(SR40-3 · 실측).** 위 둘째 항목은 `size == off`,
+  #      즉 **창 안에 auth.log 가 한 바이트도 안 늘었을 때만** 성립한다. 그런데 이 서버는
+  #      `Failed password` 가 분당 ~9줄 쌓여 **5분 창이 항상 자란다**(같은 사실이 바로 위
+  #      `authfresh` 임계 6시간의 근거다). 즉 **운영 조건의 x9 는 여기서 안 잡힌다** —
+  #      직접 재서 확인했다(`how=grown` 이라 이 if 에 들어오지도 않는다).
+  #      운영에서 x9 를 반증하는 것은 아래 ③b 의 **journald 교차 하나뿐**이고,
+  #      그래서 그 교차가 **살아 있는 척만 하는 상태**를 ③b 가 따로 잡는다(SR40-1).
+  #      여기 남는 실효 범위는 ① `touch` 신선도 위조(x10)와 ② 로그가 얼어 있는 동안의
+  #      같은 길이 덮어쓰기다. 그 둘은 실재하므로 검사는 유지한다.
   prev_amt=$(kv_get sshpw_mtime)
   [ -n "$amt" ] && kv_set sshpw_mtime "$amt"
   if [ -n "$amt" ] && [ -n "$prev_amt" ] && [ -n "$off" ] && [ -n "$ino" ] && [ -n "$prev_ino" ] &&
@@ -627,6 +732,31 @@ check_sshlogin() {
     raise_alert authfake 21600 "auth.log 의 mtime 은 새것인데 크기가 ${size}바이트 그대로다 — append-only 로그에서는 일어나지 않는 조합이다. ① touch 로 신선도 증거만 위조했거나(로그는 얼어 있다) ② 이미 기록된 구간을 같은 길이로 덮어썼을(흔적 삭제) 가능성이다. 어느 쪽이든 그 구간의 비밀번호 로그인 성공은 셀 수 없다. 확인: ls -l --time-style=full-iso ${AUTH_LOG} · systemctl status rsyslog · journalctl -u ssh --since -1h | grep Accepted"
   fi
 
+  # ⛔ SR41-2/SR42-2/SR42-3 (짝) — **앵커를 달았으면 두 가지를 더 재야 한다.**
+  #    ① 앵커가 이 호스트 형식에 맞는가  ② 우리가 분류 못 하는 성공 메서드가 있는가.
+  #    둘 다 **미탐**이고, 미탐은 조용하다 — `0건` 과 `못 셌다` 가 같아 보인다.
+  #    ⚠️ **예전 프로브는 `Accepted publickey` 를 부분일치로 셌다**(SR42-3). 그러면 공격자가
+  #       배너에 그 문자열을 넣는 것만으로 "형식이 다르다" 를 띄울 수 있었다 —
+  #       하필 **눈멂을 보고하는 채널**을 원격에서 오염시키는 길이었다.
+  #       → 두 수 모두 **줄머리 앵커로만** 센다. 공격자는 줄의 머리를 만들 수 없다.
+  _anchor_sshd=$(grep -acE "sshd(-session)?\[[0-9]+\]: " "$AUTH_LOG" 2>/dev/null); _anchor_sshd=${_anchor_sshd:-0}
+  _anchor_head=$(grep -acE "${SYSLOG_HEAD}sshd(-session)?\[[0-9]+\]: " "$AUTH_LOG" 2>/dev/null); _anchor_head=${_anchor_head:-0}
+  if [ "$_anchor_sshd" -gt 0 ] && [ "$_anchor_head" -eq 0 ]; then
+    add "SSH     : auth.log 줄머리 형식이 앵커와 다르다 — 비밀번호 로그인 성공을 못 셀 수 있다(sshd 줄 ${_anchor_sshd}개 중 줄머리 일치 0건)"
+    blind_add "auth.log 줄머리 형식이 SSHPW_RE 앵커와 다르다 — T2 가 0건을 '없다'로 잘못 말할 수 있다($AUTH_LOG)"
+  fi
+  # ⛔ SR42-2 — `Accepted <메서드>` 중 우리가 **비밀번호 계열인지 판정 못 하는 것**을 찾는다.
+  #    `publickey`·`none` 은 정상이고, 나머지(`hostbased`·`gssapi-*`·새 메서드)는 판정 불가다.
+  #    이것이 `keyboard-interactive/pam` 같은 퇴행을 **구조적으로** 잡는 자리다 —
+  #    메서드 이름을 하나씩 적어 두는 방식은 다음 이름이 생기면 또 조용히 뚫린다.
+  _m_unknown=$(grep -aoE "${SYSLOG_HEAD}sshd(-session)?\[[0-9]+\]: Accepted [a-z][a-z/-]*" "$AUTH_LOG" 2>/dev/null \
+               | sed -E 's/.*Accepted //' \
+               | grep -avE "^(publickey|none|${SSHPW_METHOD})$" | sort -u | tr '\n' ' ')
+  if [ -n "${_m_unknown// /}" ]; then
+    add "SSH     : 분류 못 하는 SSH 성공 메서드가 있다 — ${_m_unknown}(비밀번호 계열인지 판정 못 함)"
+    blind_add "SSH 성공 메서드 ${_m_unknown}를 T2 가 분류하지 못한다 — 비밀번호 계열이면 놓친다($AUTH_LOG)"
+  fi
+
   if [ -z "$off" ]; then
     # 기준값 설정. 이때는 파일 전체를 센다 — **이미 성공한 흔적이 있으면
     # 그것도 사건이다.** 0 이 아닌 채로 조용히 시작하지 않는다.
@@ -635,7 +765,7 @@ check_sshlogin() {
     kv_set sshpw_r1_ino "$r1_ino"; kv_set sshpw_r1_size "${r1_size:-}"
     add "SSH     : 기준값 설정 (비밀번호 로그인 성공 현재 파일 누적 ${base}건 · 기대 0)"
     if [ "$base" -gt 0 ]; then
-      raise_alert sshpw 0 "비밀번호 SSH 로그인 성공 흔적 ${base}건이 이미 있다 (감시 첫 실행 · 우리 접속은 전부 공개키여야 한다). 즉시 확인: last | head · grep 'Accepted password' $AUTH_LOG | tail"
+      raise_alert sshpw 900 "비밀번호 SSH 로그인 성공 흔적 ${base}건이 이미 있다 (감시 첫 실행 · 우리 접속은 전부 공개키여야 한다). 즉시 확인: last | head · grep 'Accepted password' $AUTH_LOG | tail"
     fi
     return 0
   fi
@@ -672,6 +802,11 @@ check_sshlogin() {
     grown)
       if [ "$size" -gt "$off" ]; then
         delta=$(tail -c "+$((off + 1))" "$AUTH_LOG" 2>/dev/null | head -c "$((size - off))" | _sshpw_grep)
+        # ③b 가 쓴다 — 이번 구간에 auth.log 가 받은 sshd 줄 수(성공/실패 구분 없이).
+        # 이것이 0 보다 크면 "같은 창에 sshd 가 확실히 말을 했다"는 뜻이고,
+        # 그때 journald 가 0줄이면 두 출처가 **모순**이다.
+        new_sshd=$(tail -c "+$((off + 1))" "$AUTH_LOG" 2>/dev/null | head -c "$((size - off))" | grep -cE "$SSHD_RE" 2>/dev/null)
+        new_sshd=${new_sshd:-0}
       else
         delta=0
       fi
@@ -784,9 +919,87 @@ check_sshlogin() {
       ''|*[!0-9]*) since=$((now_s - 86400)) ;;
       *) since="$prev_at"; [ $((now_s - since)) -le 86400 ] || since=$((now_s - 86400)) ;;
     esac
-    jd=$(journalctl -u ssh -u sshd --since "@$since" --no-pager -o cat 2>/dev/null | grep -cE "$SSHPW_RE")
-    jd=${jd:-0}; jd_txt="${jd}건"
-    add "SSH2차  : journald 같은 구간 ${jd}건 (auth.log ${delta}건 · 기대 0/0)"
+    jd_win=$((now_s - since))
+    # ⚠️ **한 번만 부른다.** 같은 창을 두 번 조회하면 두 값이 서로 다른 창의 것이 되고
+    #    (그 사이에 줄이 들어온다), 5분마다 도는 검사의 비용도 두 배가 된다.
+    # ⛔ CR45-1 — **"빈 결과"가 정말 빈 출력인지 가정하지 않는다.**
+    #    아래 `jtot=0` 판정은 전적으로 `-o cat` 이 "해당 없음"을 **0바이트**로 준다는
+    #    데 걸려 있다. 기본 출력 형식은 같은 상황에서 `-- No entries --` 를
+    #    **stdout 으로** 준다(실측 2026-08-03 · 이 서버 systemd 249:
+    #      `-o cat` → 0바이트 / 형식 없이 → `-- No entries --`).
+    #    누가 디버깅하려고 `-o cat` 을 빼거나 systemd 가 형식을 바꾸면 `jtot` 이 늘
+    #    1 이상이 되어 **눈멂 검사가 영원히 발동하지 않는다.** 그리고 자체검사는
+    #    가짜 journalctl 을 쓰므로 **그 상태에서도 초록이다** — 이 저장소가 반복해 온
+    #    형태(픽스처가 현실이 아니라 우리 가정대로 굴어서 통과)의 정확한 재발 지점이다.
+    #    → 그래서 **매 실행 확인한다.** 반드시 비어야 하는 창(1시간 뒤 60초)을 물어본다.
+    #      비어야 할 창이 안 비면 우리는 0줄을 판정할 능력이 없다 → 판정을 보류한다
+    #      (경보도 안 하고 해소도 안 한다 · 비용 실측 0.01초).
+    #    ⛔ CR45-1 — **확인하는 명령줄과 확인받는 명령줄이 갈라지면 이 프로브는 거짓말이 된다.**
+    #      예전에는 프로브와 본질의가 각자 `-o cat` 을 달고 있었다. 그러면 **본질의에서만**
+    #      `-o cat` 을 빼는 변이가 가능하고(그게 주석이 말한 "누가 빼면" 의 가장 흔한 모양이다),
+    #      프로브는 계속 0바이트라 아무 말도 안 한다 — 리뷰어가 그 변이를 심어 재현했다
+    #      (자체검사 201/0/0 · rc=0 인 채로 `sshjournal` 이 안 뜬다).
+    #      → **형식 플래그를 한 곳에서만 만든다.** 그러면 그 변이가 **구성상 불가능**해진다:
+    #        `-o cat` 을 빼면 프로브도 같이 빠져서 프로브가 먼저 운다.
+    jprobe=$(_jssh --since "@$((now_s + 3600))" --until "@$((now_s + 3660))")
+    if [ -n "$jprobe" ]; then
+      jd_probe_bad=1
+      blind_add "journalctl 이 '해당 없음' 을 빈 출력으로 주지 않는다 — ssh 메시지 0줄을 판정할 수 없다"
+    fi
+    jprobe=""
+    jbuf=$(_jssh --since "@$since")
+    if [ -z "$jbuf" ]; then
+      jtot=0; jd=0
+    else
+      jtot=$(printf '%s\n' "$jbuf" | wc -l | tr -d '[:space:]'); jtot=${jtot:-0}
+      jd=$(printf '%s\n' "$jbuf" | _sshpw_grep_jd); jd=${jd:-0}
+    fi
+    jbuf=""
+    jd_txt="${jd}건"
+    # ⛔ SR40-1 — **두 번째 출처가 "살아 있는데 아무것도 안 보는" 상태.**
+    #    `journalctl` 은 정상 응답하고 `-n 1` 도 성공하는데 **ssh 유닛 조회만 0줄**이면
+    #    이 교차는 형식만 남고 실질이 없다. 그런데 옛 코드는 그 상태에서 `기대 0/0` 이라고
+    #    **적극적으로 무사고를 선언**했다 — 이 파일이 CR40-2 이후 네 번 막아 온 형태
+    #    (빈 집합이 통과한다)가 신규 검사에 그대로 재발한 자리다.
+    #    ⛔ **SR41-1 — 사정거리를 정직하게 적는다(2026-08-03 실측 정정).**
+    #      이 검사는 `--vacuum-time` 같은 **1회성 삭제를 잡지 못한다.** 저널은 몇 초 만에
+    #      다시 찬다: ssh 유닛 24시간 37,632줄 · 평균 간격 2.30초 · 최장 무음 104초,
+    #      `--since @(now-3s)` 가 이미 4줄. 무작위 vacuum 의 탐지 확률은 약 4.4% 이고,
+    #      공격자가 지운 직후 접속을 한 번만 만들면(로그아웃만 해도 2줄) **0%** 다.
+    #      → 이 검사가 지키는 것은 **"앞으로 계속 눈멀어 있는 상태"** 이지
+    #        **"과거를 지웠다"가 아니다.** x9 방어로 계산하지 말 것.
+    #    잡히는(지속되는) 상태를 만드는 길: `Storage=none` ·
+    #    ssh 유닛 이름 변경/소켓 활성화(`ssh@0-….service` 는 `-u ssh` 에 안 걸린다) ·
+    #    저널 손상/삭제. 어느 쪽이든 **위의 x9 반증이 통째로 사라진다**(SR40-3 참조).
+    #    ⚠️ **오탐 0 의 근거를 실측으로 적는다**(2026-08-02 · 이 서버):
+    #      · 24시간 ssh 유닛 메시지 29,195줄 → **5분 버킷 288개 중 0줄 버킷 0개**
+    #        (최소 21 · 평균 101). 5분 창의 `jtot=0` 은 정상 운영에 존재하지 않는다.
+    #      · 그런데 **1분 버킷은 1,440개 중 30개가 0줄**이다 → 창이 짧으면 정상적으로
+    #        0 일 수 있다(손으로 연달아 돌릴 때가 그렇다). 그래서 창 길이를 함께 본다.
+    #      · auth.log 는 sshd 말고도 자라므로(위 SSHD_RE 주석) "자랐다"는 근거가 못 된다.
+    #        **같은 창의 sshd 줄 수**를 본다 — sshd 가 auth.log 에는 썼는데 journald 에는
+    #        0줄이면 그것은 두 출처의 모순이고, 정상 운영에는 없는 조합이다.
+    #      · 경계 오차는 **한 방향뿐**이다: `--since` 가 초 단위라 창 시작 직전의 줄이
+    #        journald 쪽에 더 실릴 수는 있어도 덜 실리지는 않는다(우리는 stat 직후에
+    #        `sshpw_at` 을 적는다). 그래도 ±1 줄을 흡수하도록 문턱을 2줄로 둔다.
+    if [ "$jd_probe_bad" = 1 ]; then
+      # 줄 수를 못 믿으므로 **어느 쪽으로도 단정하지 않는다.** 경보를 올리면 오탐이고,
+      # `기대 0/0` 이라고 쓰면 CR40-2 가 막은 "빈 집합이 통과한다"의 재발이다.
+      jd_txt="교차 신뢰 불가(빈 결과를 구분 못 함)"
+      add "SSH2차  : journalctl 이 '해당 없음' 을 빈 출력으로 안 준다 — 줄 수(${jtot})를 믿을 수 없어 교차 판정 보류. 확인: journalctl -u ssh --since \"\$(date -d '+1 hour' '+%F %T')\" -o cat | wc -c (0 이어야 한다)"
+    elif [ "$jtot" -eq 0 ] && [ "$new_sshd" -ge "$JD_MIN_SSHD" ] && [ "$jd_win" -ge "$JD_MIN_WINDOW" ]; then
+      jd_blind=1
+      jd_txt="교차 실질 불가(ssh 메시지 0줄)"
+      add "SSH2차  : journald 교차 실질 불가 — 같은 ${jd_win}초 창에서 auth.log 는 sshd 줄 ${new_sshd}개를 받았는데 journald 는 ssh 메시지를 0줄 준다"
+      blind_add "journald 가 같은 구간에서 ssh 메시지를 0줄 본다 — 교차 검증이 실질적으로 없다"
+      raise_alert sshjournal 86400 "두 번째 로그 출처(journald)가 응답은 하는데 ssh 메시지를 0줄 준다 — 같은 ${jd_win}초 창에서 auth.log 는 sshd 줄 ${new_sshd}개를 받았다. 두 출처가 있어야 '같은 길이로 덮어쓴 침입 줄'을 반증할 수 있는데(SR39-1) 지금은 auth.log 한 곳뿐이다. 원인은 저널 삭제(journalctl --rotate --vacuum-time) · Storage=none · ssh 유닛 이름 변경/소켓 활성화 · 저널 손상일 수 있다. 확인: journalctl -u ssh --since -1h | tail · systemctl list-units --all | grep -i ssh · journalctl --disk-usage"
+    elif [ "$jtot" -gt 0 ]; then
+      add "SSH2차  : journald 같은 구간 ${jd}건 (auth.log ${delta}건 · 기대 0/0 · 교차 대상 ${jtot}줄)"
+    else
+      # ⚠️ **못 본 것을 "기대 0" 이라고 쓰지 않는다.** 양쪽이 다 조용한 것은
+      #    "괜찮다"가 아니라 "이번 창에는 판정할 근거가 없다"이다.
+      add "SSH2차  : journald 같은 구간 0건 · ssh 메시지 자체가 ${jd_win}초 창에 0줄(auth.log sshd 줄 ${new_sshd}개) — 교차 판정 보류"
+    fi
     if [ "$jd" -gt "$delta" ]; then
       jd_gap=" ⚠️ 두 출처의 수가 다르다(journald ${jd} > auth.log ${delta}) — auth.log 가 사후에 편집됐을 수 있다(같은 길이 덮어쓰기는 크기·inode 를 보존한다)."
     fi
@@ -797,6 +1010,14 @@ check_sshlogin() {
   if [ "$prev_jd" = 1 ] && [ "$jd_ok" = 0 ]; then
     blind_add "SSH 2차 출처(journald)가 사라졌다 — 교차 검증 불가"
     raise_alert sshjournal 86400 "어제까지 쓰던 두 번째 로그 출처(journald)가 응답하지 않는다 — auth.log 한 곳만 남으면 '같은 길이로 덮어쓴 침입 줄'을 반증할 방법이 없다(SR39-1). 확인: systemctl status systemd-journald · journalctl --disk-usage · ls -ld /var/log/journal"
+  elif [ "$jd_ok" = 1 ] && [ "$jd_blind" = 0 ] && [ "$jd_probe_bad" = 0 ] && [ "$jtot" -gt 0 ]; then
+    # ⛔ CR44-1 — **해소 경로가 없어서 한 번 뜨면 영영 안 꺼졌다.** 형제인 `authfresh`
+    #    는 같은 함수 안에서 꺼지는데 이쪽만 없었고, 그러면 일일 요약 머리말이 계속
+    #    `미해소 N건 (sshjournal)` 이다. 안 꺼지는 경보는 곧 무시되는 경보다.
+    #    ⚠️ **교차가 실제로 돌아왔을 때만** 끈다: `journalctl` 이 응답하고(jd_ok)
+    #       그 창에서 ssh 메시지를 **실제로 봤을 때**(jtot>0). 응답만 하고 0줄이면
+    #       그건 여전히 눈먼 상태이고, 거기서 clear 하면 CR40-2 가 막은 거짓 해소가 된다.
+    clear_alert sshjournal "두 번째 출처(journald) 교차 정상 — 같은 구간 ssh 메시지 ${jtot}줄"
   fi
   kv_set sshpw_jd "$jd_ok"
 
@@ -825,7 +1046,7 @@ check_sshlogin() {
     add "SSH     : 비밀번호 로그인 성공 이번 구간 ${delta}건 (기대 0)"
   fi
   if [ "$delta" -gt 0 ] || [ "${jd:-0}" -gt 0 ]; then
-    raise_alert sshpw 0 "비밀번호로 SSH 로그인 성공 — auth.log ${delta}건 · journald ${jd_txt} (기대 0/0).${jd_gap} 우리 접속은 전부 공개키다. 보안리뷰 트립와이어 T2 가 걸렸다: SSH 를 먼저 잠근다. 확인: last | head · grep 'Accepted password' $AUTH_LOG | tail · journalctl -u ssh --since -1h | grep Accepted"
+    raise_alert sshpw 900 "비밀번호로 SSH 로그인 성공 — auth.log ${delta}건 · journald ${jd_txt} (기대 0/0).${jd_gap} 우리 접속은 전부 공개키다. 보안리뷰 트립와이어 T2 가 걸렸다: SSH 를 먼저 잠근다. 확인: last | head · grep 'Accepted password' $AUTH_LOG | tail · journalctl -u ssh --since -1h | grep Accepted"
   fi
 
   if [ "$explained" = 1 ]; then
@@ -893,6 +1114,10 @@ check_peer_alive() {
   local last now age first
   if [ "$MODE" = fast ]; then
     last=$(kv_get last_daily_run)
+    # ⛔ CR44-10 — kv 값이 깨져 있으면 `set -u` 아래 산술이 실패해 **조용히 경보가
+    #    안 뜬다**(fail-open). 같은 파일 :783 이 `prev_at` 에 쓰는 관용구를 여기에도 쓴다.
+    #    깨진 값은 "없는 것"으로 보고 기준값을 다시 잡는다.
+    case "$last" in *[!0-9]*) last="" ;; esac
     if [ -z "$last" ]; then
       # ⛔ **15번째 자리 — 대칭이 같은 함수 안에서 깨져 있었다(내가 이번에 찾았다).**
       #    아래 daily 쪽은 *"5분 감시가 한 번도 돈 기록이 없다 — 크론(*/5)이 안 걸렸다"*
@@ -903,12 +1128,16 @@ check_peer_alive() {
       #    시장지수 신선도(11)·DB 크래시(12)·컨테이너 로그(13) **일곱 개**다. 그게 통째로
       #    없는 상태가 되고, 드러나는 유일한 경로가 *"아침 요약이 안 온다"* 라는
       #    **사람의 기억**이다. 이 파일이 CR40-2 부터 계속 거부해 온 바로 그 형태다.
-      #    (그리고 지금이 그 위험이 실재하는 시점이다 — 크론 2줄을 서버에 **새로**
-      #     넣는 배포가 눈앞이고, 한 줄을 빠뜨리면 이 자리가 조용히 열린다.)
+      #    (⚠️ 근거를 사실대로 적는다 — CR44-4. 예전 주석은 *"지금 배포가 정확히
+      #     크론 2줄을 새로 넣는 일"* 이라고 적었는데 아무도 안 재 본 문장이었다:
+      #     크론은 2026-07-30 에 이미 들어갔다(`CR-041` 우리 3줄 · `SR-038` realestate 3줄 ·
+      #     `DEPLOY.md §9-1` 에 crontab 단계 자체가 없다). 결함과 조치는 그대로 유효하다 —
+      #     위험은 **크론 한 줄이 사라지거나 다음에 다시 설치할 때** 열린다.)
       #    ⚠️ 설치 직후 곧바로 울면 그건 오탐이다(일일 점검은 하루 한 번뿐이다).
       #       → **첫 fast 실행 시각을 기억하고 거기서부터 유예**를 준다. 임계는
       #       아래 "낡음" 판정과 같은 값(DAILY_MAX_HOURS=30시간)이라 규칙이 하나다.
       first=$(kv_get first_fast_run)
+      case "$first" in *[!0-9]*) first="" ;; esac        # CR44-10
       if [ -z "$first" ]; then kv_set first_fast_run "$(date +%s)"; return 0; fi
       now=$(date +%s); age=$(((now - first) / 3600))
       if [ "$age" -ge "$DAILY_MAX_HOURS" ]; then
@@ -924,6 +1153,7 @@ check_peer_alive() {
     fi
   else
     last=$(kv_get last_fast_run)
+    case "$last" in *[!0-9]*) last="" ;; esac            # CR44-10
     if [ -z "$last" ]; then
       raise_alert fast_dead 21600 "5분 감시가 한 번도 돈 기록이 없다 — 크론(*/5)이 안 걸렸다"
       return 0

@@ -1172,34 +1172,60 @@ bash /opt/realestate/scripts/monitor-selftest.sh
 #   → '통과 N · 실패 0 · 건너뜀 N · 하네스오류 0' 이어야 한다.
 #     ⚠️ '하네스오류' 는 **검사 결과가 아니다** — 그 값이 0 이 아니면 이 환경이
 #        임시파일을 못 만든 것이므로, 초록/빨강을 근거로 쓰기 전에 그것부터 고친다.
+#     ⚠️ 그 문장이 참이려면 검사들이 빈 값에 가드를 갖고 있어야 한다. 지금 갖춘 것은
+#        **T2 · T3b · T10**(날짜 루프 `nz`/`harn_if`) 과 T6·㉯(픽스처 바이너리 확인)이다.
+#        나머지 구획에서는 '하네스오류 0' 이 '하네스가 멀쩡했다'를 증명하지 않는다.
 ```
 
-### 9-1. 감시 스크립트만 갱신하는 절차 (`CR-043` / `SR-039` 반영분)
+### 9-1. 감시 스크립트만 갱신하는 절차 (`CR-044` / `SR-040` 반영분)
 
-> ⚠️ **앱·DB·nginx 는 건드리지 않는다.** 바뀌는 것은 `/opt/realestate/scripts/` 의 셸 **5개**뿐이다.
-> (이번 라운드에서 실제로 내용이 바뀐 것은 `monitor.sh`·`monitor-lib.sh`·`monitor-selftest.sh`
->  **3개**지만, 서버는 아직 `SR-038` 시점이라 `job-run.sh`·`market-index.sh` 도 서버 것과 다르다.
->  **5개를 함께 올린다** — 섞이면 `CR42-1` 3층 중 배치 쪽 두 층이 빠진 채로 돈다.)
+> ⚠️ **앱·DB·nginx 는 건드리지 않는다.** 바뀌는 것은 `/opt/realestate/scripts/` 의 셸뿐이다.
 > 서비스 중단 0 · 재기동 0 · 마이그레이션 0.
 > ⚠️ 게이트(code-review / security-review)가 **둘 다 통과한 뒤에만** 실행한다.
+>
+> **이번(2026-08-02) 델타는 `monitor.sh` · `monitor-selftest.sh` 2개다.**
+> `monitor-lib.sh`·`job-run.sh`·`market-index.sh` 는 `199d9fe`(2026-08-02 02:13)로 이미
+> 서버와 같다(sha256 5/5 대조 완료). **그래도 5개를 함께 스테이지에 올려서 검사한다** —
+> 자체검사는 5개를 한 묶음으로 보고, 서버에 있는 것과 손에 든 것이 같다는 사실을
+> 매번 해시로 확인하는 편이 싸다.
 
 **왜 지금 올려야 하나 (미루는 비용).**
-서버에는 아직 `SR-038` 시점 코드가 돈다. 즉 **운영에서 지금 열려 있는 것**:
-`SR38-1`(회전본 mtime 위조) · `SR38-2`(회전본 편집) · `SR38-3`(로그 동결) ·
-`CR42-2`(트립와이어가 `rm` 에 눈멂) · `CR42-3`(인증서 fail-open).
-그리고 **`CR42-1` 폭주는 2026-09-01 에 실제로 터진다** — `2026-07` 이 이미 0/3 이고
-최소표본 1,422 < 문턱 ≈2,080 이라 신고지연 30일이 다 지나도 못 넘는다.
-그날 옛 코드는 *"배치 실패"* 1통 + **그 달 내내 하루 한 통**을 보낸다.
+`199d9fe` 배포 뒤 **서버에서 자체검사가 rc=1** 이었다(`168/2/0`). 붉은 둘은
+**`(교차) journald 가 사라져도 아무 말이 없다`** 와 **`(x9)`** 였고, 앞의 것은
+`SR40-1` 이 예고한 바로 그 자리다: **운영 조건에서 x9(침입 줄을 같은 길이로 덮어쓰기)를
+잡는 수단은 journald 교차 하나뿐인데**(`authfake` 는 로그가 안 자라는 창에서만 발동하고
+이 서버는 분당 ~9줄 자란다 — `SR40-3`), 그 하나가 **살아 있는 척만 하는 상태**
+(`journalctl` 은 응답하는데 ssh 조회만 0줄)를 아무도 못 봤다.
+그동안 요약은 `journald 같은 구간 0건 (기대 0/0)` 이라며 **적극적으로 무사고를 선언**했다.
 
 ```bash
 # ── 0) 로컬에서 먼저 (해시를 손에 들고 간다) ────────────────────────────────
 cd <저장소>
 grep -rnE 'MUT[-]' deploy/         # 0건이어야 한다 (변이 잔재 · 표기를 쪼개 둔다)
 bash -n deploy/*.sh                # 8파일 전부 통과
-bash deploy/monitor-selftest.sh    # 통과 N · 실패 0 · 하네스오류 0
+bash deploy/monitor-selftest.sh    # 실패 0 · 하네스오류 0 (아래 §9-1 기대 숫자 표)
 sha256sum deploy/monitor.sh deploy/monitor-lib.sh deploy/job-run.sh deploy/market-index.sh \
           deploy/monitor-selftest.sh
 ```
+
+> ⚠️ **윈도우 통과는 근거가 아니다 — 2026-08-02 에 그 값을 치렀다.**
+> 윈도우 체크아웃에서 `167/0/2` 로 초록이던 자체검사가 **서버에서는 `168/2/0`** 이었다.
+> 붉은 둘은 `(x9)` 와 `(교차) journald 가 사라져도…` 였고, 둘 다 **검사가 옳고 환경이 달랐다**:
+> ① `(x9)` 는 기준값 실행과 `dd` 가 **같은 초** 안에 끝나면 성립하지 않는데 리눅스가 빨라서
+>   그렇게 됐다(윈도우는 느려서 우연히 초 경계를 넘었다) ② `(교차)` 는 "journald 가 사라진"
+>   상태를 **PATH 에서 가짜를 빼는 것**으로 만들었는데 서버에는 진짜 `journalctl` 이 있다.
+> **그래서 아래 ── 2 는 교체 전에 서버에서 돌리게 바뀌었다.**
+
+### 9-1 기대 숫자 (2026-08-02 실측)
+
+| 어디서 | 결과 | 왜 다른가 |
+|---|---|---|
+| 서버 `/opt/realestate/scripts` | **197 / 0 / 0 / HARN 0 · rc=0** | `../docs/05-monitoring/monitoring.md` 가 있어 T7 문서 일치 검사와 T8 `chmod` 3건이 전부 돈다 |
+| 서버 임시 사본(`/root/…`) | **193 / 0 / 1 / HARN 0 · rc=0** | 문서가 없어 T7 문서 검사 1건이 SKIP |
+| 윈도우 체크아웃 | 문서는 있고 `chmod` 2건이 SKIP | 파일시스템이 권한 비트를 안 지킨다 |
+
+**판정 기준은 숫자가 아니라 이것이다 — `실패 0 · 하네스오류 0 · rc=0`.**
+통과 건수는 실행 위치에 따라 정당하게 달라진다(SKIP 은 "안 돈 것"이지 "실패"가 아니다).
 
 ```bash
 # ── 1) 서버: 지금 것을 먼저 남긴다 (롤백 자산) ──────────────────────────────
@@ -1214,19 +1240,45 @@ cp -a monitor.sh monitor-lib.sh job-run.sh market-index.sh monitor-selftest.sh \
 ```
 
 ```bash
-# ── 2) 올리는 순서 — **라이브러리를 먼저, 본체를 나중에** ───────────────────
-#   근거: monitor.sh 는 monitor-lib.sh 를 source 한다. 반대로 올리면 5분 크론이
-#   그 사이에 끼어들어 **새 monitor.sh + 옛 monitor-lib.sh** 조합으로 한 번 돈다.
-#   이번 델타에는 그 조합에서 깨지는 것이 있다(monitor.sh 가 새 scrub 규칙과
-#   scrub 을 타는 log() 를 전제한다). 라이브러리를 먼저 올리면 그 반대 조합
-#   (옛 monitor.sh + 새 monitor-lib.sh)이 되는데, 그쪽은 **호환된다** —
-#   추가된 것은 규칙과 log() 세탁뿐이고 인터페이스는 그대로다.
+# ── 2) 올리기 — **① 스테이지 → ② 거기서 검사 → ③ 통과했을 때만 원자적 교체** ──
 #
-#   ① monitor-lib.sh   ② job-run.sh   ③ market-index.sh
-#   ④ monitor.sh       ⑤ monitor-selftest.sh
+#   ⚠️ 순서가 바뀌면 안 되는 이유가 둘이다.
+#   (가) **검사를 교체 전에 돌린다.** 교체한 뒤에 돌리면, 붉었을 때 이미 5분 크론이
+#        새 코드로 돌고 있다. 2026-08-02 에 실제로 `mv` **뒤에** 돌렸고 2건이 붉었다.
+#        그때 절차서(이 문서)가 그렇게 시키고 있었다 — 사람 잘못이 아니라 절차 잘못이다.
+#   (나) **제자리에서 덮어쓰지 않는다.** `install`/`cp` 는 원본 inode 를 그대로 잘라 쓴다.
+#        `*/5` 크론이 monitor.sh 를 실행하는 중에 그러면 bash 가 남은 절반을 새 파일의
+#        엉뚱한 오프셋에서 읽는다. 같은 디렉터리에 `.stage` 로 놓고 `mv -f` 하면
+#        (rename 은 원자적) 돌던 프로세스는 옛 inode 를 끝까지 읽는다. (CR44-6)
 #
-#   (로컬에서 scp 로 보내거나, 저장소를 서버에서 pull 한 뒤 cp 한다)
-install -m 750 -o root -g root <새파일> /opt/realestate/scripts/<이름>
+#   라이브러리 먼저 · 본체 나중: monitor.sh 는 monitor-lib.sh 를 source 한다. 반대로
+#   올리면 5분 크론이 끼어들어 **새 monitor.sh + 옛 monitor-lib.sh** 로 한 번 돈다.
+#   그 조합은 **깨지지 않는다** — 그 5분 동안 `log()` 세탁과 새 비밀 규칙이 빠진 채로
+#   돌 뿐이다(보안 후퇴이지 고장이 아니다). 반대 조합(옛 본체 + 새 lib)은 무해하다.
+
+# ① 스테이지 디렉터리에 5개를 **원래 이름으로** 올린다
+#    ※ 'pull 후 cp' 도 이제 성립한다 — deploy/ 의 셸 5개는 `199d9fe` 에서 커밋됐다
+#      (CR44-11 해소. `git ls-files deploy/` 로 확인). 다만 **작업트리에 미커밋 변경이
+#      있으면 pull 한 것과 손에 든 것이 다르다** — 그래서 판정은 항상 sha256 5/5 로 한다.
+mkdir -p /root/monitor-stage
+#   (로컬에서)  scp deploy/{monitor,monitor-lib,job-run,market-index,monitor-selftest}.sh \
+#               <배포계정>@<DEPLOY_HOST>:/root/monitor-stage/
+cd /root/monitor-stage && chmod 750 *.sh
+
+# ② **여기서** 문법과 자체검사를 돌린다 (크론은 아직 옛 코드로 돈다 · 알림 0통)
+for f in *.sh; do bash -n "$f" || echo "문법 오류: $f"; done
+bash monitor-selftest.sh; echo "rc=$?"
+#    → **rc=0 · 실패 0 · 하네스오류 0** 이어야 다음으로 간다.
+#      ※ 통과 건수는 `../docs/05-monitoring/monitoring.md` 가 보이느냐에 따라 218 또는
+#        193(+SKIP 1) 이다. 둘 다 정상이다 — 판정은 '실패 0 · 하네스오류 0 · rc=0' 으로 한다.
+#    ⚠️ 붉으면 여기서 멈춘다. 서버는 아직 옛 코드로 돌고 있으므로 잃는 것이 없다.
+
+# ③ 통과했을 때만 교체 — `.stage` 로 놓고 `mv -f`(rename 은 원자적)
+cd /opt/realestate/scripts
+for f in monitor-lib.sh job-run.sh market-index.sh monitor.sh monitor-selftest.sh; do
+  install -m 750 -o root -g root /root/monitor-stage/$f ./$f.stage && mv -f ./$f.stage ./$f
+done
+ls -l *.stage 2>/dev/null && echo "⚠️ .stage 가 남았다 — 교체가 덜 됐다"
 ```
 
 ```bash
@@ -1235,15 +1287,21 @@ cd /opt/realestate/scripts
 sha256sum monitor.sh monitor-lib.sh job-run.sh market-index.sh monitor-selftest.sh
 #   → 0) 에서 손에 들고 온 값과 **5/5 일치**해야 한다
 
-bash monitor-selftest.sh
-#   → 리눅스에서는 윈도우에서 SKIP 되던 chmod 항목 2건이 실제로 돈다.
-#     '실패 0 · 하네스오류 0' 이어야 한다.
+bash monitor-selftest.sh; echo "rc=$?"
+#   → 제자리에서는 문서 검사까지 돌아 **218 / 실패 0 / SKIP 0 / HARN 0 · rc=0** (실측 2026-08-03)
+#      ⚠️ **숫자는 판정 기준이 아니다.** 기준은 `실패 0 · HARN 0 · rc=0` 이다 —
+#         검사를 더하면 숫자는 늘고, 숫자를 맞추려 들면 검사를 못 늘린다.
+#     ⚠️ 판정은 '실패 0 · 하네스오류 0 · rc=0' 으로 한다. 통과 건수는 위치에 따라 다르다.
 
 RE_MON_DRY_RUN=1 RE_MON_PRINT=1 ./monitor.sh --fast    # 알림 안 나간다
-#   눈으로 볼 줄 (이번 델타로 새로 생긴 것):
-#     SSH2차  : journald 같은 구간 0건 (auth.log 0건 · 기대 0/0)
-#   ⚠️ 여기가 'journald 교차 불가' 로 나오면 두 번째 출처가 안 잡힌 것이다.
-#      유닛 이름을 확인한다: systemctl list-units | grep -E 'ssh(d)?\.service'
+#   눈으로 볼 줄:
+#     SSH2차  : journald 같은 구간 0건 (auth.log 0건 · 기대 0/0 · 교차 대상 NN줄)
+#   ⚠️ **`교차 대상 NN줄` 의 NN 이 0 이 아니어야 한다.** 0 이면 두 번째 출처가
+#      살아 있는 척만 하는 상태다(SR40-1) — 그때는 `교차 실질 불가` 로 나오고
+#      `sshjournal` 이 뜬다. 유닛 이름을 먼저 본다:
+#        systemctl list-units --all | grep -iE 'ssh(d)?(\.service|@)'
+#      ⚠️ 첫 실행은 기준값만 잡고 `SSH2차` 줄이 아예 없다 — 한 번 더 돌려서 본다.
+#   ⚠️ `journald 교차 불가` 로 나오면 journalctl 이 응답을 안 하는 것이다.
 
 RE_MON_DRY_RUN=1 RE_MON_PRINT=1 ./monitor.sh --daily   # 알림 안 나간다
 #     인증서  : 4개 검사 · … (임계 21일)
@@ -1252,11 +1310,18 @@ RE_MON_DRY_RUN=1 RE_MON_PRINT=1 ./monitor.sh --daily   # 알림 안 나간다
 
 ```bash
 # ── 4) journald 교차의 **자원 비용을 서버에서 실측한다** (로컬에서는 못 잰다) ─
-#   5분마다 journalctl 을 2회 부른다. 아래가 0.5초를 넘으면 창을 줄이거나 끈다.
+#   5분마다 journalctl 을 **2회** 부른다(생존 확인 `-n 1` + 창 조회 1회 —
+#   창 조회는 한 번만 부르고 그 출력에서 총량과 성공 건수를 **둘 다** 센다).
+#   아래가 0.5초를 넘으면 창을 줄이거나 끈다.
 time journalctl -n 1 --no-pager >/dev/null
-time journalctl -u ssh -u sshd --since "@$(( $(date +%s) - 300 ))" --no-pager -o cat \
-     | grep -cE 'Accepted (password|keyboard-interactive)'
-#   기대: 두 번째 값은 **0**(이 서버의 성공은 전부 publickey 다 — SR-039 §6 실측)
+time journalctl -u ssh -u sshd --since "@$(( $(date +%s) - 300 ))" --no-pager -o cat | wc -l
+#   기대: 두 번째 값(창 안의 ssh 유닛 메시지 줄 수)이 **0 이 아니다**.
+#         2026-08-02 실측 — 24시간 29,195줄 · 5분 버킷 288개 중 0줄 버킷 **0개**(최소 21).
+#   비용 실측(2026-08-02): `-n 1` = **0.006초** · 5분 창 조회 = **0.095초**. 합쳐 0.1초다.
+#   최악(감시가 하루 멈춰 창이 24시간 = 30,456줄)에도 `--fast` **전체가 2.2초**다(실측).
+#   그중 성공 건수는 0 이어야 한다:
+journalctl -u ssh -u sshd --since "@$(( $(date +%s) - 300 ))" --no-pager -o cat \
+  | grep -cE 'Accepted (password|keyboard-interactive)'
 #   ※ 이 값이 0 이 아니면 그것 자체가 트립와이어 T2 다. 먼저 SSH 를 잠근다.
 ```
 
@@ -1267,18 +1332,27 @@ time journalctl -u ssh -u sshd --since "@$(( $(date +%s) - 300 ))" --no-pager -o
 #     · first_fast_run 이 오늘로 잡혀 daily_dead 유예가 다시 시작된다
 #   새 키(sshpw_mtime · sshpw_jd · blind_daily · first_fast_run)는 **없으면 없는 대로**
 #   첫 회에 기준값만 잡고 조용히 넘어가도록 만들어져 있다(설계 확인).
+#   이번 델타는 kv 키를 **새로 만들지 않는다**(jtot·jd_win 은 저장하지 않는다).
 ```
 
 ```bash
 # ── 6) 롤백 (1분) ─────────────────────────────────────────────────────────
-cp -a /root/backup-monitor-<날짜>/*.sh /opt/realestate/scripts/
-cd /opt/realestate/scripts && sha256sum *.sh   # 1) 에서 남긴 값과 대조
+#   ⚠️ 되돌릴 때도 제자리에서 덮어쓰지 않는다(── 2 (나)와 같은 이유).
+cd /opt/realestate/scripts
+for f in monitor.sh monitor-lib.sh job-run.sh market-index.sh monitor-selftest.sh; do
+  install -m 750 -o root -g root /root/backup-monitor-<날짜>/$f ./$f.stage && mv -f ./$f.stage ./$f
+done
+sha256sum *.sh                                   # 1) 에서 남긴 값과 대조
+#   ⚠️ 되돌린 조합이 **실제로 도는지**까지 본다 — 해시만 보면 "옛 코드가 옛 코드다"만 안다.
+bash monitor-selftest.sh; echo "rc=$?"
+RE_MON_DRY_RUN=1 RE_MON_PRINT=1 ./monitor.sh --fast >/dev/null && echo "롤백본 --fast OK"
 ```
 
 **반영 뒤 24~48시간 안에 눈으로 확인할 것**
 1. 다음 날 아침 **일일 요약 1통**이 온다(안 오면 그 자체가 신호다).
-2. 요약에 `SSH2차 : journald 같은 구간 0건` 이 매일 있다.
-3. `authfake`·`sshjournal`·`daily_dead` 가 **뜨지 않는다**(뜨면 오탐이므로 즉시 보고).
+2. 요약에 `SSH2차 : journald 같은 구간 0건 … 교차 대상 NN줄` 이 매일 있고 **NN 이 0 이 아니다**.
+   `교차 실질 불가` 가 보이면 두 번째 출처가 죽은 것이다(SR40-1).
+3. `authfake`·`sshjournal`·`daily_dead`·`api5xx` 가 **뜨지 않는다**(뜨면 오탐이므로 즉시 보고).
 4. `2026-09-01 04:10` 배치 뒤 오는 것이 *"배치 실패"* 가 아니라
    **`warn_market-index` 1통**이고, 그 뒤 **하루 한 통이 오지 않는다**.
 

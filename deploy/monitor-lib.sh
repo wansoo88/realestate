@@ -212,14 +212,69 @@ alert_creds() {
   done
   return 1
 }
+# ⛔ 상한을 아무리 잘 걸어도 **상한이 채널을 죽이면 그게 더 큰 사고다.**
+#    그래서 상한을 두 조각으로 나눈다: **판정(check)** 과 **소진(commit)**.
+SEND_MAX_DAY="${RE_MON_SEND_MAX_DAY:-60}"
+# ⛔ SR43-2 — 상한값 자체가 감시를 끌 수 있다. 비숫자는 모르는 값이고,
+#    **0 이면 모든 경보를 영구 침묵**시킨다. 감시 채널에서 그건 사고다.
+#    → 이상한 값을 조용히 따르지 말고 기본값으로 되돌린다.
+case "$SEND_MAX_DAY" in
+  ''|*[!0-9]*|0) SEND_MAX_DAY=60 ;;
+esac
+
+# ⛔ CR47-1 — **보내지도 못한 통을 상한으로 세면 안 된다.**
+#    예전에는 맨 앞에서 카운터를 올렸다. 그러면 자격증명이 없거나 curl 이 3연속
+#    실패해 **한 통도 안 나간 채로** 상한이 소진되고, 채널이 복구된 뒤 자정까지
+#    전면 침묵한다(일일 요약까지). 리뷰 실측: 발송 0통 · send_count 3/3 · 복구 후 0통.
+#    게다가 `send_capped=1` 을 **통보를 보내기 전에** 찍어서, 그 통보가 같은 장애로
+#    실패하면 영영 재시도되지 않았다 — 이 설계가 스스로 못 박은 *"한 통은 나간다"* 가
+#    **상한에 닿는 가장 흔한 경로**에서 깨져 있었다.
+# 0 = 보내도 된다 · 1 = 억제(이미 통보함) · 2 = 이번 한 통을 "억제 시작" 통보로 쓴다
+# ⚠️ 로그 낱말을 `-CAP` 으로 갈라 둔다. `raise_alert` 의 쿨다운 억제도
+#    `ALERT-SUPPRESSED` 를 쓰므로, 안 가르면 관문이 **엉뚱한 줄을 보고 통과**한다.
+_send_quota_check() {
+  local today count
+  today=$(date +%Y%m%d)
+  if [ "$(kv_get send_day)" != "$today" ]; then
+    kv_set send_day "$today"; kv_set send_count 0; kv_set send_capped 0
+  fi
+  count=$(kv_get send_count)
+  # 상태가 깨졌으면 **막지 말고 흘려보낸다**(fail-open). 감시에서 의심스러울 때
+  # 조용해지는 쪽을 고르면 고장과 무사고가 같아 보인다.
+  case "$count" in ''|*[!0-9]*) kv_set send_count 0; return 0 ;; esac
+  if [ "$count" -ge "$SEND_MAX_DAY" ]; then
+    [ "$(kv_get send_capped)" = "1" ] && return 1
+    return 2
+  fi
+  return 0
+}
+# **성공한 전송만** 상한을 소진한다. 상한 통보(2)는 실제로 나간 뒤에야 잠근다.
+_send_quota_commit() {
+  local count
+  count=$(kv_get send_count); case "$count" in ''|*[!0-9]*) count=0 ;; esac
+  kv_set send_count "$((count + 1))"
+  [ "${1:-0}" = "2" ] && kv_set send_capped 1
+  return 0
+}
 
 send_telegram() {
-  local text code i
+  local text code i q
   text=$(printf '%s' "$1" | scrub)
+
+  # ⚠️ 상한은 **DRY-RUN 보다 먼저** 본다. 그래야 자체검사가 이 경로를 실제로 밟는다 —
+  #    못 도는 검사는 없는 검사다.
+  _send_quota_check; q=$?
+  if [ "$q" = "1" ]; then
+    log "ALERT-SUPPRESSED-CAP 하루 상한 ${SEND_MAX_DAY}통 :: $(printf '%s' "$text" | tr '\n' '|')"
+    return 1
+  elif [ "$q" = "2" ]; then
+    text="[realestate] ⚠️ 경보 발송이 하루 상한(${SEND_MAX_DAY}통)에 닿았다 — 오늘 남은 경보는 로그에만 남는다. 폭주 원인을 먼저 확인할 것."
+  fi
 
   if [ "$DRY_RUN" = "1" ]; then
     printf '[DRY-RUN 전송하지 않음]\n%s\n' "$text"
     log "DRY-RUN :: $(printf '%s' "$text" | tr '\n' '|')"
+    _send_quota_commit "$q"   # ⛔ CR47-1 — DRY-RUN 도 "나간 것" 으로 센다(검사가 밟게)
     return 0
   fi
 
@@ -238,6 +293,7 @@ send_telegram() {
         --data-urlencode "text=${text}" \
         --data-urlencode "disable_web_page_preview=true" 2>/dev/null)
     if [ "$code" = "200" ]; then
+      _send_quota_commit "$q"   # ⛔ CR47-1 — **나간 뒤에만** 소진한다
       kv_set alert_channel_ok 1
       kv_set alert_last_sent "$(date +%s)"
       log "ALERT-SENT http=200 src=$CRED_SRC"

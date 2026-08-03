@@ -788,6 +788,9 @@ fi
 RD="$TMPROOT/rot"; mkdir -p "$RD"
 authgen() { local n=$1 i=1; while [ "$i" -le "$n" ]; do echo "Aug  1 07:00:00 h sshd[$i]: Failed password for root from 1.2.3.4 port 1 ssh2"; i=$((i + 1)); done; }
 HIT='Aug  1 08:02:00 h sshd[9]: Accepted password for root from 9.9.9.9 port 3 ssh2'
+# journald `-o cat` 은 **메시지 본문만** 준다(syslog 접두부 없음 — 서버 실측).
+# 두 출처는 형식이 다르므로 픽스처도 달라야 한다. 같은 줄을 양쪽에 쓰면 그건 현실이 아니다.
+HIT_JD='Accepted password for root from 9.9.9.9 port 3 ssh2'
 sshrun() { local st="$TMPROOT/$1"; run_mon "$st" --fast RE_MON_LOG_DIR="$FULL" RE_MON_APP_LOG_GLOB="$FULL/realestate-monitor.log*" RE_MON_ACCESS_LOG="$FULL/realestate.access.log" RE_MON_ERROR_LOG="$FULL/realestate.error.log" RE_MON_AUTH_LOG="$2" >/dev/null 2>&1; }
 
 # --- 이 파일시스템이 판정에 필요한 것을 지원하는가 --------------------------
@@ -837,6 +840,18 @@ want "$TMPROOT/rc.log" 'ALERT authshrink' "(c) auth.log 를 통째로 비우면 
      "(c) auth.log 를 비웠는데 조용하다 — 위험수용(SR36-1)을 지탱하는 유일한 기계가 눈이 먼다"
 want "$TMPROOT/rc.log" 'ALERT logblind' "(c) 못 본 구간이 감시불능 사유에도 남는다" \
      "(c) 지워진 구간을 '0건'으로 넘긴다"
+# (c 해소) ⛔ CR44-2 §10 — **clear 경로를 관문이 보는 것이 여섯뿐**이었다. `authshrink`
+#   는 코드에 clear 가 있는데 아무도 안 봤다. 안 꺼지는 경보는 곧 무시되는 경보이고,
+#   그 결함은 `sshjournal` 에서 실제로 났다. 추적이 정상으로 돌아오면 꺼져야 한다.
+RCPRE=$(wc -l <"$TMPROOT/rc.log" 2>/dev/null); RCPRE=${RCPRE:-0}
+authgen 6 >>"$AU"; sshrun rc "$AU"
+tail -n +$((RCPRE + 1)) "$TMPROOT/rc.log" >"$TMPROOT/rc.after.log" 2>/dev/null
+want "$TMPROOT/rc.after.log" 'ALERT-CLEARED authshrink' \
+     "(c 해소) 추적이 정상으로 돌아오면 authshrink 가 꺼진다 (요약 머리말의 미해소가 풀린다)" \
+     "(c 해소) 한 번 truncate 되면 authshrink 가 영영 안 꺼진다 — 사람이 그 이름을 무시하게 된다"
+if [ ! -f "$TMPROOT/rc/alerts/authshrink.active" ]; then
+  ok "(c 해소) .active 도 지워진다"
+else ng "(c 해소) 해소 통보는 갔는데 .active 가 남는다 — 미해소 개수가 안 줄어든다"; fi
 
 # (c2) **옛 회전본이 큰 채로 남아 있는 상태**에서의 truncate — (c) 보다 어려운 쪽이다.
 #      "줄었는데 .1 이 오프셋보다 크다" 만 보면 회전으로 오인해 옛 구간을 다시 센다.
@@ -927,6 +942,14 @@ if touch -d '5 days ago' "$AU" 2>/dev/null; then
   if has "$(cat "$TMPROOT/rx6.log" 2>/dev/null)" '이번 구간 0건 (기대 0)'; then
     ng "(x6) 얼어붙은 로그의 0건을 '기대 0' 이라고 적는다 — '못 봤다'를 '괜찮다'로 말한다"
   else ok "(x6) 얼어붙은 동안의 0건을 '기대 0' 이라 적지 않는다 (못 본 것이라고 적는다)"; fi
+  # (x6 해소) 로그가 다시 흐르면 꺼지는가 — clear 경로를 관문이 **행동으로** 본다(CR44-2 §10).
+  X6PRE=$(wc -l <"$TMPROOT/rx6.log" 2>/dev/null); X6PRE=${X6PRE:-0}
+  authgen 4 >>"$AU"; touch "$AU" 2>/dev/null
+  sshrun rx6 "$AU"
+  tail -n +$((X6PRE + 1)) "$TMPROOT/rx6.log" >"$TMPROOT/rx6.after.log" 2>/dev/null
+  want "$TMPROOT/rx6.after.log" 'ALERT-CLEARED authfresh' \
+       "(x6 해소) auth.log 가 다시 기록되면 authfresh 가 꺼진다 (rsyslog 를 살린 뒤 표시가 실제로 풀린다)" \
+       "(x6 해소) rsyslog 를 되살려도 authfresh 가 안 꺼진다 — 요약 머리말이 계속 미해소다"
   # 양성 대조군 — 신선하면 안 울어야 한다(안 그러면 5분마다 운다)
   touch "$AU"; sshrun rx6b "$AU"
   avoid "$TMPROOT/rx6b.log" 'ALERT authfresh' \
@@ -994,20 +1017,56 @@ else skip "(x10) touch -d 를 못 써서 동결+위조를 만들 수 없다"; fi
 if command -v dd >/dev/null 2>&1; then
   AU="$RD/x9.auth.log"; authgen 30 >"$AU"; echo "$HIT" >>"$AU"
   X9OFF=$(( $(stat -c %s "$AU" 2>/dev/null || echo 0) - ${#HIT} - 1 ))
+  # ⛔ **이 검사의 초록이 운(運)이었다 — 서버에서 붉었다(2026-08-02 실측).**
+  #    ⓪b 의 조건은 `mtime(초 단위) 이 앞으로 갔는가` 인데, 기준값 실행과 dd 가
+  #    **같은 초** 안에서 끝나면 그 조건이 성립하지 않는다. 리눅스에서 실제로 그랬고
+  #    (02:19:16.361 → 02:19:16.541 · 둘 다 %Y=1785604756) 이 검사는 FAIL 했다.
+  #    윈도우에서는 느려서 초 경계를 우연히 넘었고, 그래서 통과했다.
+  #    → 기준 mtime 을 과거로 못 박아 시나리오를 **결정적으로** 만든다(x10 과 같은 수법).
+  #      운영에서는 폴링 간격이 5분이라 이 문제가 없다 — 이것은 하네스의 결함이었다.
+  touch -d '2 minutes ago' "$AU" 2>/dev/null || true
   X9SZ=$(stat -c %s "$AU" 2>/dev/null); X9INO=$(stat -c %i "$AU" 2>/dev/null)
+  X9MT=$(stat -c %Y "$AU" 2>/dev/null)
   sshrun rx9 "$AU"                                     # 기준값 (누적 1건은 여기서 신고된다)
   X9NEW=$(printf '%s' "$HIT" | sed 's/Accepted password/Failed password0/')
   printf '%s' "$X9NEW" | dd of="$AU" bs=1 seek="$X9OFF" conv=notrunc status=none 2>/dev/null
   X9SZ2=$(stat -c %s "$AU" 2>/dev/null); X9INO2=$(stat -c %i "$AU" 2>/dev/null)
-  if [ "$X9SZ" = "$X9SZ2" ] && [ "$X9INO" = "$X9INO2" ]; then
+  X9MT2=$(stat -c %Y "$AU" 2>/dev/null)
+  if [ "$X9SZ" != "$X9SZ2" ] || [ "$X9INO" != "$X9INO2" ]; then
+    harn "(x9) 같은 길이 덮어쓰기" "dd conv=notrunc 가 크기(${X9SZ}→${X9SZ2})나 inode 를 바꿨다 — 시나리오를 못 만들었다"
+  elif ! nz "$X9MT" "$X9MT2" || ! [ "$X9MT2" -gt "$X9MT" ] 2>/dev/null; then
+    # 픽스처가 시나리오를 못 만든 것을 **검사 실패로 보고하지 않는다**(CR44-3 ② 와 같은 원칙).
+    harn "(x9) 같은 길이 덮어쓰기" "mtime 이 앞으로 가지 않았다(${X9MT:-?}→${X9MT2:-?}) — touch -d 가 안 먹거나 초 해상도가 부족하다. **검사 결과가 아니다**"
+  else
     sshrun rx9 "$AU"
     want "$TMPROOT/rx9.log" 'ALERT authfake' \
          "(x9) 같은 길이 in-place 덮어쓰기를 잡는다 — 크기·inode 가 보존돼도 mtime 은 못 속인다 (SR39-1)" \
          "(x9) 침입 줄을 같은 길이로 덮어쓰면 완전 침묵한다 — 메타데이터가 전부 보존된다"
-  else
-    harn "(x9) 같은 길이 덮어쓰기" "dd conv=notrunc 가 크기(${X9SZ}→${X9SZ2})나 inode 를 바꿨다 — 시나리오를 못 만들었다"
   fi
 else skip "(x9) dd 가 없어 in-place 덮어쓰기를 만들 수 없다"; fi
+
+# (x9b) ⛔ SR40-3 — **위 (x9) 의 사정거리를 정확히 적는다.**
+#   ⓪b 는 `size == off`, 즉 **창 안에 auth.log 가 한 바이트도 안 늘었을 때만** 발동한다.
+#   그런데 서버는 `Failed password` 가 분당 ~9줄 쌓여 5분 창이 **항상** 자란다.
+#   즉 **운영 조건의 x9 는 여기서 안 잡힌다.** 그것을 말이 아니라 검사로 못 박는다 —
+#   같은 공격을 "자라는 로그" 위에서 재현하고, `authfake` 가 안 뜨는 것을 확인한다.
+#   (그럼 무엇이 잡는가? 아래 ㉯ 의 journald 교차 하나뿐이다. 그래서 그 교차가
+#    **살아 있는 척만 하는 상태**를 SR40-1 검사가 따로 본다.)
+if command -v dd >/dev/null 2>&1; then
+  AU="$RD/x9b.auth.log"; authgen 30 >"$AU"; echo "$HIT" >>"$AU"
+  X9BOFF=$(( $(stat -c %s "$AU" 2>/dev/null || echo 0) - ${#HIT} - 1 ))
+  touch -d '2 minutes ago' "$AU" 2>/dev/null || true
+  sshrun rx9b "$AU"                                    # 기준값
+  X9BNEW=$(printf '%s' "$HIT" | sed 's/Accepted password/Failed password0/')
+  printf '%s' "$X9BNEW" | dd of="$AU" bs=1 seek="$X9BOFF" conv=notrunc status=none 2>/dev/null
+  authgen 9 >>"$AU"                                    # ← 운영 조건: 같은 창에 로그가 자란다
+  X9BPRE=$(wc -l <"$TMPROOT/rx9b.log" 2>/dev/null); X9BPRE=${X9BPRE:-0}
+  sshrun rx9b "$AU"
+  tail -n +$((X9BPRE + 1)) "$TMPROOT/rx9b.log" >"$TMPROOT/rx9b.last.log" 2>/dev/null
+  avoid "$TMPROOT/rx9b.last.log" 'ALERT authfake' \
+        "(x9b) 로그가 자라는 창에서는 authfake 가 뜨지 않는다 — 사정거리를 사실대로 안다 (SR40-3)" \
+        "(x9b) authfake 가 자라는 로그에서도 뜬다 — 그 문턱이 바뀌었으니 오탐 근거를 다시 재야 한다"
+else skip "(x9b) dd 가 없어 운영조건 in-place 덮어쓰기를 만들 수 없다"; fi
 
 # (x11) SR39-3 — `: > auth.log` + 가짜 `.1.gz`.
 #       이 서버는 delaycompress 라 회전하면 `.1` 이 `.2` 로 밀린다 — **`.1.gz` 라는 상태가 없다.**
@@ -1039,27 +1098,89 @@ else skip "(x11) inode 불변식 또는 gzip 이 없어 압축회전 위조를 �
 #   메타데이터로 못 보는 칸은 회피 표를 늘려서 못 닫는다. 출처를 하나 더 본다.
 #   여기서는 실제 저널을 읽지 않는다 — `journalctl` 을 가짜로 PATH 앞에 둔다
 #   (그래야 systemd 없는 곳에서도 이 검사가 **돈다**. 못 도는 검사는 없는 검사다).
+#
+# ⛔ **이 구획이 서버(리눅스)에서 붉었다 — 그리고 그 빨강이 옳았다(2026-08-02).**
+#    예전 ③ 은 "journald 가 사라진" 상태를 **PATH 에서 가짜를 빼는 것**으로 만들었는데,
+#    서버에는 `/usr/bin/journalctl` 이 **진짜로 있다**. 그러니 `jd_ok` 는 1 그대로였고
+#    경보가 안 떴다. 윈도우에서는 진짜가 없어서 우연히 통과했다 —
+#    **관문의 초록이 환경 덕이었던 자리다.**
+#    → 이제 "사라짐"을 **응답 실패**로 만든다(`journalctl -n 1` 이 실패하는 가짜를
+#      PATH 앞에 둔다). 그것이 monitor.sh 가 실제로 보는 조건(`jd_ok=0`)이고,
+#      진짜 journalctl 이 있든 없든 두 환경에서 똑같이 재현된다.
 JBIN="$TMPROOT/jbin"; mkdir -p "$JBIN"
 { echo '#!/bin/sh'
   echo 'case "$*" in *"-n 1"*) exit 0 ;; esac'
-  echo '[ -n "${FAKE_JOURNAL:-}" ] && [ -f "$FAKE_JOURNAL" ] && cat "$FAKE_JOURNAL"'
+  # ⛔ CR45-1 — monitor.sh 는 **반드시 비어야 하는 창**(미래 60초)을 한 번 물어서
+  #    "빈 결과 = 빈 출력" 인지 확인한다. 그 프로브만 `--until` 을 쓴다.
+  #    가짜가 창을 무시하고 픽스처를 뱉으면 프로브가 늘 non-empty 가 되고,
+  #    그러면 **가짜 탓에 모든 교차 판정이 보류된다**(실제로 그렇게 붉었다).
+  #    미래 창은 현실에서도 비어 있다 — 그대로 흉내낸다.
+  # 미래 창(프로브)은 현실에서도 비어 있다. 창을 무시하고 픽스처를 뱉으면
+  # 프로브가 늘 non-empty 가 되어 **가짜 탓에 모든 교차 판정이 보류된다**(실제로 그랬다).
+  echo 'case "$*" in *--until*) FAKE_JOURNAL="" ;; esac'
+  echo 'if [ -n "${FAKE_JOURNAL:-}" ] && [ -s "$FAKE_JOURNAL" ]; then'
+  echo '  cat "$FAKE_JOURNAL"; exit 0'
+  echo 'fi'
+  # ⛔ CR45-1 — **가짜가 `-o cat` 을 실제로 존중한다.** 예전 가짜는 형식 플래그를 통째로
+  #    무시해 "결과가 비면 늘 빈 출력" 이었다. 그러면 `-o cat` 을 빼는 변이가
+  #    **픽스처 상에서 아무 일도 일으키지 않아** 관문이 그 변이를 못 본다(CR45-1 재현).
+  #    진짜는 `-o cat` 이면 0바이트, 없으면 `-- No entries --` 다(실측). 그대로 흉내낸다.
+  echo 'case "$*" in *"-o cat"*) exit 0 ;; esac'
+  echo 'echo "-- No entries --"'
   echo 'exit 0'
 } >"$JBIN/journalctl"
 chmod +x "$JBIN/journalctl" 2>/dev/null
-JFIX="$TMPROOT/journal.txt"
-sshrunj() { # $1=상태이름 $2=auth.log $3=저널 픽스처(없으면 빈 것)
+# 죽은 journald — `command -v` 로는 보이는데 `-n 1` 이 실패한다(= jd_ok 0).
+JDEAD="$TMPROOT/jdead"; mkdir -p "$JDEAD"
+{ echo '#!/bin/sh'; echo 'exit 1'; } >"$JDEAD/journalctl"
+chmod +x "$JDEAD/journalctl" 2>/dev/null
+JFIX="$TMPROOT/journal.txt"; : >"$JFIX"
+JFIX2="$TMPROOT/journal-normal.txt"           # 평범한 ssh 메시지(성공 0건) → jtot > 0
+: >"$TMPROOT/none.txt"                        # 아무것도 안 보이는 저널
+# journald 가 정상일 때 창 안에 보이는 ssh 유닛 메시지. 서버 실측으로 5분 창 최소 21줄.
+jgen() { local n=$1 i=1; while [ "$i" -le "$n" ]; do echo "Failed password for root from 1.2.3.4 port 1 ssh2"; i=$((i + 1)); done; }
+# auth.log 가 **sshd 없이** 자라는 정상 경로(실측: CRON · systemd-logind · systemd-user).
+crongen() { local n=$1 i=1; while [ "$i" -le "$n" ]; do echo "Aug  1 07:00:00 h CRON[$i]: pam_unix(cron:session): session opened for user root(uid=0) by (uid=0)"; i=$((i + 1)); done; }
+jgen 60 >"$JFIX2"
+sshrunj() { # $1=상태이름 $2=auth.log $3=저널 픽스처 [$4=PATH 앞에 둘 디렉터리]
   local st="$TMPROOT/$1"
-  run_mon "$st" --fast PATH="$JBIN:$PATH" FAKE_JOURNAL="${3:-/nonexistent}" \
+  run_mon "$st" --fast PATH="${4:-$JBIN}:$PATH" FAKE_JOURNAL="${3:-/nonexistent}" \
     RE_MON_LOG_DIR="$FULL" RE_MON_APP_LOG_GLOB="$FULL/realestate-monitor.log*" \
     RE_MON_ACCESS_LOG="$FULL/realestate.access.log" RE_MON_ERROR_LOG="$FULL/realestate.error.log" \
     RE_MON_AUTH_LOG="$2" >/dev/null 2>&1
 }
-if [ -x "$JBIN/journalctl" ] || sh "$JBIN/journalctl" -n 1 >/dev/null 2>&1; then
+# 창 길이를 **결정적으로** 만든다. monitor.sh 는 `now - kv/sshpw_at` 을 창으로 쓰는데
+# 자체검사는 실행을 1초 간격으로 이어 붙이므로 그냥 두면 창이 늘 몇 초다.
+# ⚠️ 여기서 임계(JD_MIN_WINDOW)를 env 로 낮추지 **않는다** — 그러면 출하되는 기본값이
+#    아니라 우리가 고른 값을 시험하게 된다. 상태 파일 쪽을 옮긴다.
+age_window() { printf '%s' "$(( $(date +%s) - ${2:-300} ))" >"$TMPROOT/$1/kv/sshpw_at" 2>/dev/null; }
+
+# ⛔ CR44-3 ② — **픽스처가 기대대로 도는지 먼저 확인한다.** 예전에는 `[ -x ]` 만 봤고,
+#    파일이 실행은 되는데 출력이 안 나오는 경우를 **검사 실패**로 보고했다(리뷰 실측:
+#    M1 관문 실행에서 교차 2건이 붉었는데 원인은 가짜 바이너리였다). 하네스 고장은
+#    ok 도 ng 도 아니라 HARN 이다.
+JPROBE="$TMPROOT/jprobe.txt"; printf 'probe-line\n' >"$JPROBE"
+JOK=0
+if PATH="$JBIN:$PATH" journalctl -n 1 --no-pager >/dev/null 2>&1 &&
+   [ "$(PATH="$JBIN:$PATH" FAKE_JOURNAL="$JPROBE" journalctl -u ssh --since '@0' --no-pager -o cat 2>/dev/null)" = "probe-line" ] &&
+   ! PATH="$JDEAD:$PATH" journalctl -n 1 --no-pager >/dev/null 2>&1; then
+  JOK=1
+fi
+if [ "$JOK" != 1 ]; then
+  harn "(교차) journald 시나리오 전체" "가짜 journalctl 이 기대대로 동작하지 않는다(응답·픽스처·죽음 중 하나) — **검사 결과가 아니다**(하네스·환경 문제)"
+else
   # ① 두 출처가 어긋난다 — auth.log 는 조용한데 journald 는 성공 로그인을 본다(= x9 의 잔상)
-  : >"$JFIX"; echo "$HIT" >>"$JFIX"
+  #    ⚠️ **이것이 운영 조건의 x9 다**(위 x9b 참조). auth.log 가 자라는 창에서 ⓪b 는
+  #       발동하지 않으므로, 운영에서 그 공격을 반증하는 것은 이 교차 하나뿐이다.
+  # ⚠️ **저널 픽스처는 `-o cat` 모양이어야 한다** — syslog 접두부(`… h sshd[9]: `)가 없다.
+  #    예전에는 여기에 auth.log 형식인 `$HIT` 를 그대로 넣었다. 앵커가 없던 시절에는
+  #    아무 데나 걸려서 통과했지만, 그건 **픽스처가 현실과 다른 것을 관문이 못 보던 것**이다
+  #    (SR41-2 로 앵커를 달자마자 이 두 줄이 붉어졌다 — 검사가 옳았다).
+  #    `jgen` 이 만드는 줄은 이미 접두부가 없다. 성공줄도 같은 모양으로 맞춘다.
+  jgen 40 >"$JFIX"; echo "$HIT_JD" >>"$JFIX"
   AU="$RD/j1.auth.log"; authgen 40 >"$AU"
   sshrunj rj1 "$AU" "$TMPROOT/none.txt"      # 기준값 (저널 비어 있음)
-  authgen 5 >>"$AU"
+  authgen 5 >>"$AU"; age_window rj1 300
   sshrunj rj1 "$AU" "$JFIX"
   want "$TMPROOT/rj1.log" 'ALERT sshpw' \
        "(교차) auth.log 는 0건인데 journald 가 성공 로그인을 보면 경보 (SR39-1 · 두 번째 출처)" \
@@ -1068,25 +1189,438 @@ if [ -x "$JBIN/journalctl" ] || sh "$JBIN/journalctl" -n 1 >/dev/null 2>&1; then
     ok "(교차) 알림 본문이 '두 출처의 수가 다르다' 를 말한다 (사람이 무엇을 볼지 안다)"
   else ng "(교차) 두 출처가 어긋난 사실이 알림 본문에 없다"; fi
 
-  # ② 대조군 — 두 출처가 모두 0 이면 조용해야 한다(5분마다 울면 안 된다)
-  : >"$TMPROOT/none.txt"
+  # ② 대조군 — 두 출처가 **둘 다 살아 있고** 성공이 0건이면 조용해야 한다.
+  #    ⚠️ 예전 대조군은 저널을 **빈 것**으로 두고 "두 출처가 다 0 이면 침묵" 을 확인했다.
+  #       그런데 그 상태는 SR40-1 의 공격 성공 상태(j2)와 **글자 그대로 같다** —
+  #       관문이 "오탐 0" 이라고 인증하던 것이 곧 "교차가 죽었다" 였다.
+  #       그래서 정상 대조군은 이제 journald 가 **실제로 보이는** 상태로 만든다.
   AU="$RD/j2.auth.log"; authgen 40 >"$AU"
-  sshrunj rj2 "$AU" "$TMPROOT/none.txt"
-  authgen 5 >>"$AU"; sshrunj rj2 "$AU" "$TMPROOT/none.txt"
-  authgen 5 >>"$AU"; sshrunj rj2 "$AU" "$TMPROOT/none.txt"
+  sshrunj rj2 "$AU" "$JFIX2"
+  authgen 5 >>"$AU"; age_window rj2 300; sshrunj rj2 "$AU" "$JFIX2"
+  authgen 5 >>"$AU"; age_window rj2 300; sshrunj rj2 "$AU" "$JFIX2"
   avoid "$TMPROOT/rj2.log" 'ALERT sshpw\|ALERT sshjournal' \
-        "(교차 대조군) 두 출처가 다 0 이면 침묵 (오탐 0)" \
+        "(교차 대조군) 두 출처가 다 살아 있고 성공이 0건이면 침묵 (오탐 0)" \
         "(교차 대조군) 정상인데 교차 검사가 운다 — 5분마다 간다"
 
-  # ③ 두 번째 출처가 **사라지는 것 자체**도 신호다. journald 도 root 면 지울 수 있다 —
-  #    그래서 이 교차는 침입을 불가능하게 만들지 않고 비용을 올릴 뿐이고,
+  # ③ ⛔ SR40-1 — **journalctl 은 응답하는데 ssh 조회만 0줄.**
+  #    `journalctl --rotate --vacuum-time=1s` · `Storage=none` · ssh 유닛 이름 변경/
+  #    소켓 활성화 · 저널 손상이 전부 이 모양이다. 예전에는 **완전 침묵**이었고,
+  #    요약은 `journald 같은 구간 0건 (기대 0/0)` 이라며 무사고를 선언했다.
+  AU="$RD/j3.auth.log"; authgen 40 >"$AU"
+  sshrunj rj3 "$AU" "$JFIX2"                        # 기준값 (journald 정상)
+  authgen 20 >>"$AU"; age_window rj3 300
+  sshrunj rj3 "$AU" "$TMPROOT/none.txt"             # 응답 O · ssh 줄 0
+  want "$TMPROOT/rj3.log" 'ALERT sshjournal' \
+       "(교차 j2) journalctl 은 응답하는데 ssh 조회가 0줄이면 경보 (SR40-1 — 두 번째 출처가 눈만 감았다)" \
+       "(교차 j2) 저널을 지워도 완전 침묵한다 — 운영에서 x9 를 잡는 유일한 수단이 조용히 없어진다"
+  want "$TMPROOT/rj3.log" '교차 실질 불가' \
+       "(교차 j2) 요약이 '못 봤다'고 적는다 — 0줄을 '기대 0/0' 이라 쓰지 않는다" \
+       "(교차 j2) 눈이 먼 구간의 0건을 '기대 0/0' 이라고 적는다 (적극적인 무사고 선언)"
+  want "$TMPROOT/rj3.log" 'ALERT logblind' \
+       "(교차 j2) 그 사유가 감시불능 목록에도 남는다" \
+       "(교차 j2) 교차가 죽었는데 감시불능 사유에 안 실린다"
+
+  # ③ 대조군 (가) — **창이 짧으면 판정하지 않는다.** 실측 근거(서버 · 24시간):
+  #    ssh 유닛 메시지가 5분 버킷 288개 중 0줄인 버킷은 **0개**(최소 21 · 평균 101)지만,
+  #    **1분 버킷은 1,440개 중 30개가 0줄**이다. 손으로 연달아 돌릴 때가 그 창이다.
+  AU="$RD/j4.auth.log"; authgen 40 >"$AU"
+  sshrunj rj4 "$AU" "$JFIX2"
+  authgen 20 >>"$AU"; sshrunj rj4 "$AU" "$TMPROOT/none.txt"   # 창 = 몇 초 (age_window 안 씀)
+  avoid "$TMPROOT/rj4.log" 'ALERT sshjournal' \
+        "(교차 j2 대조군) 창이 짧으면 0줄을 사고로 보지 않는다 (연달아 돌려도 안 운다)" \
+        "(교차 j2 대조군) 짧은 창의 0줄에 운다 — 손으로 두 번 돌리면 경보가 간다"
+
+  # ③ 대조군 (나) — auth.log 가 **sshd 아닌 줄**로만 자란 경우. auth.log 에는
+  #    CRON·systemd-logind·systemd-user 가 함께 쌓인다(실측: 최근 5,000줄 중 79줄).
+  #    ssh 트래픽이 없는 조용한 창에서 journald 가 0줄인 것은 **정상**이다.
+  AU="$RD/j5.auth.log"; authgen 40 >"$AU"
+  sshrunj rj5 "$AU" "$JFIX2"
+  crongen 20 >>"$AU"; age_window rj5 300
+  sshrunj rj5 "$AU" "$TMPROOT/none.txt"
+  avoid "$TMPROOT/rj5.log" 'ALERT sshjournal' \
+        "(교차 j2 대조군) sshd 가 한 줄도 안 쓴 창에서는 journald 0줄이 정상이다 (오탐 0)" \
+        "(교차 j2 대조군) ssh 트래픽이 없는 창에 운다 — 조용한 시간마다 경보가 간다"
+
+  # ④ 두 번째 출처가 **아예 응답하지 않는** 경우 — 그것 자체가 신호다. journald 도
+  #    root 면 지울 수 있다. 이 교차는 침입을 불가능하게 만들지 않고 비용을 올릴 뿐이고,
   #    그 비용을 공격자가 치렀다는 사실은 우리가 알아야 한다.
-  authgen 5 >>"$AU"; sshrun rj2 "$AU"        # 같은 상태에서 journalctl 없이 (PATH 미포함)
-  want "$TMPROOT/rj2.log" 'ALERT sshjournal' \
-       "(교차) 어제까지 있던 두 번째 출처가 사라지면 경보 — 위험수용의 조건이 조용히 꺼지지 않는다" \
+  AU="$RD/j6.auth.log"; authgen 40 >"$AU"
+  sshrunj rj6 "$AU" "$JFIX2"                            # 기준값
+  authgen 5 >>"$AU"; age_window rj6 300
+  sshrunj rj6 "$AU" "$JFIX2"                            # 정상 1회 (sshpw_jd=1 이 된다)
+  authgen 5 >>"$AU"; age_window rj6 300
+  sshrunj rj6 "$AU" "$JFIX2" "$JDEAD"                   # journalctl 이 응답하지 않는다
+  want "$TMPROOT/rj6.log" 'ALERT sshjournal' \
+       "(교차) 어제까지 있던 두 번째 출처가 응답을 멈추면 경보 — 위험수용의 조건이 조용히 꺼지지 않는다" \
        "(교차) journald 가 사라져도 아무 말이 없다 — 교차 검증이 조용히 없어진다"
+
+  # ⑤ ⛔ CR44-1 — **해소 경로.** 형제 `authfresh` 는 꺼지는데 `sshjournal` 만 안 꺼졌다.
+  #    그러면 journald 가 한 번 흔들린 뒤로 일일 요약 머리말이 영영 `미해소 (sshjournal)`
+  #    이고, 안 꺼지는 경보는 곧 무시되는 경보다.
+  #    ⚠️ 그런데 **아무 때나 꺼져도 안 된다** — 응답만 하고 0줄인 상태에서 끄면
+  #       그것이 CR40-2 가 막은 거짓 해소다. 두 가지를 함께 본다(부를 자격 / 부를 의무).
+  RJ6PRE=$(wc -l <"$TMPROOT/rj6.log" 2>/dev/null); RJ6PRE=${RJ6PRE:-0}
+  authgen 20 >>"$AU"; age_window rj6 300
+  sshrunj rj6 "$AU" "$TMPROOT/none.txt"                 # 돌아왔지만 ssh 줄은 0 (눈만 뜬 상태)
+  tail -n +$((RJ6PRE + 1)) "$TMPROOT/rj6.log" >"$TMPROOT/rj6.blind.log" 2>/dev/null
+  avoid "$TMPROOT/rj6.blind.log" 'ALERT-CLEARED sshjournal' \
+        "(교차 해소) 응답만 하고 ssh 줄이 0 이면 **끄지 않는다** (거짓 해소 방지 · CR40-2)" \
+        "(교차 해소) 눈이 먼 채로 해소 통보가 나간다 — 사람은 문제가 풀린 줄 안다"
+  if [ -f "$TMPROOT/rj6/alerts/sshjournal.active" ]; then
+    ok "(교차 해소) 그동안 경보가 켜진 채로 남는다 (.active 생존 · 요약 머리말이 미해소를 계속 말한다)"
+  else
+    ng "(교차 해소) 눈이 먼 상태인데 .active 가 사라졌다 — 미해소 표시가 없어진다"
+  fi
+  RJ6PRE2=$(wc -l <"$TMPROOT/rj6.log" 2>/dev/null); RJ6PRE2=${RJ6PRE2:-0}
+  authgen 20 >>"$AU"; age_window rj6 300
+  sshrunj rj6 "$AU" "$JFIX2"                            # 교차가 실제로 돌아왔다
+  tail -n +$((RJ6PRE2 + 1)) "$TMPROOT/rj6.log" >"$TMPROOT/rj6.ok.log" 2>/dev/null
+  want "$TMPROOT/rj6.ok.log" 'ALERT-CLEARED sshjournal' \
+       "(교차 해소) 교차가 실제로 돌아오면 경보가 꺼진다 (CR44-1)" \
+       "(교차 해소) journald 가 복구돼도 sshjournal 이 영영 안 꺼진다 — 요약 머리말이 계속 미해소다"
+  if [ ! -f "$TMPROOT/rj6/alerts/sshjournal.active" ]; then
+    ok "(교차 해소) .active 도 지워진다 (다음에 또 나면 새 사건으로 온다)"
+  else
+    ng "(교차 해소) 해소 통보는 갔는데 .active 가 남는다"
+  fi
+
+  # ⑥ ⛔ CR45-1 — **"빈 결과"를 빈 출력으로 안 주는 journalctl.**
+  #    위 ③(j2)의 눈멂 탐지는 전부 `jtot == 0` 에 걸려 있고, 그 0 은 `-o cat` 이
+  #    "해당 없음"을 0바이트로 준다는 데 걸려 있다. 실측(2026-08-03 · 서버 systemd 249):
+  #      journalctl -u ssh --since @<미래> -o cat        → 0바이트
+  #      journalctl -u ssh --since @<미래>               → `-- No entries --` (stdout!)
+  #    즉 누가 디버깅하려고 `-o cat` 을 빼면 `jtot` 이 늘 1 이상이 되어
+  #    **③ 이 영원히 발동하지 않는다.** 그런데 이 자체검사의 가짜 journalctl 은
+  #    빈 출력을 주므로 **그 상태에서도 전부 초록이다** —
+  #    픽스처가 현실이 아니라 우리 가정대로 굴어서 통과하는, 이 저장소의 그 형태다.
+  #    → 그래서 **현실 쪽으로 거짓말하는 가짜**를 하나 더 둔다.
+  JMETA="$TMPROOT/jmeta"; mkdir -p "$JMETA"
+  { echo '#!/bin/sh'
+    echo 'case "$*" in *"-n 1"*) exit 0 ;; esac'
+    # ⚠️ 미래 창(프로브)도 **비어 있지만 메타줄을 준다** — 그게 이 가짜의 요점이다.
+    #    실제 journalctl 이 `-o cat` 없이 하는 짓이 정확히 이것이다.
+    echo 'case "$*" in *--until*) echo "-- No entries --"; exit 0 ;; esac'
+    echo 'if [ -n "${FAKE_JOURNAL:-}" ] && [ -s "$FAKE_JOURNAL" ]; then'
+    echo '  cat "$FAKE_JOURNAL"'
+    echo 'else'
+    echo '  echo "-- No entries --"'
+    echo 'fi'
+    echo 'exit 0'
+  } >"$JMETA/journalctl"
+  chmod +x "$JMETA/journalctl" 2>/dev/null
+  if [ "$(PATH="$JMETA:$PATH" FAKE_JOURNAL=/nonexistent journalctl -u ssh --since '@0' --no-pager -o cat 2>/dev/null)" != "-- No entries --" ]; then
+    harn "(교차 j3) 메타줄 가짜 journalctl" "가짜가 '-- No entries --' 를 안 준다 — **검사 결과가 아니다**(하네스 문제)"
+  else
+    # ⛔ CR45-2 — **경보를 먼저 켜 두고 시작한다.**
+    #    예전 rj7 은 처음부터 `JMETA` 라 `sshjournal` 을 **한 번도 raise 하지 않았다.**
+    #    `clear_alert` 는 `.active` 가 없으면 첫 줄에서 return 하므로(`monitor-lib.sh`),
+    #    아래 `avoid ALERT-CLEARED` 가 **가드를 지워도 통과**했다 — 공허한 단언이었다
+    #    (리뷰어 실측: 가드 제거 변이로 자체검사 201/0/0 · rc=0).
+    #    → `JBIN` 으로 **진짜 눈멂 상태**를 한 번 만들어 경보를 켠 뒤 `JMETA` 로 전환한다.
+    #      그래야 `clear_alert` 가 실제로 하중을 받고, 가드가 없으면 거짓 해소가 나간다.
+    AU="$RD/j7.auth.log"; authgen 40 >"$AU"
+    sshrunj rj7 "$AU" "$JFIX2"                          # 기준값 (journald 정상 · JBIN)
+    authgen 20 >>"$AU"; age_window rj7 300
+    sshrunj rj7 "$AU" "$TMPROOT/none.txt"               # 눈멂 → sshjournal 이 **켜진다**
+    if [ ! -f "$TMPROOT/rj7/alerts/sshjournal.active" ]; then
+      harn "(교차 j3) 사전 조건" "sshjournal 을 켜지 못했다 — 아래 해소 단언이 공허해진다(**검사 결과가 아니다**)"
+    else
+      ok "(교차 j3) 사전 조건 — sshjournal 이 실제로 켜져 있다 (해소 단언이 하중을 받는다 · CR45-2)"
+    fi
+    RJ7PRE=$(wc -l <"$TMPROOT/rj7.log" 2>/dev/null); RJ7PRE=${RJ7PRE:-0}
+    authgen 20 >>"$AU"; age_window rj7 300
+    sshrunj rj7 "$AU" "$TMPROOT/none.txt" "$JMETA"      # 형식이 바뀌었다(메타줄) → 판정 보류
+    tail -n +$((RJ7PRE + 1)) "$TMPROOT/rj7.log" >"$TMPROOT/rj7.meta.log" 2>/dev/null
+    want "$TMPROOT/rj7.log" '교차 판정 보류\|믿을 수 없어' \
+         "(교차 j3) 빈 결과를 구분 못 하면 **판정을 보류한다** (CR45-1)" \
+         "(교차 j3) 메타줄 1개를 ssh 메시지 1줄로 세고 정상이라고 적는다 — 눈멂 탐지가 통째로 죽는다"
+    want "$TMPROOT/rj7.log" 'ALERT logblind' \
+         "(교차 j3) 그 사유가 감시불능 목록에 남는다" \
+         "(교차 j3) 줄 수를 못 믿는 상태가 감시불능에 안 실린다"
+    # ⚠️ 패턴을 `SSH2차` 로 묶는다. `기대 0/0` 만 찾으면 **로그유출 줄**(매 실행 출력되는
+    #    `로그유출: access 0건 · error 0건 (기대 0/0)`)에 걸려 늘 붉다 — 실제로 그랬다.
+    #    관문이 엉뚱한 줄을 보고 우는 것도 오탐이고, 오탐은 관문을 못 믿게 만든다.
+    avoid "$TMPROOT/rj7.log" 'SSH2차.*기대 0/0' \
+          "(교차 j3) 못 믿는 수로 '기대 0/0' 무사고 선언을 하지 않는다" \
+          "(교차 j3) 메타줄을 세어 놓고 '기대 0/0' 이라고 적는다 (적극적인 거짓 무사고)"
+    # ⚠️ **켜 둔 경보가 있는 구간만** 본다(CR45-2). 전체 로그를 보면 앞의 정상 구간까지
+    #    섞여 무엇 때문에 통과했는지 알 수 없다.
+    avoid "$TMPROOT/rj7.meta.log" 'ALERT-CLEARED sshjournal' \
+          "(교차 j3) 못 믿는 수로 경보를 끄지 않는다 (거짓 해소 방지 · CR40-2 · CR45-2)" \
+          "(교차 j3) 메타줄 때문에 jtot>0 이 되어 켜져 있던 경보가 꺼진다"
+    if [ -f "$TMPROOT/rj7/alerts/sshjournal.active" ]; then
+      ok "(교차 j3) 경보가 켜진 채로 남는다 (.active 생존 · 요약 머리말이 미해소를 계속 말한다)"
+    else
+      ng "(교차 j3) 줄 수를 못 믿는 상태인데 .active 가 사라졌다 — 사람은 문제가 풀린 줄 안다"
+    fi
+  fi
+fi
+
+# ⛔ CR45-1 (구조) — **프로브와 본질의가 같은 형식 플래그를 쓰는가.**
+#    행동 검사로는 못 잡는다: "본질의에서만 `-o cat` 을 빼는" 변이를 픽스처로 만들려면
+#    가짜가 두 호출을 구분해야 하는데, 그러면 그 구분 자체가 우리 가정이 된다.
+#    대신 **갈라질 수 없는 형태인지**를 본다. 약한 검사인 것을 밝혀 둔다 —
+#    이 결함이 실제로 났고(CR45-1) 관문은 201/0/0 으로 초록이었다.
+JSRC=$(cat "$HERE/monitor.sh")
+if has "$JSRC" '_jssh() { journalctl' && has "$JSRC" 'jprobe=$(_jssh' && has "$JSRC" 'jbuf=$(_jssh'; then
+  ok "(교차 구조) 저널 조회 형식이 _jssh 한 곳에서만 만들어진다 (프로브와 본질의가 갈라질 수 없다 · CR45-1)"
 else
-  skip "(교차) 가짜 journalctl 을 만들지 못했다 — 리눅스(서버)에서 확인할 것"
+  ng "(교차 구조) 프로브와 본질의가 각자 형식 플래그를 만든다 — 한쪽만 바뀌면 프로브가 거짓말한다"
+fi
+if printf '%s\n' "$JSRC" | grep -q '=$(journalctl -u ssh'; then
+  ng "(교차 구조) _jssh 를 거치지 않고 journalctl 을 직접 잡아 쓰는 자리가 있다 — 형식이 갈라진다"
+else
+  ok "(교차 구조) journalctl 출력을 직접 잡아 쓰는 자리가 없다"
+fi
+
+# ⛔ SR41-2 — **공격자가 원격에서 T2 를 켤 수 있는가.**
+#    사용자명·프로토콜 식별자는 공격자가 정하고 sshd 는 그것을 그대로 적는다.
+#    앵커가 없던 시절에는 그 안에 `Accepted password` 를 넣기만 하면 경보가 떴고,
+#    `sshpw` 는 **쿨다운 0** 이라 5분마다 하루 288통이 나갔다(봇은 동거 서비스와 공유).
+#    ⚠️ 아래 문자열은 **보안리뷰가 실서버에서 실증한 모양** 그대로다(SR42-1).
+#       앞 라운드 픽스처는 `sshd[NN]: ` 접두부가 없어 **현실보다 약했다** — 그래서
+#       접두부를 통째로 보내는 우회가 관문 초록인 채로 통했다. 공격자는 인증도 필요 없다.
+FORGE_USER='Aug  1 09:00:00 h sshd[77]: Invalid user Accepted password for root from 9.9.9.9 from 1.2.3.4 port 5'
+FORGE_PROTO='Aug  1 09:00:01 h sshd[78]: banner exchange: Connection from 1.2.3.4 port 5: client sent invalid protocol identifier "Accepted password for root"'
+# ⛔ **접두부까지 통째로** — 앞 라운드의 앵커를 실제로 뚫은 모양이다.
+FORGE_PREFIX='Aug  1 09:00:02 h sshd[79]: error: kex_exchange_identification: client sent invalid protocol identifier "sshd[9]: Accepted password for q"'
+FORGE_UPREFIX='Aug  1 09:00:03 h sshd[80]: Invalid user sshd[9]: Accepted password for q from 1.2.3.4 port 5'
+AU="$RD/forge.auth.log"; authgen 40 >"$AU"; sshrun rf1 "$AU"          # 기준값
+printf '%s\n%s\n%s\n%s\n' "$FORGE_USER" "$FORGE_PROTO" "$FORGE_PREFIX" "$FORGE_UPREFIX" >>"$AU"; sshrun rf1 "$AU"
+avoid "$TMPROOT/rf1.log" 'ALERT sshpw' \
+      "(T2 위조) 공격자가 보낸 문자열로는 경보가 안 뜬다 — **접두부를 통째로 보내도** (SR42-1)" \
+      "(T2 위조) **원격에서 트립와이어를 켤 수 있다** — 진짜 경보가 위조 더미에 묻힌다"
+# 위조가 **눈멂 보고 채널**도 오염시키면 안 된다(SR42-3 — 프로브가 부분일치였을 때 그랬다).
+avoid "$TMPROOT/rf1.log" '형식이 앵커와 다르다' \
+      "(T2 위조) 위조 줄로 '형식이 다르다' 를 띄울 수 없다 (눈멂 채널 오염 차단 · SR42-3)" \
+      "(T2 위조) 배너 한 줄로 감시불능 보고를 켤 수 있다 — 원격에서 관문을 흐린다"
+
+# 대조군 — 앵커를 달아 놓고 **진짜를 놓치면** 그건 더 나쁘다. 같은 상태에서 진짜는 떠야 한다.
+AU="$RD/forge2.auth.log"; authgen 40 >"$AU"; sshrun rf2 "$AU"
+printf '%s\n%s\n%s\n' "$FORGE_PREFIX" "$HIT" "$FORGE_UPREFIX" >>"$AU"; sshrun rf2 "$AU"
+want "$TMPROOT/rf2.log" 'ALERT sshpw' \
+      "(T2 위조 대조군) 위조 줄에 섞여 있어도 **진짜 성공줄은 잡는다**" \
+      "(T2 위조 대조군) 앵커가 진짜까지 막았다 — 미탐이다(오탐보다 나쁘다)"
+
+# ⛔ SR41-2/SR42-2/SR42-3 (짝) — **앵커가 이 호스트에 맞는가 · 모르는 메서드가 있는가.**
+#    앵커는 오탐을 막지만 **미탐**을 만들 수 있고, 미탐은 조용하다.
+#    ⚠️ 프로브는 **줄머리로만** 센다 — 부분일치로 세면 공격자가 배너 한 줄로
+#       '형식이 다르다'를 띄워 **눈멂 보고 채널**을 오염시킬 수 있다(SR42-3).
+# (가) sshd 줄은 있는데 **줄머리 형식이 다르다**(ISO 타임스탬프 rsyslog).
+AU="$RD/fmt.auth.log"
+{ echo '2026-08-01T09:00:00+09:00 h sshd[5]: Accepted publickey for root from 1.2.3.4 port 5 ssh2'
+  echo '2026-08-01T09:00:01+09:00 h sshd[6]: Failed password for root from 1.2.3.4 port 6 ssh2'; } >"$AU"
+sshrun rf3 "$AU"
+want "$TMPROOT/rf3.log" '줄머리 형식이 앵커와 다르다' \
+      "(T2 앵커) 줄머리 형식이 다르면 **못 셀 수 있다고 말한다** (미탐을 침묵으로 두지 않는다)" \
+      "(T2 앵커) 앵커가 한 줄도 못 맞추는데 '0건'이라고만 적는다 — 미탐이 정상으로 보인다"
+want "$TMPROOT/rf3.log" 'ALERT logblind' \
+      "(T2 앵커) 그 사유가 감시불능 목록에 남는다" \
+      "(T2 앵커) 못 세는 상태가 감시불능에 안 실린다"
+# (나) 대조군 — 형식이 맞으면 조용하다(매번 울면 아무도 안 본다).
+AU="$RD/fmt2.auth.log"; authgen 5 >"$AU"
+echo 'Aug  1 07:00:00 h sshd[5]: Accepted publickey for root from 1.2.3.4 port 5 ssh2' >>"$AU"
+sshrun rf4 "$AU"
+avoid "$TMPROOT/rf4.log" '줄머리 형식이 앵커와 다르다' \
+      "(T2 앵커 대조군) 형식이 맞으면 조용하다 (오탐 0)" \
+      "(T2 앵커 대조군) 정상 형식인데 '앵커와 다르다'고 운다"
+# (다) ⛔ SR42-2 — `keyboard-interactive/pam`. `keyboard-interactive for` 만 적었더니
+#     **PAM 경유 로그인을 통째로 놓쳤다.** PAM 2FA 도입이 정확히 그 설정을 켜는 일이다.
+AU="$RD/kbd.auth.log"; authgen 20 >"$AU"; sshrun rf5 "$AU"
+echo 'Aug  1 09:10:00 h sshd[91]: Accepted keyboard-interactive/pam for root from 9.9.9.9 port 7 ssh2' >>"$AU"
+sshrun rf5 "$AU"
+want "$TMPROOT/rf5.log" 'ALERT sshpw' \
+      "(T2 메서드) Accepted keyboard-interactive/pam 을 비밀번호 계열로 잡는다 (SR42-2)" \
+      "(T2 메서드) PAM 경유 로그인을 놓친다 — 2FA 를 켜는 순간 트립와이어가 조용히 죽는다"
+# (라) 우리가 **분류 못 하는** 성공 메서드가 있으면 그렇다고 말해야 한다.
+#     메서드 이름을 하나씩 적는 방식은 다음 이름이 생기면 또 조용히 뚫린다.
+AU="$RD/meth.auth.log"; authgen 20 >"$AU"
+echo 'Aug  1 09:20:00 h sshd[92]: Accepted hostbased for root from 1.2.3.4 port 8 ssh2' >>"$AU"
+sshrun rf6 "$AU"
+want "$TMPROOT/rf6.log" '분류 못 하는 SSH 성공 메서드' \
+      "(T2 메서드) 모르는 성공 메서드를 만나면 **모른다고 말한다** (SR42-2 구조적 방어)" \
+      "(T2 메서드) 새 인증 메서드가 생겨도 조용히 0건으로 넘어간다"
+avoid "$TMPROOT/rf4.log" '분류 못 하는 SSH 성공 메서드' \
+      "(T2 메서드 대조군) publickey 만 있으면 조용하다 (오탐 0)" \
+      "(T2 메서드 대조군) 평범한 publickey 를 '모르는 메서드'라고 운다"
+
+# ⛔ CR46-2 — **OpenSSH 9.8+ 는 `sshd-session[…]` 로 쓴다.** 데몬 이름을 박아 두면
+#    그 버전에서 앵커도 프로브도 전부 0 이 되어 **완전 침묵**한다(리뷰 실측: 옛 프로브는 울었다).
+AU="$RD/newssh.auth.log"
+{ echo 'Aug  1 07:00:00 h sshd-session[11]: Failed password for root from 1.2.3.4 port 1 ssh2'
+  echo 'Aug  1 07:00:01 h sshd-session[12]: Failed password for root from 1.2.3.4 port 2 ssh2'; } >"$AU"
+sshrun rf7 "$AU"
+echo 'Aug  1 07:00:02 h sshd-session[13]: Accepted password for root from 9.9.9.9 port 3 ssh2' >>"$AU"
+sshrun rf7 "$AU"
+want "$TMPROOT/rf7.log" 'ALERT sshpw' \
+      "(T2 9.8+) sshd-session 으로 쓰는 OpenSSH 9.8+ 에서도 성공 로그인을 잡는다 (CR46-2)" \
+      "(T2 9.8+) 데몬 이름이 바뀌면 **완전 침묵**한다 — 요약은 '0건 (기대 0)' 이라 적는다"
+
+# ⛔ SR36-5 / CR47-2 — **하루 발송 상한.** 폭주가 채널을 죽이면 진짜 경보가 묻힌다.
+#    ⚠️ 앞 라운드의 이 검사 3건은 **전부 공허했다**(변이 5종 생존). 이유가 셋이다:
+#      ① `want '하루 상한'` 이 **억제 로그**에도 걸려서, 상한 통보를 지워도 초록이었다.
+#      ② 상태를 심어(capseed) 시작해서 **누적 경로(count++ · 롤오버)를 한 번도 안 밟았다.**
+#      ③ 대조군이 상한값을 명시로 덮어써 **기본값을 아무도 안 봤다** — 기본값을 0 으로
+#         바꾸면 모든 경보가 영구 침묵인데 관문은 초록이었다.
+#    → 셋을 각각 밟는 검사로 다시 쓴다.
+AU="$RD/cap.auth.log"; authgen 5 >"$AU"; echo "$HIT" >>"$AU"
+capseed() { mkdir -p "$TMPROOT/$1/kv" 2>/dev/null
+  printf '%s' "${2:-$(date +%Y%m%d)}" >"$TMPROOT/$1/kv/send_day"
+  printf '%s' "$3" >"$TMPROOT/$1/kv/send_count"
+  printf '%s' "$4" >"$TMPROOT/$1/kv/send_capped"; }
+
+# (가) 상한에 **닿는 순간** — 한 통은 나가야 한다.
+#     ⚠️ 패턴을 통보 **본문**으로 고정한다. '하루 상한' 만 찾으면 억제 로그에도 걸린다(CR47-2①).
+capseed rcap '' 5 0
+run_mon "$TMPROOT/rcap" --fast RE_MON_SEND_MAX_DAY=5 \
+  RE_MON_LOG_DIR="$FULL" RE_MON_APP_LOG_GLOB="$FULL/realestate-monitor.log*" \
+  RE_MON_ACCESS_LOG="$FULL/realestate.access.log" RE_MON_ERROR_LOG="$FULL/realestate.error.log" \
+  RE_MON_AUTH_LOG="$AU" >/dev/null 2>&1
+want "$TMPROOT/rcap.log" '경보 발송이 하루 상한' \
+      "(발송 상한) 상한에 닿으면 **닿았다고 한 통 보낸다** (침묵과 억제를 구분한다)" \
+      "(발송 상한) 상한에 닿아도 아무 말이 없다 — 경보가 안 오는 건지 막힌 건지 모른다"
+
+# (나) 이미 통보한 뒤 — 억제하되 **로그에는 남는다**.
+#     ⚠️ `ALERT-SUPPRESSED` 는 쿨다운 억제도 쓰는 낱말이라 `-CAP` 으로 갈랐다.
+capseed rcap2 '' 5 1
+run_mon "$TMPROOT/rcap2" --fast RE_MON_SEND_MAX_DAY=5 \
+  RE_MON_LOG_DIR="$FULL" RE_MON_APP_LOG_GLOB="$FULL/realestate-monitor.log*" \
+  RE_MON_ACCESS_LOG="$FULL/realestate.access.log" RE_MON_ERROR_LOG="$FULL/realestate.error.log" \
+  RE_MON_AUTH_LOG="$AU" >/dev/null 2>&1
+want "$TMPROOT/rcap2.log" 'ALERT-SUPPRESSED-CAP' \
+      "(발송 상한) 억제된 경보도 **로그에는 남는다** (조용히 유실되지 않는다)" \
+      "(발송 상한) 상한을 넘긴 경보가 로그에도 안 남는다 — 조용히 유실된다"
+
+# (다) ⛔ CR47-2② **누적 경로** — 상태를 안 심고 맨바닥에서 시작한다.
+#     보낸 만큼 `send_count` 가 실제로 올라야 상한이 언젠가 걸린다.
+run_mon "$TMPROOT/rcap4" --fast \
+  RE_MON_LOG_DIR="$FULL" RE_MON_APP_LOG_GLOB="$FULL/realestate-monitor.log*" \
+  RE_MON_ACCESS_LOG="$FULL/realestate.access.log" RE_MON_ERROR_LOG="$FULL/realestate.error.log" \
+  RE_MON_AUTH_LOG="$AU" >/dev/null 2>&1
+CAPN=$(cat "$TMPROOT/rcap4/kv/send_count" 2>/dev/null); CAPN=${CAPN:-0}
+if [ "$CAPN" -gt 0 ] 2>/dev/null; then
+  ok "(발송 상한) 보낸 만큼 send_count 가 실제로 오른다 (누적 경로가 돈다 · CR47-2②)"
+else
+  ng "(발송 상한) send_count 가 안 오른다 — 상한이 영영 안 걸린다(있으나 마나)"
+fi
+
+# (라) ⛔ CR47-2② **날짜 롤오버** — 어제 꽉 찼어도 오늘은 다시 보내야 한다.
+capseed rcap5 20200101 999 1
+run_mon "$TMPROOT/rcap5" --fast RE_MON_SEND_MAX_DAY=5 \
+  RE_MON_LOG_DIR="$FULL" RE_MON_APP_LOG_GLOB="$FULL/realestate-monitor.log*" \
+  RE_MON_ACCESS_LOG="$FULL/realestate.access.log" RE_MON_ERROR_LOG="$FULL/realestate.error.log" \
+  RE_MON_AUTH_LOG="$AU" >/dev/null 2>&1
+avoid "$TMPROOT/rcap5.log" 'ALERT-SUPPRESSED-CAP' \
+      "(발송 상한) 날이 바뀌면 상한이 풀린다 (어제 폭주가 오늘을 막지 않는다)" \
+      "(발송 상한) 하루 폭주가 **영구 침묵**이 된다 — 롤오버가 없다"
+
+# (마) ⛔ CR47-2③ **기본값** — 상한값을 안 주는 평범한 실행이 조용해지면 안 된다.
+#     기본값을 0 으로 바꾸는 변이가 여기서 죽는다(앞 라운드는 대조군이 =500 을 덮어써 못 잡았다).
+run_mon "$TMPROOT/rcap3" --fast \
+  RE_MON_LOG_DIR="$FULL" RE_MON_APP_LOG_GLOB="$FULL/realestate-monitor.log*" \
+  RE_MON_ACCESS_LOG="$FULL/realestate.access.log" RE_MON_ERROR_LOG="$FULL/realestate.error.log" \
+  RE_MON_AUTH_LOG="$AU" >/dev/null 2>&1
+avoid "$TMPROOT/rcap3.log" 'ALERT-SUPPRESSED-CAP' \
+      "(발송 상한 대조군) 상한값을 안 줘도 평시에는 억제가 없다 (기본값 경로 · CR47-2③)" \
+      "(발송 상한 대조군) 평범한 실행에서 경보가 억제된다 — 감시가 통째로 막힌다"
+avoid "$TMPROOT/rcap3.log" '경보 발송이 하루 상한' \
+      "(발송 상한 대조군) 평시에는 상한 통보도 안 나간다" \
+      "(발송 상한 대조군) 평시에 상한 통보가 나간다 — 늑대소년이 된다"
+
+# (바) ⛔ CR47-2 / SR43-2 **상태 손상은 fail-open** — 막는 쪽으로 넘어지면 감시가 죽는다.
+capseed rcap6 '' zzz 0
+run_mon "$TMPROOT/rcap6" --fast RE_MON_SEND_MAX_DAY=5 \
+  RE_MON_LOG_DIR="$FULL" RE_MON_APP_LOG_GLOB="$FULL/realestate-monitor.log*" \
+  RE_MON_ACCESS_LOG="$FULL/realestate.access.log" RE_MON_ERROR_LOG="$FULL/realestate.error.log" \
+  RE_MON_AUTH_LOG="$AU" >/dev/null 2>&1
+avoid "$TMPROOT/rcap6.log" 'ALERT-SUPPRESSED-CAP' \
+      "(발송 상한) send_count 가 깨져도 **막지 않는다** (fail-open · SR43-2)" \
+      "(발송 상한) 상태가 깨지면 경보를 막는다 — 고장과 무사고가 같아 보인다"
+
+# (사) ⛔ CR47-1 **보내지도 못한 통을 세지 않는다.** 자격증명이 없어 한 통도 못 나가면
+#     상한이 소진되면 안 된다 — 채널 복구 뒤 자정까지 전면 침묵하던 결함이다.
+CAPCRED="$TMPROOT/nocred.env"; : >"$CAPCRED"
+run_mon "$TMPROOT/rcap7" --fast RE_MON_DRY_RUN=0 RE_MON_CRED_FILES="$CAPCRED" \
+  RE_MON_LOG_DIR="$FULL" RE_MON_APP_LOG_GLOB="$FULL/realestate-monitor.log*" \
+  RE_MON_ACCESS_LOG="$FULL/realestate.access.log" RE_MON_ERROR_LOG="$FULL/realestate.error.log" \
+  RE_MON_AUTH_LOG="$AU" >/dev/null 2>&1
+CAP7=$(cat "$TMPROOT/rcap7/kv/send_count" 2>/dev/null); CAP7=${CAP7:-0}
+if [ "$CAP7" = 0 ]; then
+  ok "(발송 상한) 한 통도 못 나갔으면 상한을 안 쓴다 (CR47-1)"
+else
+  ng "(발송 상한) 발송 실패도 상한으로 센다 — 0통 보내고 상한 소진 뒤 자정까지 침묵한다"
+fi
+
+# ⛔ CR47-3 (구조) — **재통보 주기가 관문 밖이었다.** 900 을 1주일로 바꿔도 아무도 안 울었다.
+#    행동으로 재려면 15분을 기다려야 해 형태로 본다(약한 검사임을 밝혀 둔다).
+#    ⚠️ 값 자체보다 **문서와 코드가 같은 수를 말하는가**가 핵심이다 — 달라진 채로 두면
+#       사람이 문서를 믿고 잘못된 기대를 갖는다(CR47-3 이 그 형태였다).
+if grep -qE 'raise_alert sshpw 900 ' "$HERE/monitor.sh"; then
+  SSHPW_CD=$(grep -acE 'raise_alert sshpw 900 ' "$HERE/monitor.sh")
+  SSHPW_ALL=$(grep -acE 'raise_alert sshpw ' "$HERE/monitor.sh")
+  if [ "$SSHPW_CD" = "$SSHPW_ALL" ]; then
+    ok "(T2 쿨다운) sshpw 경보 ${SSHPW_ALL}곳이 모두 900초다 (하루 288통 → 96통 · CR47-3)"
+  else
+    ng "(T2 쿨다운) sshpw 경보 ${SSHPW_ALL}곳 중 ${SSHPW_CD}곳만 900초 — 남은 곳이 폭주 경로다"
+  fi
+else
+  ng "(T2 쿨다운) sshpw 쿨다운이 900초가 아니다 — 문서와 코드가 다른 수를 말한다"
+fi
+if grep -q '이제 \*\*900초\*\*' "$HERE/../docs/05-monitoring/monitoring.md" 2>/dev/null; then
+  ok "(T2 쿨다운) 문서도 900초라고 적는다 (문서와 코드가 같은 수를 말한다)"
+elif [ -f "$HERE/../docs/05-monitoring/monitoring.md" ]; then
+  ng "(T2 쿨다운) 문서는 아직 쿨다운 0 이라 적는다 — 사람이 문서를 믿고 틀린 기대를 갖는다"
+else
+  skip "(T2 쿨다운) monitoring.md 를 못 찾음 — 서버 사본 실행이면 정상"
+fi
+
+# ⛔ CR47-4 — **상태(kv)가 깨져도 감시가 죽으면 안 된다.** 실측상 `--fast` 가 rc≠0 로
+#    끝나고 그 실행의 검사가 통째로 사라졌다. 죽은 감시는 침묵과 구별되지 않는다.
+AU="$RD/kvnum.auth.log"; authgen 5 >"$AU"
+ST="$TMPROOT/rkn"; rm -rf "$ST" "$ST.log"
+sshrun rkn "$AU"
+printf '%s' 'abc' >"$ST/kv/api5xx"
+run_mon "$ST" --fast RE_MON_LOG_DIR="$FULL" \
+  RE_MON_APP_LOG_GLOB="$FULL/realestate-monitor.log*" \
+  RE_MON_ACCESS_LOG="$FULL/realestate.access.log" \
+  RE_MON_ERROR_LOG="$FULL/realestate.error.log" \
+  RE_MON_AUTH_LOG="$AU" >/dev/null 2>&1
+KRC=$?
+if [ "$KRC" = 0 ]; then
+  ok "(상태손상 api5xx) kv 가 깨져도 감시는 계속 돈다 (CR47-4)"
+else
+  ng "(상태손상 api5xx) kv 하나가 깨지면 --fast 가 rc=$KRC 로 죽는다 — 그 실행의 검사가 통째로 사라진다"
+fi
+want "$ST.log" 'ALERT logblind' \
+      "(상태손상 api5xx) 못 세게 된 사실이 감시불능 목록에 남는다" \
+      "(상태손상 api5xx) 상태가 깨진 것을 아무도 모른다"
+# ⚠️ **OOM 쪽은 이 하네스에서 못 돈다** — `cg_path` 가 `/sys/fs/cgroup` 실경로와
+#    `docker inspect` 를 쓰므로 임시 디렉터리로 못 돌린다. 가짜로 통과시키지 않는다.
+#    행동으로 못 재니 **같은 가드가 그 분기에 있는지 형태로** 본다(약한 검사임을 밝혀 둔다).
+skip "(상태손상 oomkill) cgroup·docker 가 있어야 도달 — 행동으로 못 잼(아래 구조 검사로 대신)"
+if grep -q 'kv/oomkill_' "$HERE/monitor.sh" && grep -q '가 손상됐다 — 그 사이 OOM' "$HERE/monitor.sh"; then
+  ok "(상태손상 oomkill · 구조) OOM 분기에도 같은 손상 가드가 있다 (CR47-4)"
+else
+  ng "(상태손상 oomkill · 구조) OOM 분기에 손상 가드가 없다 — kv 하나로 감시가 매 실행 죽는다"
+fi
+
+# ⛔ CR46-6 — 상태(kv)가 깨졌을 때 **조용히 기준값으로 돌아가지 않는다.**
+#    예전에는 `이번 구간 0건 (기대 0)` 을 적고 rc=0 이었다 — 못 센 것을 없다고 말한 것이다.
+AU="$RD/kvbad.auth.log"; authgen 20 >"$AU"; sshrun rkv "$AU"
+printf '%s' 'zzz' >"$TMPROOT/rkv/kv/sshpw_off"
+authgen 5 >>"$AU"; sshrun rkv "$AU"
+want "$TMPROOT/rkv.log" '오프셋이 숫자가 아니다' \
+      "(T2 상태손상) 저장된 오프셋이 깨지면 **못 센다고 말한다** (CR46-6)" \
+      "(T2 상태손상) 깨진 상태를 조용히 기준값으로 넘기고 '0건 (기대 0)' 이라 적는다"
+want "$TMPROOT/rkv.log" 'ALERT logblind' \
+      "(T2 상태손상) 그 사유가 감시불능 목록에 남는다" \
+      "(T2 상태손상) 상태가 깨진 사실이 감시불능에 안 실린다"
+# ⛔ CR46-5 (구조) — `_jssh` 호출부에 `-o` 를 덧붙이면 나중 것이 이겨 **jd 가 영구 0** 이 된다.
+#    행동으로 잡기 어려워 형태를 본다. 약한 검사인 것을 밝혀 둔다.
+if printf '%s\n' "$JSRC" | grep -qE '_jssh .*-o '; then
+  ng "(교차 구조) _jssh 호출부가 -o 를 덧붙인다 — 형식이 갈라져 jd 가 조용히 0 이 된다"
+else
+  ok "(교차 구조) _jssh 호출부가 출력 형식을 덧붙이지 않는다 (CR46-5)"
 fi
 
 # CR41-7 — 오프셋이 **읽은 구간과 정확히** 맞아야 한다(같은 줄을 두 번 세지 않는다)
@@ -1149,6 +1683,64 @@ want "$PA2.log" 'ALERT daily_dead'      "5분 감시만 40시간째 돌고 일�
 PA3="$TMPROOT/pa3"
 run_mon "$PA3" --daily PATH="$FAKEBIN:$PATH" RE_MON_LE_DIR="$LE_EMPTY"   RE_MON_LOG_DIR="$FULL" RE_MON_APP_LOG_GLOB="$FULL/realestate-monitor.log*"   RE_MON_ACCESS_LOG="$FULL/realestate.access.log" RE_MON_ERROR_LOG="$FULL/realestate.error.log"   RE_MON_AUTH_LOG="$FULL/auth.log" >/dev/null 2>&1
 want "$PA3.log" 'ALERT fast_dead'      "(대칭 반대쪽) 5분 감시 기록이 없으면 일일 점검이 그것을 신고한다 — 원래 있던 쪽"      "반대쪽 상호 감시까지 죽었다"
+# ④ ⛔ CR44-2 §10 — **꺼지는 것까지 본다.** `daily_dead`·`fast_dead` 는 코드에 clear 가
+#    있는데 관문이 안 봤다. 크론을 되살렸는데 경보가 안 꺼지면 사람은 그 이름을 무시하게
+#    되고, 그러면 다음번 진짜 소실도 같이 묻힌다.
+printf '%s' "$(date +%s)" >"$PA2/kv/last_daily_run"
+PA2PRE=$(wc -l <"$PA2.log" 2>/dev/null); PA2PRE=${PA2PRE:-0}
+run_pa "$PA2"
+tail -n +$((PA2PRE + 1)) "$PA2.log" >"$PA2.after.log" 2>/dev/null
+want "$PA2.after.log" 'ALERT-CLEARED daily_dead' \
+     "(해소) 일일 점검이 돌기 시작하면 daily_dead 가 꺼진다 (크론을 고친 것이 표시에 반영된다)" \
+     "(해소) 크론을 되살려도 daily_dead 가 안 꺼진다 — 미해소가 영영 남는다"
+printf '%s' "$(date +%s)" >"$PA3/kv/last_fast_run"
+PA3PRE=$(wc -l <"$PA3.log" 2>/dev/null); PA3PRE=${PA3PRE:-0}
+run_mon "$PA3" --daily PATH="$FAKEBIN:$PATH" RE_MON_LE_DIR="$LE_EMPTY"   RE_MON_LOG_DIR="$FULL" RE_MON_APP_LOG_GLOB="$FULL/realestate-monitor.log*"   RE_MON_ACCESS_LOG="$FULL/realestate.access.log" RE_MON_ERROR_LOG="$FULL/realestate.error.log"   RE_MON_AUTH_LOG="$FULL/auth.log" >/dev/null 2>&1
+tail -n +$((PA3PRE + 1)) "$PA3.log" >"$PA3.after.log" 2>/dev/null
+want "$PA3.after.log" 'ALERT-CLEARED fast_dead' \
+     "(해소) 5분 감시가 돌아오면 fast_dead 가 꺼진다 (대칭의 반대쪽도 꺼진다)" \
+     "(해소) 5분 감시가 살아났는데 fast_dead 가 안 꺼진다"
+
+# ============================================================================
+sect "T6c. api5xx 해소 — 형제 중 유일하게 꺼지지 않던 자리 (CR44-9)"
+
+# ⛔ `logperm`·`logleak`·`logfresh` 는 다 꺼지는데 `api5xx` 만 clear 경로가 **없었다**.
+#    문턱이 `API5XX_MIN=1` 이라 5xx 한 건이면 켜지고, 그 뒤로 일일 요약 머리말이
+#    계속 `미해소 (api5xx)` 다. 이 저장소의 문장이 *"안 꺼지는 경보는 곧 무시되는 경보"* 다.
+A5="$TMPROOT/a5logs"; mkdir -p "$A5"
+: >"$A5/realestate.error.log"; : >"$A5/realestate-monitor.log"
+ACC5="$A5/realestate.access.log"
+printf '%s\n' '1.2.3.4 - - [01/Aug/2026:00:00:01 +0900] "GET /api/v1/health HTTP/1.1" 200 5 "-" "-"' >"$ACC5"
+run_a5() { run_mon "$1" --fast RE_MON_LOG_DIR="$A5" RE_MON_APP_LOG_GLOB="$A5/realestate-monitor.log*" \
+  RE_MON_ACCESS_LOG="$ACC5" RE_MON_ERROR_LOG="$A5/realestate.error.log" \
+  RE_MON_AUTH_LOG="$FULL/auth.log" >/dev/null 2>&1; }
+S5X="$TMPROOT/s5x"
+run_a5 "$S5X"                                    # 기준값
+printf '%s\n' '1.2.3.4 - - [01/Aug/2026:00:00:02 +0900] "GET /api/v1/map/complexes HTTP/1.1" 502 5 "-" "-"' >>"$ACC5"
+run_a5 "$S5X"
+want "$S5X.log" 'ALERT api5xx' \
+     "/api/ 5xx 한 건에 경보가 뜬다 (트래픽이 거의 없으니 1건도 사건이다)" \
+     "5xx 가 났는데 조용하다 — 헬스체크 200 뒤에서 기능이 죽어도 아무 말이 없다"
+S5XPRE=$(wc -l <"$S5X.log" 2>/dev/null); S5XPRE=${S5XPRE:-0}
+printf '%s\n' '1.2.3.4 - - [01/Aug/2026:00:00:03 +0900] "GET /api/v1/health HTTP/1.1" 200 5 "-" "-"' >>"$ACC5"
+run_a5 "$S5X"                                    # 새 5xx 없음 → 꺼져야 한다
+tail -n +$((S5XPRE + 1)) "$S5X.log" >"$S5X.after.log" 2>/dev/null
+want "$S5X.after.log" 'ALERT-CLEARED api5xx' \
+     "5xx 가 멎으면 경보가 꺼진다 (CR44-9 — 형제들과 규칙이 같아진다)" \
+     "5xx 가 멎어도 api5xx 가 영영 안 꺼진다 — 요약 머리말이 계속 미해소다"
+if [ ! -f "$S5X/alerts/api5xx.active" ]; then
+  ok "해소되면 .active 도 지워진다"
+else ng "해소 통보는 갔는데 .active 가 남는다"; fi
+# ⚠️ **못 읽은 상태에서는 꺼지면 안 된다** — CR40-2 가 막은 거짓 해소다.
+#    (access 로그가 사라진 채로 clear 가 나가면 "5xx 0건" 은 본 것이 아니라 못 본 것이다)
+S5Y="$TMPROOT/s5y"; mkdir -p "$S5Y/alerts"
+printf '%s' "$(date +%s)" >"$S5Y/alerts/api5xx.active"; printf '%s' "$(date +%s)" >"$S5Y/alerts/api5xx.sent"
+run_mon "$S5Y" --fast RE_MON_LOG_DIR="$A5" RE_MON_APP_LOG_GLOB="$A5/realestate-monitor.log*" \
+  RE_MON_ACCESS_LOG="$EMPTY/none.access.log" RE_MON_ERROR_LOG="$A5/realestate.error.log" \
+  RE_MON_AUTH_LOG="$FULL/auth.log" >/dev/null 2>&1
+avoid "$S5Y.log" 'ALERT-CLEARED api5xx' \
+      "(대조군) access 로그를 못 읽으면 api5xx 를 끄지 않는다 (못 본 것을 '0건'이라 하지 않는다)" \
+      "access 로그가 사라졌는데 '5xx 해소' 를 보낸다 — 거짓 해소(CR40-2 재발)"
 
 # ============================================================================
 sect "T7. scrub — 알림에 실리면 안 되는 것 (CR40-4 / SR36-3)"
@@ -1244,6 +1836,29 @@ if grep -q 'log() {' "$HERE/monitor-lib.sh" && grep -A2 'log() {' "$HERE/monitor
 else
   ng "log() 가 원문을 그대로 파일에 쓴다 — job-run 의 '사유:' 줄은 **배치가 찍은 아무 문자열**이다" \
      "$(grep -n -A2 'log() {' "$HERE/monitor-lib.sh" | head -5)"
+fi
+# ⛔ CR44-7 — 위 검사는 **구조(문자열)** 만 본다. 같은 T7 의 이웃(`send_telegram` 경로)은
+#    행동으로 보는데 이쪽만 아니었다. 세 줄이면 행동이 된다 — 실제로 찍고 파일을 읽는다.
+LGT="$TMPROOT/logscrub"; mkdir -p "$LGT"
+(
+  RE_MON_STATE="$LGT" RE_MON_LOG="$LGT/mon.log" RE_MON_DRY_RUN=1
+  export RE_MON_STATE RE_MON_LOG RE_MON_DRY_RUN
+  # shellcheck source=./monitor-lib.sh
+  . "$HERE/monitor-lib.sh" 2>/dev/null || exit 3
+  log 'SERVICE_KEY=Zm9vYmFyU2VjcmV0VmFsdWUxMjM0NTY3ODkwYWJjZGVm 한도 1,026,560,000원 postgresql+psycopg://re:p4ssw0rdX9@db:5432/x'
+) >/dev/null 2>&1
+if [ ! -s "$LGT/mon.log" ]; then
+  harn "log() 세탁 (행동)" "감시 로그를 못 만들었다 — **검사 결과가 아니다**(하네스·환경 문제)"
+else
+  LGBAD=""
+  for tok in 'Zm9vYmFyU2VjcmV0VmFsdWUxMjM0NTY3ODkwYWJjZGVm' '1,026,560,000' 'p4ssw0rdX9'; do
+    grep -aq -- "$tok" "$LGT/mon.log" && LGBAD="$LGBAD $tok"
+  done
+  if [ -z "$LGBAD" ]; then
+    ok "log() 가 실제로 세탁한다 — 키·금액·DSN 비밀번호가 로그 파일에 평문으로 없다 (구조가 아니라 행동으로 확인)"
+  else
+    ng "log() 가 쓴 로그 파일에 원문이 남아 있다:$LGBAD" "$(head -2 "$LGT/mon.log")"
+  fi
 fi
 
 # 문서와 코드가 같은 말을 하는가 (CR40-4: 문서가 방어를 과장하고 있었다)
@@ -1372,7 +1987,7 @@ sim_raise() { # $1=지금(epoch) $2=쿨다운
 #    → `check_market_stale()` 을 통째로 뽑아, 그것이 부르는 것들을 전부 가짜로 물리고
 #      **발송 여부를 행동으로** 센다. docker 도 psql 도 필요 없다 —
 #      **못 도는 검사는 없는 검사다.**
-MS_OK=0; MS_CD=""; SIM_BATCH_RAN=0; SIM_NOW=0
+MS_OK=0; MS_CD=""; SIM_BATCH_RAN=0; SIM_NOW=0; MS_CLEARED=0; MS_CLEAR_MSG=""
 eval "$(ext "$HERE/monitor.sh" check_market_stale)" 2>/dev/null
 if ! declare -f check_market_stale >/dev/null 2>&1; then
   ng "monitor.sh 에서 check_market_stale() 을 못 뽑았다 — 억제의 방향·쿨다운을 행동으로 검증할 수 없다(문자열 검사로 되돌아간다)"
@@ -1389,8 +2004,46 @@ else
   add() { :; }
   blind_add() { :; }
   blind_add_daily() { :; }
-  clear_alert() { :; }
+  # ⛔ CR44-2 — 예전에는 `clear_alert() { :; }` 였다. 그러면 판정이 **거짓 해소**를
+  #    내보내도 관문이 아무것도 못 본다. 실제로 변이 M3(판정 불가 조기 반환 제거)가
+  #    `시장지수 기준월 회복 (n/a ≥ 기대 2026-06)` 을 내보내는데 T10 은 6통과/0실패였다.
+  #    이 저장소가 같은 형태를 만나는 **네 번째** 자리다(CR-040 → CR42-3 → CR43-1 → 여기).
+  #    → 센다. 그리고 아래에서 **부를 자격이 없는 입력**에 0 을 단언한다.
+  clear_alert() { MS_CLEARED=$((MS_CLEARED + 1)); MS_CLEAR_MSG="${2:-}"; }
   raise_alert() { MS_CD="$2"; sim_raise "$SIM_NOW" "$2"; }
+fi
+
+# --- clear 를 부를 **자격** (CR44-2 · 변이 M3) ------------------------------
+# ⛔ 이 라운드가 스스로 세운 규칙: *새 판정을 쓸 때 (가) 이 판정이 clear 를 부를 수
+#    있는가, 부른다면 관문이 그것을 보는가* 를 먼저 정한다. 여기가 그 (가)다.
+#    `clear_alert` 는 켜져 있던 경보를 지우고 "해소" 한 통을 **보낸다**. 판정 못 한
+#    입력으로 그것을 하면 CR40-2 가 막은 거짓 해소이고, 사람은 문제가 풀린 줄 안다.
+if [ "$MS_OK" = 1 ]; then
+  for badref in "n/a" "none" ""; do
+    MS_CLEARED=0; MS_CLEAR_MSG=""; sim_reset; SIM_BATCH_RAN=0; SIM_NOW=$(date +%s)
+    check_market_stale "$badref" "2026-06"
+    if [ "$MS_CLEARED" -eq 0 ]; then
+      ok "(M3) 완결 기준월이 '${badref:-빈값}' 이면 해소 통보를 보내지 않는다 (판정 못 한 것을 회복이라 말하지 않는다)"
+    else
+      ng "(M3) ref='${badref:-빈값}' 인데 거짓 해소가 나간다 — 켜져 있던 경보가 지워진다" \
+         "clear_alert ${MS_CLEARED}회 · 문구: ${MS_CLEAR_MSG}"
+    fi
+    if [ "$SIM_SENT" -eq 0 ]; then
+      ok "(M3) 그 입력에서 경보도 보내지 않는다 (판정 불가는 경보도 해소도 아니다)"
+    else
+      ng "(M3) ref='${badref:-빈값}' 인데 경보가 ${SIM_SENT}통 나간다 — 없는 사실로 운다"
+    fi
+  done
+  # ⚠️ **대칭.** 위 단언은 "clear 를 아예 안 부르게" 만들어도 초록이 된다.
+  #    그러면 진짜 회복에서 경보가 영영 안 꺼지는 결함(= sshjournal 이 걸렸던 그것)을
+  #    이 관문이 못 본다. 그래서 반대쪽도 함께 요구한다.
+  MS_CLEARED=0; MS_CLEAR_MSG=""; sim_reset; SIM_BATCH_RAN=0; SIM_NOW=$(date +%s)
+  check_market_stale "2026-07" "2026-06"
+  if [ "$MS_CLEARED" -ge 1 ]; then
+    ok "(M3 대칭) 기준월이 기대 이상이면 해소를 보낸다 (clear 경로가 살아 있다)"
+  else
+    ng "(M3 대칭) 정상 회복인데 해소가 안 나간다 — marketstale 이 한 번 뜨면 영영 안 꺼진다"
+  fi
 fi
 
 SIM_START="2025-06-01"; SIM_MONTHS=16
@@ -1399,13 +2052,21 @@ new_batch=0; new_daily=0; new_clear=0
 prev_old_stale=0; prev_new_stale=0
 warn_last=""; warn_sent=0; stale_days=0
 sim_reset; SIM_BATCH_RAN=1        # 이 시나리오는 **배치가 돈** 달들이다
+# ⛔ CR44-3 — `nz`/`harn_if` 가 T2·T3b 에만 들어가고 **이번 라운드가 새로 쓴 T10 에는
+#    없었다.** 실측 두 방향: 날짜 계산이 한 번 비면 이 루프는 조용히 그 달을 건너뛰어
+#    볼륨 모형이 91→61통으로 **약해지는데 전건 통과 · HARN 0** 이다(있는 결함을 놓친다 —
+#    CR41-6 이 "더 나쁘다"고 한 방향). 그래서 빈 값을 **센다.**
+T10_BAD=0
 for mo in $(seq 0 $((SIM_MONTHS - 1))); do
   ms=$(date -d "$SIM_START +$mo month" +%Y-%m-01)
-  ndays=$(date -d "$ms +1 month -1 day" +%d); ndays=$((10#$ndays))
+  ndays=$(date -d "$ms +1 month -1 day" +%d)
+  if ! nz "$ms" "$ndays"; then T10_BAD=$((T10_BAD + 1)); continue; fi
+  ndays=$((10#$ndays))
   # --- 배치 (매월 1일 04:10) ---
   bt=$(date -d "$ms 04:10" +%s)
   bexp=$(batch_expected_ym "$bt")
   bref=$(db_ref "$(model_db_ym "$bt")")
+  nz "$bt" "$bexp" "$bref" || T10_BAD=$((T10_BAD + 1))
   if [ -n "$bexp" ] && [ -n "$bref" ] && [[ "$bref" < "$bexp" ]]; then
     # 옛 규칙: rc=1 → job_market-index (쿨다운 0) = 무조건 1통
     old_batch=$((old_batch + 1)); prev_old_stale=1
@@ -1423,6 +2084,7 @@ for mo in $(seq 0 $((SIM_MONTHS - 1))); do
   d1=$(date -d "$ms 09:05" +%s)
   dexp=$(market_expected_ym "$d1")
   dref=$(db_ref "$(model_db_ym "$(last_batch_epoch "$d1")")")
+  nz "$d1" "$dexp" "$dref" || T10_BAD=$((T10_BAD + 1))
   if [ -n "$dexp" ] && [ -n "$dref" ] && [[ "$dref" < "$dexp" ]]; then
     stale_days=$((stale_days + ndays))
     old_daily=$((old_daily + ndays))   # 옛 규칙: raise_alert dbstruct 86400 · 하루 한 번 = 매일 한 통
@@ -1438,6 +2100,7 @@ for mo in $(seq 0 $((SIM_MONTHS - 1))); do
     fi
   fi
 done
+harn_if "$T10_BAD" "T10 볼륨 모형(배치가 돈 달)" "날짜·기준월 계산이 빈 값을 냈다 — 아래 통수는 **검사 결과가 아니다**"
 new_daily=$SIM_SENT                 # ← 계산된 값이다(상수 아님)
 new_batch=$warn_sent
 old_total=$((old_batch + old_daily + old_clear))
@@ -1470,11 +2133,20 @@ fi
 sim_reset; SIM_BATCH_RAN=0; MS_CD=""     # 이 시나리오는 **배치 기록이 없는** 달들이다
 miss_days=0
 FROZEN_REF=$(db_ref "$(model_db_ym "$(date -d '2026-02-01 04:10' +%s)")")
+# ⛔ CR44-3 — `FROZEN_REF` 가 한 번 비면 아래 루프가 통째로 안 돌아 **실패 3 · HARN 0**
+#    이 된다(없는 결함을 보고한다). 픽스처가 안 만들어진 것을 검사 실패로 말하지 않는다.
+T10B_BAD=0
+if ! nz "$FROZEN_REF"; then
+  harn "T10 미실행 시나리오(3건)" "기준 REF 를 못 만들었다(date/db_ref 실패) — **검사 결과가 아니다**(하네스·환경 문제)"
+else
 for mo in $(seq 9 $((SIM_MONTHS - 1))); do          # 2026-03 ~ 2026-09
   ms=$(date -d "$SIM_START +$mo month" +%Y-%m-01)
-  ndays=$(date -d "$ms +1 month -1 day" +%d); ndays=$((10#$ndays))
+  ndays=$(date -d "$ms +1 month -1 day" +%d)
+  if ! nz "$ms" "$ndays"; then T10B_BAD=$((T10B_BAD + 1)); continue; fi
+  ndays=$((10#$ndays))
   d1=$(date -d "$ms 09:05" +%s)
   dexp=$(market_expected_ym "$d1")
+  nz "$d1" "$dexp" || T10B_BAD=$((T10B_BAD + 1))
   if [ -n "$dexp" ] && [ -n "$FROZEN_REF" ] && [[ "$FROZEN_REF" < "$dexp" ]]; then
     miss_days=$((miss_days + ndays))
     dd=1
@@ -1519,6 +2191,8 @@ if [ "$MS_OK" = 1 ] && [ -n "$MS_CD" ] && [ "$MS_CD" = "$CD_STALE" ]; then
 elif [ "$MS_OK" = 1 ]; then
   ng "억제 코드가 쓴 쿨다운(${MS_CD:-없음})이 소스에서 읽은 값(${CD_STALE})과 다르다 — 볼륨 계산의 근거가 어긋났다"
 fi
+fi
+harn_if "$T10B_BAD" "T10 미실행 시나리오 날짜 루프" "날짜 계산이 빈 값을 냈다 — 위 3건은 **검사 결과가 아니다**"
 
 # 가짜 배선을 걷어낸다 — 아래 구획이 **진짜** 함수를 쓰게 한다
 unset -f check_market_stale _market_batch_ran_this_month add blind_add blind_add_daily 2>/dev/null

@@ -11339,3 +11339,808 @@ low 3 · info 4 이며, **그중 4건은 코드가 아니라 문서·절차 문�
 **대조군이, 공격 성공 상태와 같은 상태**였다. 오탐을 증명하는 시험과 침묵을 증명하는 시험이
 같은 픽스처를 쓰면, 통과는 아무것도 뜻하지 않는다.
 **대조군은 "정상"이 아니라 "정상이면서 공격이 아닌 것"이어야 한다.**
+
+---
+
+## SR-041 · 2026-08-03 · **SSH 침입 탐지의 journald 교차(SR40-1 조치 + CR45-1) 실효성 판정 — `jtot==0` 문턱이 실제 흔적삭제를 못 잡는데 문서는 잡는다고 적었다 · 원격 미인증 로그 주입으로 T2 트립와이어를 마음대로 울릴 수 있다** (security-reviewer)
+
+**판정: FAIL** — 차단 2건(High 2). Medium 4 · Low 3.
+
+> 범위: 커밋 전 작업트리 `git diff 199d9fe` — `deploy/monitor.sh` · `deploy/monitor-selftest.sh` ·
+> `deploy/DEPLOY.md` · `docs/05-monitoring/monitoring.md` 4파일.
+> `frontend/**` · `docs/02-design/ux/**` 는 다른 작업 중이라 **미열람**.
+> 서버(115.68.230.40)는 **읽기 전용 실측만**: `/opt/realestate/scripts/**` 수정·삭제 0 ·
+> 텔레그램 발송 **0통**(모든 실행 `RE_MON_DRY_RUN=1`) · 격리 사본 `/root/sec-sr41/` 은 **종료 시 삭제 확인**.
+> 저장소 소스 수정 0 · 커밋 0.
+> 이전: `SR-040`(fail · 차단 SR40-1).
+
+### 0) 시작·종료 관문
+
+| 항목 | 결과 |
+|---|---|
+| `git status` 범위 | 4파일만 수정 · 범위 밖 파일 변경 **0** ✅ |
+| `bash -n deploy/*.sh` (8파일) | 실패 **0** ✅ |
+| `grep -rn "MUT-" deploy/` | **0건** ✅ |
+| `bash monitor-selftest.sh` (**서버** `/root/sec-sr41/copy` · 1분 25초) | **통과 197 · 실패 0 · 건너뜀 1 · 하네스오류 0 · rc=0** ✅ |
+| 서버 sha256 3/3 | `monitor.sh` `b0001419…` · `monitor-lib.sh` `a392fef0…` · `monitor-selftest.sh` `58f5a279…` — **로컬 작업트리와 완전 동일** ⛔ (→ SR41-9) |
+| 새 kv 키 / 임시파일 | **0개** — `jtot`·`jd_win`·`jbuf`·`jprobe` 는 전부 함수 지역변수. 디스크에 남는 것 없음 ✅ |
+| 알림 본문의 비밀·IP·계정·금액 | **0건** — 새 문자열은 전부 **개수·초** 뿐이다. 로그 *내용* 은 한 글자도 안 싣는다 ✅ (다만 SR41-6) |
+| 자체검사 텔레그램 격리 | `run_mon()` 이 `RE_MON_DRY_RUN=1` 를 강제 — 서버에서 돌려도 발송 0 ✅ |
+| 운영 오탐 재현 | 서버 격리 상태 2회 실행(창 300초) → `SSH2차 : journald 같은 구간 0건 (auth.log 0건 · 기대 0/0 · **교차 대상 225줄**)` · **경보 0건** ✅ |
+| 비용 실측(서버) | 프로브 **0.022초** · `--fast` 전체 **0.93~1.04초** ✅ |
+
+---
+
+### 1) 먼저, 좋아진 것을 정확히 적는다
+
+* **CR45-1 의 전제는 실측으로 맞다.** 서버(systemd 249 · Ubuntu 22.04)에서 재현:
+  `journalctl -u ssh -u sshd --since @<미래> --until @<미래+60> -o cat` → **0바이트** /
+  같은 질의를 `-o cat` 없이 → **`-- No entries --` 가 stdout 으로**. 프로브는 옳은 것을 잰다.
+* **`jtot`/`jd` 를 한 번의 호출로 세는 것**, `jd_probe_bad` 일 때 **경보도 해소도 안 하는 것**,
+  `clear_alert sshjournal` 을 `jtot>0` 에만 거는 것 — 전부 "못 본 것을 해소라 말하지 않는다"
+  원칙에 맞다. `api5xx` clear 도 못 읽은 경우 도달 불가 경로가 맞다(대조군 있음).
+* **오탐 0 주장은 재현된다.** 서버 24시간 실측(2026-08-03):
+  ssh 유닛 메시지 **37,632줄** · **5분 버킷 288개 중 0줄 버킷 0개**(최소 22) ·
+  1분 버킷 1,440개 중 0줄 **25개** → `JD_MIN_WINDOW=120` 의 근거가 성립한다.
+* **입력 위생.** `journalctl` 인자에 들어가는 값은 `date +%s` 와 kv `sshpw_at` 뿐이고,
+  후자는 `case "$prev_at" in ''|*[!0-9]*)` 로 숫자 검증을 거친다 → **인자 주입 경로 없음** ✅
+  `printf '%s\n' "$jbuf"` 는 로그 내용을 **인자**로 넘기므로 포맷 문자열 주입도 없다 ✅
+* 시계가 **뒤로** 점프하면 `jd_win` 이 음수가 되어 `-ge 120` 이 거짓 → `sshjournal` **오탐 안 남**.
+  실패 방향은 안전한 쪽이다 ✅ (단, 프로브 쪽은 SR41-5)
+
+---
+
+### 2) ⛔ SR41-1 (**High · 차단**) — `jtot==0` 은 "저널을 지웠다"를 못 본다. 그런데 문서는 그것을 잡는다고 적었다
+
+**발화 조건**(`deploy/monitor.sh:876`): `jd_ok=1` ∧ `jtot=0` ∧ `new_sshd≥2` ∧ `jd_win≥120`.
+
+**문서의 주장** — `docs/05-monitoring/monitoring.md` 7b-④:
+
+> "`journalctl --rotate --vacuum-time=1s` 를 하면 `journalctl` 은 **그대로 살아 있고**
+> (새 메시지가 즉시 들어온다) ssh 조회만 0줄이 된다 … → 이제 창 안의 ssh 유닛 메시지 총량(jtot)을
+> 함께 세고, 그것이 0 인데 같은 창의 auth.log 가 sshd 줄을 받았으면 **모순**으로 보고 경보한다."
+
+**한 문장 안에서 스스로 모순이다.** "새 메시지가 즉시 들어온다"면 `jtot` 은 0 이 아니다.
+같은 주장이 `DEPLOY.md §9-1 "왜 지금 올려야 하나"` 와 `monitoring.md §8-6` 에도 그대로 반복된다.
+
+**실측(2026-08-03 · 서버 · 읽기 전용)**
+
+| 잰 것 | 값 |
+|---|---|
+| 24시간 ssh 유닛 메시지 | **37,632줄** |
+| 메시지 간 평균 간격 / **최장 무음** | **2.30초** / **104초** (간격 ≥120초: **0회**) |
+| `--since @(now-3s)` / `-5s` / `-10s` / `-30s` / `-60s` | **4 / 5 / 8 / 19 / 51줄** |
+| 5분 버킷별 "마지막 메시지 → 버킷 끝" 무음 길이 | 평균 **13.2초** · 최대 **95초** (289버킷) |
+
+`--vacuum-time` 은 **과거만** 지운다. 지운 그 순간부터 저널은 다시 찬다 — 이 서버는 브루트포스가
+분당 ~26줄을 밀어 넣는다. 감시 창은 `[prev_at, now]` 이므로 `jtot=0` 이 되려면
+**vacuum 이 창의 마지막 무음 구간에 정확히 떨어져야 한다.**
+
+> **무작위 시점 vacuum 의 탐지 확률 = 13.2 / 300 ≈ 4.4%.**
+> 그리고 공격자가 vacuum 직후 ssh 이벤트를 **하나만** 만들면 **0%** 다.
+> 그것이 얼마나 쉬운가: 내 ssh 접속 1회가 `Accepted publickey …` + `pam_unix(sshd:session): session opened …`
+> **2줄**을 만든다(실측). 공격자는 vacuum 을 ssh 세션 안에서 실행하므로 **로그아웃만 해도** 조건이 깨진다.
+
+즉 **위협 모델("root 를 쥔 공격자가 흔적을 지운다")의 정확히 그 행위를 이 검사는 못 잡는다.**
+이 검사가 실제로 잡는 것은 *시점 삭제* 가 아니라 **지속 상태**(아래 표)뿐이다.
+
+**자체검사도 이 사실을 못 본다.** `(교차 j2)` 픽스처는 `FAKE_JOURNAL=$TMPROOT/none.txt` —
+**창 전체가 0줄인 저널**이다. 현실의 vacuum 직후 상태(즉시 재충전)가 아니다.
+이 저장소가 반복해 경고해 온 *"픽스처가 현실이 아니라 우리 가정대로 굴어서 통과한다"* 가
+이번에는 **시나리오 층위**에서 재발했다. CR45-1 이 잡은 것은 같은 병의 *한 단계 아래*(출력 형식)였다.
+
+**판정 근거**: 못 잡는 것 자체는 fail 이 아니다. **못 잡는데 잡는다고 세 문서에 쓰여 있다** → fail.
+
+**수정안**
+1. `monitoring.md` 7b-④ · `§8-6` · `DEPLOY.md §9-1` 에서 "`--rotate --vacuum-time` 을 잡는다"를 지운다.
+   대신 **"저널이 영구적으로 눈먼 상태(아래 표 ✅ 4종)를 잡는다"** 로 사정거리를 사실대로 적는다.
+2. *시점 삭제* 를 실제로 잡으려면 **삭제된 과거**를 봐야 한다. 둘 중 하나면 충분하고 둘 다 0.1초 미만이다:
+   - **(권장) 고정 과거창 재계수** — 매 실행 `[now-2h, now-1h]` 의 ssh 줄 수를 kv 에 적고,
+     다음 실행에서 **같은 절대 창**을 다시 세어 **줄어들면 경보**. append-only 저널에서
+     과거 창의 줄이 줄어드는 일은 정상 운영에 없다(디스크 압박 자체 vacuum 은
+     `journalctl --disk-usage` 를 함께 보면 구분된다).
+   - **가장 오래된 ssh 기록 시각 추적** — `journalctl -u ssh -u sshd -o short-unix | head -1`
+     의 값이 **앞으로 뛰면** 이력이 잘린 것이다(현재 이 서버는 40일치 보존 · 2.0G).
+
+---
+
+### 3) ⛔ SR41-2 (**High · 차단**) — 원격 **미인증** 공격자가 T2 트립와이어(`sshpw`)를 임의로 울린다. 두 출처가 **같은 오염**을 공유한다
+
+리뷰 지시 3항("로그 내용을 신뢰하는가")에 대한 답이다. **신뢰하고 있다.**
+
+`SSHPW_RE='Accepted (password|keyboard-interactive)'` (`monitor.sh:567`) 에는 **앵커가 없다.**
+그리고 sshd 는 공격자가 고른 문자열을 **원문 그대로** 두 출처 모두에 적는다 —
+안전한(정규식에 안 걸리는) 문자열로 **실증**했다:
+
+```
+# ① 사용자명 벡터 — 인증 실패해도 기록된다
+$ ssh 'sr41 probe spaced'@<서버>
+auth.log      : sshd[3348212]: Invalid user sr41 probe spaced from 211.54.122.240 port 53379
+journald -o cat: Invalid user sr41 probe spaced from 211.54.122.240 port 53379
+
+# ② 배너 벡터 — **인증 시도조차 필요 없다.** TCP 연결 + 한 줄이면 된다
+$ exec 3<>/dev/tcp/<서버>/22; printf 'sr41 banner probe spaced\r\n' >&3
+auth.log      : sshd[3348620]: error: kex_exchange_identification: client sent invalid protocol identifier "sr41 banner probe spaced"
+journald -o cat: error: kex_exchange_identification: client sent invalid protocol identifier "sr41 banner probe spaced"
+```
+
+문자열을 `Accepted password` 로 바꾸면 `delta ≥ 1` 이 되고 `monitor.sh:933` 이 발화한다.
+(⚠️ 그 실증은 **일부러 안 했다** — 사용자 텔레그램이 실제로 울기 때문이다. 위 두 줄이 전제를 이미 증명한다.)
+
+**피해 셋**
+
+1. **무제한 알림 폭주.** `raise_alert sshpw **0** "…"` — 쿨다운 0 이라 **5분마다 매번 발송**,
+   하루 최대 288통. 전역 발송 상한(`SR36-5`)은 `monitoring.md §8-4` 에 **아직 열린 것**으로 남아 있다.
+   그리고 이 봇은 **동거 서비스(pjt12-adsense)와 공유**한다 — 남의 채널까지 막는다.
+2. **이번 델타가 만든 `jd_gap` 을 원격에서 위조할 수 있다.** `monitor.sh:889` 는
+   `jd > delta` 일 때 *"두 출처의 수가 다르다 — **auth.log 가 사후에 편집됐을 수 있다**"* 를
+   알림 본문에 싣는다. 창 경계(초 단위)에 배너 1회를 맞추면 journald 창에만 실려 그 문장이 뜬다.
+   **이번 변경이 추가한 문장이 사람에게 거짓 포렌식 결론을 준다.**
+3. **가장 나쁜 것 — 진짜를 덮는 데 쓴다.** T2 는 이 시스템 최상위 경보다. 공격자가 먼저
+   수백 번 헛울리게 만들어 사람이 그 이름을 무시하게 한 뒤 진짜 비밀번호 로그인을 한다.
+   이 저장소가 스스로 반복해 적은 *"헛우는 경보 = 무시되는 경보"* 가 **원격에서 트리거된다**.
+
+**이번 델타가 만든 결함은 아니다**(`SSHPW_RE` 는 그대로). 그러나 이번 델타가 **journald 쪽에도
+같은 무앵커 정규식을 적용**(`jd=$(… | _sshpw_grep)`)해 오염 표면을 두 배로 늘렸고,
+그 위에 새 포렌식 문장을 얹었다. 리뷰 지시가 명시적으로 답을 요구한 항목이므로 차단으로 올린다.
+
+**수정안**
+- 앵커를 건다. auth.log 쪽: `sshd\[[0-9]+\]: Accepted (password|keyboard-interactive) for `.
+  journald `-o cat` 쪽은 `sshd[pid]:` 접두가 **없으므로** `^Accepted (password|keyboard-interactive) for `
+  (또는 journald 도 `-o short` 로 받아 앵커를 하나로 통일).
+  ※ `SSHD_RE='sshd\[[0-9]+\]'`(auth.log 전용)는 이미 앵커가 있어 안전하다.
+- `sshpw` 에 최소 쿨다운(예: 900초)을 준다. "새 사건 = 새 정보" 는 맞지만
+  **원격에서 사건을 무한히 만들 수 있는 한** 쿨다운 0 은 공격자에게 준 확성기다.
+- `SR36-5`(전역 발송 상한)를 더 미루지 않는다.
+
+---
+
+### 4) 못 잡는 시나리오 목록 — **다음 라운드의 입력**
+
+전제: 공격자는 root 를 쥐었다. `A` = auth.log · `J` = journald.
+
+| # | 공격자 행동 | 지금 코드가 보는 것 | 판정 | 근거 |
+|---|---|---|:--:|---|
+| 1 | `journalctl --rotate --vacuum-time=1s` **한 번** | 창 나머지가 즉시 재충전 → `jtot>0` → **침묵** | ❌ **못 잡음**(≈4.4% 우연) | SR41-1 실측 |
+| 2 | 1 + vacuum 직후 ssh 이벤트 1회(로그아웃·`ssh localhost`) | `jtot>0` 확정 → **침묵** | ❌ **못 잡음**(0%) | 접속 1회 = ssh 유닛 2줄 |
+| 3 | journald 정지 후 **저널 파일만 삭제**·재기동 | 삭제 구간은 사라지지만 새 항목이 창을 채움 | ❌ **못 잡음** | 1·2 와 같은 산수 |
+| 4 | **자기 세션 줄만** 저널에서 제거 | 바이너리 저널이라 줄 단위 삭제는 어렵다. 파일 단위로 하면 3과 같다 | ❌ **못 잡음** | — |
+| 5 | `A` 를 같은 길이로 덮어쓰기(x9) — 로그가 자라는 정상 창 | `authfake` 조건 `size==off` 불성립(`how=grown`) | ❌ 설계상 못 잡음(문서에 명시됨 · SR40-3) | 자체검사 `(x9b)` |
+| 6 | 5 + 1/2 (두 곳 다 손봄) | `sshpw` 안 뜸 · `sshjournal` 안 뜸 | ❌ **완전 침묵** | 5·2의 합 |
+| 7 | `A` 를 truncate/교체 **하는 그 실행**에 저널도 손봄 | `new_sshd` 는 `grown` 분기에서만 계산 → 0 → `jd_blind` 불가 | ⚠️ 절반(`authshrink` 는 뜸) | SR41-4 |
+| 8 | `systemctl stop systemd-journald{,.socket,-dev-log.socket}` | `A` 도 함께 멈춘다(수집 경로 공유) → `new_sshd=0` → `jd_blind` **구조적으로 불가** | ⚠️ `authfresh` **6시간 뒤**에만 | SR41-3 |
+| 9 | `Storage=none` + journald 재기동 | `journalctl` 응답 O · `jtot=0` · `A` 는 계속 자람 | ✅ **잡음** | 코드 경로 확인 |
+| 10 | ssh 유닛 이름 변경 / `ssh.socket` 인스턴스화(`ssh@0-….service`) | `-u ssh` 에 안 걸림 → `jtot=0` · `A` 는 자람 | ✅ **잡음** | `-u` 는 glob 확장 안 함 |
+| 11 | `/var/log/journal` 삭제/권한박탈 · 저널 손상(지속) | 창마다 `jtot=0` | ✅ **잡음** | 9와 동형 |
+| 12 | `journalctl` 바이너리 제거/`-n 1` 실패 | `jd_ok=0` | ✅ **잡음**(기존 경로) | 자체검사 `(교차 ④)` |
+| 13 | 시계를 앞으로 돌려 미래 ssh 항목을 심고 되돌림 | 프로브 non-empty → **모든 교차 판정 보류**(경보도 해소도 안 함) | ⚠️ `logblind` 만 · 탐지 무력화 | SR41-5 |
+| 14 | 원격에서 `Accepted password` 를 사용자명/배너로 주입 | `sshpw` 무한 발화 | ❌ **오탐을 공격자가 만든다** | SR41-2 실증 |
+
+> **한 줄 요약**: 이 교차가 실제로 지키는 것은 **"저널이 앞으로 계속 눈멀어 있는 상태"** 이지
+> **"과거를 지웠다"** 가 아니다. 위협 모델이 요구하는 것은 후자다.
+
+---
+
+### 5) SR41-3 (Medium) — "두 번째 출처" 는 **수집 경로가 독립이 아니다**
+
+서버 실측: `/dev/log -> /run/systemd/journal/dev-log` · `syslog.socket` **active** ·
+`/etc/rsyslog.conf` 는 `imuxsock` 만 로드(`imjournal` 없음).
+즉 **auth.log 도 journald 가 forward 해 준 것**이다.
+
+* `monitoring.md` 7b-③ 은 journald 가 sshd 메시지를 *"auth.log 와 **독립적으로** 보관"* 한다고 적는다.
+  **보관은 독립이지만 수집은 공유**다. journald 를 소켓까지 내리면 **두 출처가 동시에 멈춘다.**
+* 그리고 그 상태에서 `new_sshd=0` 이므로 이번에 추가한 `jd_blind` 는 **조건상 발동할 수 없다.**
+  남는 것은 `authfresh` 6시간뿐 — 공격자에게 6시간의 조용한 창이 있다.
+* 수정안: 문서 정정 + `systemctl is-active systemd-journald` 를 감시에 넣거나(`--fast` 0.01초),
+  journald 정지 시 `authfresh` 임계를 짧게 갈아타는 규칙을 둔다.
+
+### 6) SR41-4 (Medium) — `new_sshd` 가 `grown` 분기에만 있다 → 가장 위험한 순간에 검사가 꺼진다
+
+`monitor.sh:702` 의 `new_sshd` 계산은 `case "$how" in grown)` 안에만 있다.
+`rotated`·`rotated_gz`·`replaced`·`shrunk` 에서는 초기값 `0` 그대로 → `jd_blind` 불가(§4 표 #7).
+매주 일요일 로테이션마다 한 번씩도 꺼진다.
+수정안: 회전 분기에서도 `delta` 를 세는 **같은 파이프**에 `grep -cE "$SSHD_RE"` 를 하나 더 붙여
+`new_sshd` 를 채운다(새 파일 + 회전본 꼬리).
+
+### 7) SR41-5 (Medium) — 미래창 프로브는 **시계 되돌림에서 스스로 탐지를 끈다**
+
+프로브 창은 `[now+3600, now+3660]`(`monitor.sh:834`).
+시계가 **1시간 이상 뒤로** 점프하면(큰 NTP 보정 · VM 스냅샷 복원 · RTC 오류)
+점프 전에 쓰인 저널 항목이 그 창에 들어와 `jd_probe_bad=1` → **모든 교차 판정 보류**.
+방향은 안전(거짓 경보 아님)하지만 **탐지 무력화**이고, root 공격자가 유도할 수 있다(§4 표 #13).
+그리고 그 사실은 `logblind` 한 줄(쿨다운 6시간)에 섞여 나갈 뿐 — 사람이 "교차가 꺼졌다"로 읽기 어렵다.
+수정안: 프로브 창을 훨씬 먼 미래(`now+86400`)로 옮기고, 프로브 실패는 **전용 경보 키**로 올린다.
+
+### 8) SR41-6 (Low) — 새 "판정 보류" 안내 명령이 **scrub 에 잘려 못 쓴다**
+
+`monitor.sh:874` 가 만드는 문자열을 `scrub()` 에 통과시켜 재현:
+
+```
+확인: journalctl -u ssh --since '@<num>' -o cat | wc -c (0 이어야 한다)
+```
+
+10자리 epoch 이 금액 규칙 ①(`[0-9]{9,}`)에 걸린다. 그 상태에서 사람이 받는 **유일한 조치 안내**가 실행 불가다.
+수정안: `--since "$(date -d @$((now_s+3600)) '+%F %T')"` 처럼 사람이 읽는 시각으로 적는다(9자리 연속 숫자가 안 생긴다).
+
+### 9) SR41-7 (Low) — 배포 절차: 스테이지 사본을 **해시 검증 전에** root 로 실행한다
+
+`DEPLOY.md §9-1` 의 `.stage` → 검사 → `mv -f` 전환 자체는 **보안 후퇴가 없다**(오히려 개선):
+제자리 덮어쓰기 제거 · `install -m 750 -o root -g root` 유지 · rename 원자성 · 롤백도 같은 방식 ·
+`ls -l *.stage` 잔재 확인 · 자체검사가 `RE_MON_DRY_RUN=1` 을 강제하므로 서버에서 돌려도 발송 0 ✅
+
+남는 것 둘:
+1. `sha256sum` 5/5 대조가 **③(교체 뒤)** 에 있다. ②는 손에 든 것과 같다는 보증 없이
+   `/root/monitor-stage` 의 셸을 **root 로 실행**한다 → 대조를 **②의 첫 줄**로 옮긴다.
+2. `/root/monitor-stage` 정리 단계가 없다 → 옛 감시 스크립트 사본이 `/root` 에 계속 쌓인다.
+   (동거 계정 노출은 없다 — `/root` 는 0700. 위생 문제다.)
+
+### 10) SR41-8 (Low) — `DEPLOY.md` 기대 숫자가 이미 낡았다
+
+표의 "서버 임시 사본 **193 / 0 / 1**" 에 대해 오늘 실측은 **197 / 0 / 1 / HARN 0 · rc=0**.
+CR45-1 이 검사 4건(`교차 j3`)을 더한 뒤 표를 안 고쳤다 — 제자리(`/opt`) 행 `197` 도 같은 이유로 낡았을 것(201 예상).
+문서가 스스로 *"판정은 숫자가 아니라 실패 0 · 하네스오류 0 · rc=0"* 이라 적었으므로 차단은 아니다.
+그래도 **표를 지우거나 갱신**하는 편이 낫다 — 안 맞는 기대값은 다음 사람이 "이 환경이 이상한가?" 로 시간을 쓴다.
+
+### 11) SR41-9 (Medium · 프로세스) — 이 델타는 **보안 게이트 전에 이미 운영에 반영돼 있다**
+
+sha256 대조 결과, 로컬 작업트리의 `monitor.sh`/`monitor-lib.sh`/`monitor-selftest.sh` 3개가
+`/opt/realestate/scripts/` 의 것과 **완전 동일**(서버 mtime `Aug 3 17:57`).
+그런데 `DEPLOY.md §9-1` 은 *"게이트(code-review / security-review)가 **둘 다 통과한 뒤에만** 실행한다"* 고
+적고, `CLAUDE.md` 는 3단계 리뷰 게이트를 **하드 스톱**으로 둔다. `code-review-log.md` 에 `CR-045` 항목도 없다.
+
+변경 대상이 감시 스크립트뿐이라 직접 피해는 없다. 그러나 **게이트가 사후 승인 도장이 되면**
+다음번에 실제로 위험한 변경(인증·암호화·배포 경로)도 같은 길로 나간다.
+이 원장이 `SR-040` 에서 *"서버는 아직 SR-038 코드 · 무단/부분 배포 없음 ✅"* 을 관문 항목으로
+세워 둔 이유가 그것이다 — 이번에는 그 항목이 붉다.
+
+---
+
+### 12) 확인했고 **문제 없는** 것 (오탐 후보 전수)
+
+| 물어본 것 | 답 | 근거 |
+|---|---|---|
+| sshd 로그에 `-- No entries --` 나 개행을 심어 `jtot` 을 흔들 수 있나 | **아니오** — 내용으로 `jtot` 을 **0 으로 만들 수는 없다**. 0 이 아니게 만들려면 저널이 이미 살아 있어야 하고, 그건 곧 "안 눈먼 상태"다. 프로브는 **시간 창** 필터라 내용과 무관하다 | 코드 경로 + 주입 실증(§3) |
+| 개행 주입으로 `wc -l` 부풀리기 | 가능하지만 **무해**(0↔양수 판정만 쓴다). OpenSSH `log.c` 는 `strnvis(VIS_SAFE\|VIS_OCTAL)` 로 제어문자를 이스케이프한다 | — |
+| 재부팅 직후 `jtot=0` 오탐 | **없음** — `/var/log/journal` 영구(2.0G · 40일 보존). ※ `Storage=volatile` 로 바꾸면 재부팅 직후 1회 오탐 가능 | `journalctl` 최고(最古) 항목 = 2026-06-24 |
+| journald RateLimit 도달 시 한쪽만 죽나 | **아니오** — 레이트리밋은 저장 **전에** 걸려 syslog forward 까지 함께 막는다(→ `A` 도 안 자란다 → `new_sshd<2` → 침묵). 비대칭 오탐 없음 | 수집 경로 공유(§5) |
+| 저널 로테이션 / 디스크압박 자체 vacuum | **오탐 없음** — 최근 5분은 항상 남는다. `--vacuum-size=200M` 도 안전(문서가 이미 `--vacuum-time` 금지를 적었다 ✅) | 288버킷 실측 |
+| 감시가 오래 멈췄다 재개 | **오탐 없음** — 창은 24시간으로 상한, 그 안에 반드시 메시지가 있다 | 최장 무음 104초 |
+| 시계 **앞으로** 점프 | 창이 24시간으로 잘릴 뿐, 오탐 없음 | 코드 경로 |
+| 새 상태/임시 파일 권한 (동거 계정 `itsmine`) | **새 파일 0개.** 기존 `kv`/`alerts` 는 0700 디렉터리 · 0600 파일 · `/opt/realestate/scripts/monitor*.sh` 는 **0750 root:root** ✅ | 서버 `ls -l` |
+| 알림 본문에 IP·계정·경로·금액 | **없음** — 새 문자열은 개수·초뿐. 로그 내용은 한 글자도 안 싣는다(SR32-1 재발 없음) | 본문 전수 확인 |
+| `set -u` 아래 새 변수 | `jbuf`·`jtot`·`jd_blind`·`jd_win`·`jprobe`·`jd_probe_bad`·`new_sshd` 전부 `local` 초기화 ✅ | `monitor.sh:578-580` |
+| kv 산술 fail-open (CR44-10) | `check_peer_alive` 3곳에 숫자 가드 추가됨 ✅ (`monitor.sh` 의 `sshpw_at` 은 원래부터 있었다) | 코드 |
+
+---
+
+### 13) 다음 라운드로 가는 조건
+
+**차단 2건**(SR41-1 · SR41-2)이 닫히기 전에는 pass 를 줄 수 없다.
+
+1. **SR41-1** — ① 세 문서에서 "`--vacuum-time` 을 잡는다"를 지우고 사정거리를 §4 표대로 다시 쓴다.
+   ② *시점 삭제* 를 잡는 검사(고정 과거창 재계수 **또는** 최고(最古) ssh 기록 시각 추적)를 넣는다.
+   ③ 자체검사에 **현실적인 vacuum 픽스처**(창의 앞부분만 비고 뒷부분은 찬 저널)를 넣어
+   지금 코드가 그 시나리오에서 **침묵한다는 사실**을 붉은 색으로 못 박는다.
+2. **SR41-2** — `SSHPW_RE` 에 앵커(두 출처 각각) · `sshpw` 최소 쿨다운 · `SR36-5` 발송 상한.
+
+> ⚠️ `fail2ban` 은 사용자 지시에 따라 **이번 결론에 넣지 않았다.** 위 판정은 **현 코드의 실효성만** 다룬다.
+
+---
+
+## SR-042 · 2026-08-03 · **SR-041 차단 2건(원격 로그 주입 · 과장된 서술)의 조치 재검증 — 앵커가 줄머리 앵커가 아니라 우회가 그대로 살아 있고, 그 앵커가 `keyboard-interactive/pam` 을 통째로 미탐으로 만들었다** (security-reviewer)
+
+**판정: FAIL** — 차단 2건(High 2). Medium 3 · Low 3.
+
+> 범위: 커밋 전 작업트리 `git diff 199d9fe` — `deploy/monitor.sh` · `deploy/monitor-selftest.sh` ·
+> `deploy/DEPLOY.md` · `docs/05-monitoring/monitoring.md` 4파일(+원장 2). `frontend/**` ·
+> `docs/02-design/**` **미열람**.
+> 서버(115.68.230.40)는 **읽기 전용 실측만**: `/opt/realestate/scripts/**` 수정·삭제 **0** ·
+> 텔레그램 발송 **0통**(경보를 켜는 문자열은 한 번도 auth.log 에 쓰지 않았다 — 아래 참조) ·
+> 격리 디렉터리 `/root/sec-sr42/` 는 **종료 시 삭제 확인**(`ls` → No such file).
+> 저장소 소스 수정 0 · 커밋 0. 이전: `SR-041`(fail · 차단 SR41-1 · SR41-2).
+
+### 0) 시작·종료 관문
+
+| 항목 | 결과 |
+|---|---|
+| 범위 밖 파일 변경 | **0** (`git status` = deploy 3 · docs 3) |
+| `bash -n deploy/*.sh` (8파일) | 실패 **0** |
+| `grep -rn "MUT-" deploy/` | **0건** |
+| 새 kv 키 / 새 파일 / 권한 변경 | **0개** (`_anchor_loose`·`_anchor_tight` 는 함수 지역변수) |
+| 알림·요약 본문의 비밀·IP·계정·경로·금액 | **0건** — 새 문자열은 **개수뿐**. 로그 *내용* 은 한 글자도 안 싣는다 |
+| 인자 주입 / 포맷 문자열 | **없음** — `journalctl` 인자는 `date +%s` 와 숫자검증된 kv 뿐, `grep` 패턴은 상수, `eval` 0 |
+| SR41-6 (scrub 에 잘리던 안내) | **해소 확인** — `date -d '+1 hour' '+%F %T'` 는 9자리 연속숫자를 안 만든다(scrub 통과 재현) |
+| 프로브 비용(서버 실측 · 반복 평균) | auth.log 7.7MB **2ms/실행** · 46MB(주말 최대) **5ms** → **무시 가능** |
+| 서버 배포 상태 | `/opt/.../monitor.sh` = `b0001419…` != 작업트리 `9d401044…` → **이번 수정분 미배포**(→ SR42-5) |
+
+**주의 — 실험 안전장치**: 위조 실증은 전부 **`Accepted` 를 한 글자 바꾼 안전 문자열**(`Xccepted`·`Accxpted`)로
+서버에 남겼고, 판정은 그 줄을 `/root/sec-sr42/` 로 **복사한 사본에서** `X→A` 치환해 grep 했다.
+즉 **auth.log 에는 경보를 켜는 바이트가 한 번도 들어가지 않았다**(발송 0통).
+
+---
+
+### 1) 먼저, 이번에 좋아진 것
+
+* **journald 쪽 앵커(`SSHPW_JD_RE="^…"`)는 실제로 막는다** — 서버 실측. 같은 위조를 저널에서 꺼내
+  `X→A` 치환해도 `^Accepted (password|keyboard-interactive) for ` **0건**. sshd 메시지는 예외 없이
+  `error:` · `Invalid user ` · `Connection closed by ` 같은 **자기 접두부**로 시작하므로 줄머리를 못 잡는다.
+* **`SR41-1` 서술 정정은 방향이 맞다** — `monitoring.md` 7b-④ 가 탐지확률 4.4% · 접속 1회면 0% ·
+  *"지키는 것은 앞으로 계속 눈멀어 있는 상태이지 과거를 지웠다가 아니다"* · **"x9 방어로 계산하지 말 것"** ·
+  잡는 것/못 잡는 것 목록을 명시했다. §8-6 과 `monitor.sh` 주석에도 정정이 붙었다. **과장은 사라졌다.**
+* **앵커 적합성 프로브라는 발상 자체가 옳다** — 미탐을 침묵으로 두지 않으려는 것이고, `blind_add` 로
+  `logblind`(6시간)까지 올라가 사람에게 닿는다. 비용도 실측상 0에 가깝다.
+* `SR41-6` 해소 · `CR44-10` kv 산술 fail-open 가드 · `api5xx`/`sshjournal` clear 자격 판단.
+
+---
+
+### 2) SR42-1 (**High · 차단**) — 앵커가 **줄머리 앵커가 아니다.** 원격 미인증 주입이 그대로 산다
+
+**CWE-117**(로그 출력 부적절 중화) · **CWE-116** · OWASP **A09**(로깅·모니터링 실패) → 실질 알림채널 DoS.
+위치: `deploy/monitor.sh:578-581` · 발화 `monitor.sh:982`(`raise_alert sshpw 0`) · `:701`(기준값 실행).
+
+주석은 이렇게 적는다:
+
+```
+#    -> sshd 가 **직접 쓴 줄의 머리**에만 걸리게 앵커한다. 사용자명은 항상 `Invalid user `·
+#      `for invalid user ` 뒤에 오므로 접두부 앵커를 통과할 수 없다.
+SSHPW_RE="sshd\[[0-9]+\]: $SSHPW_CORE"
+```
+
+**"줄의 머리"라고 썼지만 `^` 가 없다.** `grep -E` 는 부분일치이므로 이 패턴은 *"줄 어딘가에
+`sshd[숫자]: Accepted password for ` 가 있으면"* 이다. 그리고 **그 접두부 자체가 공격자가 보낼 수 있는
+평범한 문자열**이다 — sshd 는 공격자가 준 바이트를 큰따옴표 안에 그대로 적기 때문이다.
+
+**서버 실증(2026-08-03 · 인증 없음 · TCP 1회 · 안전 문자열)**
+
+```
+$ exec 3<>/dev/tcp/127.0.0.1/22; printf 'sshd[9]: Xccepted password for q\r\n' >&3
+auth.log : sshd[3775353]: error: kex_exchange_identification: client sent invalid protocol identifier "sshd[9]: Xccepted password for q"
+journald : error: kex_exchange_identification: client sent invalid protocol identifier "sshd[9]: Xccepted password for q"
+
+# 그 줄을 사본에서 X->A 한 글자만 바꿔 **새 앵커**에 넣는다
+새앵커(auth.log) 일치 = 1   <- 우회 성공 (옛 정규식과 동일하게 걸린다)
+새앵커(journald) 일치 = 0   <- 이쪽은 막힌다
+```
+
+`check_sshlogin` 은 `if [ "$delta" -gt 0 ] || [ "${jd:-0}" -gt 0 ]` 로 **OR** 이므로
+auth.log 한쪽만 걸려도 `raise_alert sshpw 0` 이 뜬다. **쿨다운 0** -> `*/5` 크론에서 **하루 288통**,
+봇은 동거 서비스와 공유. `SR41-2` 가 지목한 피해가 **그대로 남아 있다.**
+
+**보조 실증(문자 생존 시험 · 서버)** — 사용자명 경로도 대괄호·공백은 그대로 들어간다:
+
+| 보낸 사용자명 | auth.log 에 남은 것 |
+|---|---|
+| `zzq3 zzq4` | `Invalid user zzq3 zzq4 from …` (**공백 생존**) |
+| `zzq5[7]zzq6` | `Invalid user zzq5[7]zzq6 from …` (**대괄호 생존**) |
+| `zzq1:zzq2` | `Invalid user zzq1 from …` (콜론 **이후 잘림** — OpenSSH **클라이언트** 쪽 파싱) |
+
+즉 사용자명 경로는 *OpenSSH 클라이언트로는* 콜론을 못 보내지만, 공격자는 클라이언트를 쓸 의무가 없다.
+그리고 **배너 경로는 클라이언트 없이 콜론까지 통과한다**(위 실증). 세 번째 경로도 열려 있다 —
+`Received disconnect from <IP> port <N>:11: <공격자 문자열>` 의 사유 문구.
+
+**왜 자체검사가 초록인가 — 픽스처가 현실보다 약하다.** `monitor-selftest.sh:1381-1382`:
+
+```
+FORGE_USER='… sshd[77]: Invalid user Accepted password for root from …'
+FORGE_PROTO='… sshd[78]: banner exchange: … invalid protocol identifier "Accepted password for root"'
+```
+
+**공격자가 고른 부분에 `sshd[NN]: ` 가 없다.** 실제 공격자는 그것을 넣을 수 있다(실증).
+이 저장소가 `CR-044` 에서 스스로 적은 형태 — *"픽스처가 현실이 아니라 우리 가정대로 굴어서 통과한다"* —
+의 재발이고, 이번에는 **그 문장을 적은 라운드가 바로 다음 라운드에 다시 밟았다.**
+
+**수정안**
+1. 두 정규식 모두 **줄머리 앵커**로: auth.log 는 syslog 접두부까지 고정
+   (`^[A-Za-z]{3} +[0-9]+ [0-9:]+ [^ ]+ sshd\[[0-9]+\]: Accepted …`) 하거나, 필드 위치로 판정한다.
+   앵커를 유지할 수 없으면 **`journalctl` 단독 판정**으로 바꾼다(`^` 가 이미 유효하다).
+2. `sshpw` 에 **최소 쿨다운**(>=900초)과 `SR36-5`(전역 발송 상한). 원격에서 사건을 무한히 만들 수 있는 한
+   쿨다운 0 은 공격자에게 준 확성기다. — **`SR41-2` 수정안 3개 중 2개가 아직 미이행이다.**
+3. 자체검사 픽스처를 **실측 문자열로 교체**: 위 `kex_exchange_identification` 줄에 `sshd[9]: ` 를 넣은 모양.
+
+---
+
+### 3) SR42-2 (**High · 차단**) — 앵커가 `Accepted keyboard-interactive/pam` 을 **통째로 미탐**으로 만들었다
+
+**CWE-693**(방어기제 우회) · OWASP **A09**. 위치: `monitor.sh:578`(`SSHPW_CORE`).
+
+앵커를 달면서 `' for '` 를 붙였는데, **OpenSSH 가 실제로 쓰는 문자열은 `keyboard-interactive/pam for` 다**
+(서브메서드가 항상 붙는다). 그래서 alternation 의 두 번째 가지가 **어떤 실제 로그와도 일치하지 않는다.**
+
+```
+줄:  sshd[7]: Accepted keyboard-interactive/pam for root from 1.2.3.4 port 5 ssh2
+새 앵커(auth.log/journald 양쪽) = 0   <- 미탐
+옛 정규식                        = 1   <- 예전엔 잡았다  => **이번 델타가 만든 퇴행**
+앵커 적합성 프로브(Accepted publickey)로 감지되나 = 0  <- **못 덮는다**
+```
+
+프로브는 `Accepted publickey`(뒤에 곧바로 ` for ` 가 온다)만 재기 때문에 **이 미탐을 구조적으로 볼 수 없다.**
+`0건` 과 `못 셌다` 가 다시 같아 보인다 — 이 원장이 `CR40-2` 이후 다섯 번 거부해 온 형태다.
+
+**서버 현황(실측)**: `sshd -T` -> `kbdinteractiveauthentication no` · `usepam yes` ·
+`/etc/ssh/sshd_config:62` 에 명시. 그래서 **오늘 이 호스트에서는 잠복 상태**다. 그러나
+
+* `passwordauthentication yes` · `permitrootlogin yes` 가 **켜져 있다**(SR36-1 · ACCEPTED_RISK).
+  T2 는 그 위험을 감수한 **유일한 보상통제**다.
+* `KbdInteractiveAuthentication yes` 로 바뀌는 길은 공격자의 root 뿐이 아니다 —
+  **PAM 2FA(google-authenticator 등) 도입이 정확히 그 설정이다.** 보안을 높이는 변경이
+  **트립와이어를 조용히 끄는** 구조는 받아들일 수 없다.
+* 그 상태에서 비밀번호 로그인 성공은 **auth.log·journald 양쪽 다 0건**으로 보이고,
+  요약은 `비밀번호 로그인 성공 이번 구간 0건 (기대 0)` 이라고 **적극적으로 무사고를 선언**한다.
+
+**수정안**: `SSHPW_CORE='Accepted (password|keyboard-interactive(/[a-z]+)?) for '` (또는 `' for '` 를 떼고
+`Accepted (password|keyboard-interactive)[^ ]* for `). 그리고 **프로브를 성공 메서드 전수로** 바꾼다 —
+`grep -oE 'Accepted [a-z/-]+'` 로 이 호스트가 실제로 쓰는 메서드 집합을 뽑아 앵커가 그 전부를 덮는지 본다
+(오늘 이 서버: `Accepted publickey` 2,173건이 전부).
+
+---
+
+### 4) SR42-3 (Medium) — **앵커 적합성 프로브 자체를 원격에서 오탐으로 켤 수 있다**
+
+위치: `monitor.sh:686-691`. 조건은 `loose>0 && tight==0`.
+`loose` 는 `Accepted publickey` **부분일치**라 §2 와 같은 배너 한 줄로 만들 수 있다:
+
+```
+줄:  sshd[78]: error: … invalid protocol identifier "Accepted publickey"
+loose=1  tight=0   -> "auth.log 형식이 앵커와 다르다" + blind_add -> logblind(6시간) = 하루 4통
+```
+
+성립 창은 **로그 로테이션 직후 ~ 첫 진짜 공개키 로그인 전**이다(주 1회 회전 · 이번 주 auth.log 는
+공개키 성공 280건이라 창은 짧지만 0이 아니다). 방향은 "못 셀 수 있다"는 **역방향 거짓말**이고,
+하필 **눈멂을 보고하는 채널**을 오염시킨다.
+**수정안**: `loose` 도 `tight` 와 같은 접두부(또는 줄머리)로 재고, 두 수를 **같은 줄 집합**에서 뽑는다.
+근본적으로는 §2 의 줄머리 앵커가 이것도 같이 닫는다.
+
+---
+
+### 5) SR42-4 (Medium) — 최신 OpenSSH 의 `sshd-session[…]` 에서 **`new_sshd` 가 영구 0** -> ③b 눈멂 탐지 불가
+
+위치: `monitor.sh:590`(`SSHD_RE='sshd\[[0-9]+\]'`) · `:741`.
+OpenSSH 9.8+(Ubuntu 24.04·Debian 13)는 인증 성공줄을 **`sshd-session[PID]:`** 로 쓴다.
+`sshd-session[…]` 은 `sshd\[[0-9]+\]` 에 **안 걸린다**(문자열 사이에 `-session` 이 있다).
+
+* **실측**: 이 서버는 Ubuntu 22.04 · OpenSSH_8.9p1 · `grep -c 'sshd-session\['` = **0** -> 오늘은 무해.
+* 그러나 OS 업그레이드 한 번으로 (1) `delta` 영구 0(T2 사망) (2) `new_sshd` 영구 0 ->
+  `jd_blind` 조건 `new_sshd>=2` 가 **영원히 거짓** -> `SR40-1` 이 넣은 눈멂 탐지도 **함께 사망**.
+* (1)은 프로브가 `logblind` 로 잡아 준다(loose>0/tight=0). 그러나 (2)는 **아무 신호도 없다.**
+
+**수정안**: `SSHD_RE='sshd(-session)?\[[0-9]+\]'` · `SSHPW_RE` 도 같은 형태. 그리고 `new_sshd` 가
+0 인데 auth.log 가 자랐으면 그 사실 자체를 `blind_add` 한다.
+
+---
+
+### 6) SR42-5 (Medium · 프로세스) — **운영 중인 서버에는 취약한 옛 정규식이 지금 돌고 있다**
+
+`SR41-9` 후속. 서버 실측(2026-08-03):
+
+| 파일 | 서버 | 작업트리 | 판정 |
+|---|---|---|---|
+| `monitor.sh` | `b0001419…` (mtime 08-03 17:57) | `9d401044…` | **다름** — 서버는 `CR-045` 이전 판 |
+| `monitor-selftest.sh` | `58f5a279…` | `9c067375…` | **다름** |
+| `monitor-lib.sh`·`job-run.sh`·`market-index.sh` | — | — | 3/3 동일 |
+
+```
+$ grep -n 'SSHPW_RE=' /opt/realestate/scripts/monitor.sh
+567:SSHPW_RE='Accepted (password|keyboard-interactive)'      <- 앵커 없음
+```
+
+즉 **§2 의 배너 한 줄로 오늘 당장 텔레그램 288통/일을 만들 수 있는 상태가 운영에 떠 있다.**
+(리뷰어는 이것을 **실증하지 않았다** — 발화 금지 지시에 따라 안전 문자열만 썼다.)
+지난 라운드는 *"게이트 전에 배포됐다"* 가 붉은 항목이었는데, 이번에는 *"차단 판정이 난 취약 코드가
+운영에 남아 있고 수정분은 아직 게이트를 못 지났다"* 이다. **둘 다 같은 뿌리** — 게이트와 배포가
+서로를 기다리지 않는다. 최소한 `sshpw` 쿨다운(>=900초)만이라도 **먼저 반영**해 원격 폭주 상한을 건다.
+
+---
+
+### 7) SR41 에서 **안 고친 것** — 이번 판정에 그대로 반영한다
+
+| ID | 심각도 | 상태 | 재확인 |
+|---|:--:|---|---|
+| `SR41-3` 두 출처가 수집 경로상 독립이 아니다 | M | **미조치** | 재실측: `/dev/log -> /run/systemd/journal/dev-log` · `syslog.socket` active · `imjournal` 로드 0건. journald 를 소켓까지 내리면 **auth.log 도 함께 멈춘다** -> `new_sshd=0` -> `jd_blind` **구조적으로 불가**. 남는 것은 `authfresh` 6시간뿐 |
+| `SR41-4` `new_sshd` 가 `grown` 분기에만 있다 | M | **미조치** | `monitor.sh:741` 그대로. 회전·교체·축소 실행에서는 0 -> 가장 위험한 순간에 ③b 가 꺼진다 |
+| `SR41-5` 시계 되돌림이 프로브로 교차를 영구 보류시킨다 | M | **미조치** | 프로브 창 `now+3600 … +3660`(`:877`) 그대로. `logblind` 한 줄에 섞여 나갈 뿐 |
+| `SR41-7` 스테이지 셸을 sha256 대조 **전에** root 로 실행 · `/root/monitor-stage` 정리 없음 | L | **미조치** | `DEPLOY.md §9-1` (2)가 검사 실행, (3)이 sha256 — 순서 그대로 |
+| `SR41-8` `DEPLOY.md` 기대 숫자(임시 사본 193) | L | **미조치** | 리뷰어 실측은 197. 문서가 *"판정은 숫자가 아니다"* 라고 적어 차단은 아니다 |
+
+---
+
+### 8) SR42-6 (Low) — `DEPLOY.md §9-1 (4)` 의 **수동 확인 명령이 옛 정규식**이다
+
+`deploy/DEPLOY.md:1322` 는 여전히 `grep -cE 'Accepted (password|keyboard-interactive)'` 를 시키고
+*"이 값이 0 이 아니면 그것 자체가 트립와이어 T2 다. **먼저 SSH 를 잠근다**"* 라고 적는다.
+§2 의 배너 한 줄이면 이 값이 1이 된다 -> **배포 담당자가 원격 공격자의 지시로 SSH 를 잠근다**(자기 DoS).
+코드와 문서가 서로 다른 규칙을 쓰는 것 자체도 결함이다. -> 문서도 코드와 **같은 상수**를 인용하게 고친다.
+
+### 9) SR42-7 (Low) — `SR41-1` 정정 서술의 남은 흠 (**축소는 없다 · 과장도 없다**)
+
+정정 자체는 정확하다. 다만 `monitoring.md` 7b-④ 한 칸 안에 **24시간 ssh 유닛 줄 수가 29,195(08-02)와
+37,632(08-03) 두 개** 병기돼 있고, 같은 문단이 *"같은 상태를 만드는 길이 더 있다"* 를 **두 번** 적는다.
+숫자가 둘이면 다음 사람이 "어느 쪽이 이 환경인가"로 시간을 쓴다(측정일을 붙이거나 하나로 줄인다).
+**축소 방향의 오류는 없다** — 오히려 표현이 실측보다 보수적이다(리뷰어 재실측: 5분 버킷 0줄 **0개**).
+
+### 10) SR42-8 (Low · 이월) — `SR36-1` 은 여전히 OPEN/ACCEPTED_RISK
+
+`sshd -T` 실측: `permitrootlogin yes` · `passwordauthentication yes` · `pubkeyauthentication yes` ·
+`kbdinteractiveauthentication no` · `loglevel INFO`. `docs/02-design/security.md:230` 은 `PermitRootLogin no`
+를 *"R-01 해소"* 로 적지만 **서버에 적용돼 있지 않다**(설계-실제 불일치 · CWE-1188 · OWASP A05).
+소유자 위험수용 상태이므로 **이번 차단 사유에는 넣지 않는다.** 다만 §2·§3 의 심각도가 High 인 이유가
+이것이다 — **문이 열려 있고 T2 가 유일한 파수꾼이다.**
+
+---
+
+### 11) 못 잡는 시나리오 목록 — **갱신본**
+
+전제: `A` = auth.log · `J` = journald. 1~14 는 `SR-041` 항목의 갱신이다.
+
+| # | 공격자 행동 | 지금 코드가 보는 것 | 판정 | 근거 |
+|---|---|---|:--:|---|
+| 1 | `journalctl --rotate --vacuum-time=1s` **한 번** | 창이 몇 초 만에 재충전 -> `jtot>0` -> 침묵 | 못 잡음(약 4.4%) | SR41-1 실측(문서에 명시됨) |
+| 2 | 1 + 직후 ssh 이벤트 1회 | `jtot>0` 확정 | 못 잡음(0%) | 위와 같음 |
+| 3 | journald 정지 후 저널 파일만 삭제·재기동 | 새 항목이 창을 채움 | 못 잡음 | 위와 같음 |
+| 5 | `A` 를 같은 길이로 덮어쓰기(x9) · 자라는 창 | `authfake` 조건 불성립(`how=grown`) | 설계상 못 잡음(명시됨) | SR40-3 |
+| 7 | `A` 교체/truncate 하는 그 실행에 저널도 손봄 | `new_sshd` 는 `grown` 에서만 계산 -> 0 | 절반 | **SR41-4 미조치** |
+| 8 | `systemctl stop systemd-journald{,.socket,-dev-log.socket}` | `A` 도 함께 멈춤 -> `new_sshd=0` | `authfresh` 6시간 뒤에만 | **SR41-3 미조치**(재실측) |
+| 9 | `Storage=none` + 재기동 | `jtot=0` · `A` 는 자람 | 잡음 | 코드 경로 |
+| 10 | ssh 유닛 이름 변경 / `ssh@0-….service` | `-u ssh` 에 안 걸림 | 잡음 | 위와 같음 |
+| 13 | 시계를 1시간 이상 되돌림 | 프로브 non-empty -> 교차 판정 **영구 보류** | 탐지 무력화 | **SR41-5 미조치** |
+| 14 | 원격에서 `Accepted password` 주입(옛 모양) | **앵커가 막는다** | **해소** | 자체검사 rf1 · 리뷰어 재현 |
+| **15** | 원격에서 **`sshd[9]: Accepted password for `** 주입(배너 1줄 · 미인증) | `delta>0` -> `sshpw` **288통/일** | **오탐을 공격자가 만든다** | **SR42-1 실증** |
+| **16** | 15 로 채널을 채운 뒤 **진짜 비밀번호 로그인** | 진짜 1통이 위조 288통에 섞인다 | **위장까지 된다** | 15의 따름정리 |
+| **17** | `KbdInteractiveAuthentication yes` 인 호스트에서 비밀번호 로그인 | `Accepted keyboard-interactive/pam` 이 **양쪽 앵커에 0건** | **완전 침묵** | **SR42-2 실증** |
+| **18** | 원격에서 `"Accepted publickey"` 배너 1줄(회전 직후) | 프로브가 "형식이 앵커와 다르다" 오탐 -> `logblind` | 눈멂 채널 오염 | **SR42-3 실증** |
+| **19** | OpenSSH 9.8+ 로 업그레이드(`sshd-session[…]`) | `delta`·`new_sshd` 영구 0 | 절반(`logblind` 만) | **SR42-4**(이 서버는 아직 8.9p1) |
+
+> **한 줄 요약**: `SR41-2` 는 **절반만 닫혔다**(journald 방어됨 / auth.log 뚫림). 그리고 그 절반을 닫으려던
+> 문자열이 **`keyboard-interactive/pam` 이라는 새 구멍**을 냈다. 트립와이어는 지금
+> **원격에서 켤 수 있고(15) · 설정 하나로 끌 수 있다(17).**
+
+---
+
+### 12) 확인했고 **문제 없는** 것 (오탐·유출 후보 전수)
+
+| 물어본 것 | 답 | 근거 |
+|---|---|---|
+| journald `-o cat` 쪽 앵커를 원격에서 뚫을 수 있나 | **아니오** — sshd 메시지는 전부 자기 접두부로 시작한다. 위조 줄을 저널에서 꺼내 `X->A` 해도 `^` 앵커 **0건** | 서버 실증 |
+| 개행 주입으로 `^` 앵커 뒤에 붙기 | **아니오** — OpenSSH `log.c` 가 `strnvis(VIS_SAFE\|VIS_OCTAL)` 로 제어문자를 이스케이프. `-o cat` 멀티라인은 sshd 경로에서 안 생긴다 | SR-041 확인 + 재확인 |
+| 남이 저널에 `_SYSTEMD_UNIT=ssh.service` 를 위조 | **아니오** — journald 가 cgroup 에서 신뢰 메타데이터로 붙인다(동거 계정 `itsmine` 도 불가) | 설계 |
+| `-o cat` 을 다른 형식으로 바꾸면 JD 앵커가 조용히 죽나 | **CR45-1 프로브가 잡는다** — `-o cat` 외 형식은 빈 창에서 `-- No entries --` 를 stdout 으로 준다 -> `jd_probe_bad=1` -> 판정 보류 | 서버 실측(systemd 249) |
+| 프로브 비용(매 실행 전체 grep 2회) | **무시 가능** — 7.7MB **2ms** · 46MB **5ms**(반복 평균). auth.log 는 주간 최대 46MB | 서버 실측 |
+| 새 문자열이 로그 내용·IP·계정을 싣나 | **아니오** — 개수(`${_anchor_loose}`·`${new_sshd}`·`${jtot}`·`${jd_win}`)뿐 | 본문 전수 |
+| `set -u` 아래 새 변수 | `_anchor_loose`·`_anchor_tight` 둘 다 `local` 초기화 + `${…:-0}` 가드 | `monitor.sh:603,686-687` |
+| 명령·인자 주입 | 없음 — `journalctl` 인자는 숫자 검증된 epoch 뿐, grep 패턴은 상수, `eval`·`sh -c` 0 | 코드 |
+| 파일 권한·새 파일 | 새 파일 0개. `/opt/realestate/scripts/*.sh` = **0750 root:root** | 서버 `ls -l` |
+| SR41-6(안내 명령이 scrub 에 잘림) | **해소** — `date -d '+1 hour' '+%F %T'` 는 9자리 연속숫자를 안 만든다 | scrub 재현 |
+| 서버 상태 변경 | **0** — `/opt/realestate/scripts/**` 무접촉 · 텔레그램 0통 · `/root/sec-sr42/` 삭제 확인 | 종료 관문 |
+
+---
+
+### 13) 다음 라운드로 가는 조건
+
+**차단 2건(SR42-1 · SR42-2)** 이 닫히기 전에는 pass 를 줄 수 없다.
+
+1. **SR42-1** — (1) 두 정규식을 **진짜 줄머리 앵커**로(또는 journald 단독 판정으로) ·
+   (2) `sshpw` **최소 쿨다운 >=900초** + `SR36-5` 발송 상한 ·
+   (3) 자체검사 픽스처를 **실측 문자열**(`… invalid protocol identifier "sshd[9]: Accepted password for q"`)로 교체.
+   (3) 없이 (1)만 고치면 **다음 라운드에 또 같은 자리에서 뚫린다.**
+2. **SR42-2** — `keyboard-interactive/pam` 을 덮는 패턴 + **프로브를 성공 메서드 전수 비교로** 전환
+   (`Accepted [a-z/-]+` 집합 대비 앵커 커버리지). 그 상태에서 `kbdint yes` 픽스처로 검사 1건.
+3. 함께 권함(비차단): SR42-3(프로브 대칭) · SR42-4(`sshd(-session)?`) · SR42-5(취약판이 운영에 떠 있는 상태 해소) ·
+   SR41-3/4/5 이월분.
+
+> 주의: `fail2ban` 은 사용자 지시에 따라 **이번 결론에 넣지 않았다.**
+
+---
+
+# SR-043 — SR-042 차단 2건(원격 로그 주입·kbdint 미탐) 조치 재검증 + 발송 상한 공격면 심사
+
+- **판정**: **PASS** (Critical/High 0 · 하드-fail 5조건 0)
+- **일시**: 2026-08-03T22:20:00+09:00 · **이전**: SR-042 (failed · 차단 SR42-1 · SR42-2)
+- **대상**: 커밋 전 작업트리 `deploy/monitor.sh` · `deploy/monitor-lib.sh` · `deploy/monitor-selftest.sh` · `deploy/DEPLOY.md` · `docs/05-monitoring/monitoring.md`. 동결 해시 5개 시작 시 일치 확인.
+- **서버**: 읽기 전용 실측만. `/opt/realestate/scripts/**` 수정·삭제 0 · 텔레그램 0통 · 격리 `/root/sec-sr43` 종료 시 삭제 확인. `frontend/**`·`docs/02-design/**` 미열람.
+- ⚠️ 배포판은 **두 라운드 낡음**(`/opt/.../monitor.sh` sha256 `b0001419…` · `SSHPW_RE='Accepted (password|keyboard-interactive)'` 앵커 없음). 이번 판정은 **작업트리**를 대상으로 한다(게이트 전 배포 없음 = CR45-6① 유지). 배포판 잔존은 SR42-5 로 이월.
+
+## 1) SR-042 차단 2건 — 해소 확인 (실서버 재현)
+
+**SR42-1 (원격 로그 주입으로 앵커 우회) → 해소.**
+- 진짜 줄머리 앵커: `SYSLOG_HEAD='^[A-Z][a-z][a-z] [ 0-9][0-9] …[^ ]+ '` + `SSHPW_RE="${SYSLOG_HEAD}sshd(-session)?\[…\]: Accepted ${SSHPW_METHOD} for "`.
+- 주입 재현(안전 문자열, 발화 0통): 4종 후보(`… invalid protocol identifier "sshd[9]: Accepted password for root"` · `Invalid user Accepted password for root …` · `Connection from …: Accepted password for root` · 정상 publickey) 대상 **새 앵커 0건 / 구식 무앵커 3건**. 앵커가 실제로 우회를 닫았다.
+- 실서버 커버리지: `auth.log` sshd 줄 **62,706 전부** 줄머리 앵커 일치(손실 0) · 회전본 `.1`(46MB) **371,351 전부** 일치. 앵커가 정상 로그를 하나도 안 놓친다.
+- 쿨다운 0→900: `raise_alert sshpw 900`(:747·:1028). 첫 통은 `.sent` 부재라 **즉시** 나간다(트립와이어 즉시성 유지). 발송 상한 60(`monitor-lib.sh` `_send_quota`) + 상한 도달 통보 1통.
+
+**SR42-2 (keyboard-interactive/pam 미탐) → 해소.**
+- `SSHPW_METHOD='(password|keyboard-interactive(/[a-z]+)?)'` 로 서브메서드 커버. 메서드 커버리지 프로브(`_m_unknown`, :731-737)가 `publickey|none|<목록>` 밖 메서드를 blind 로 보고 → 이름 나열식이 아니라 **구조적** 방어.
+- 실서버 메서드 분포: `auth.log` **publickey 331** · `.1` **publickey 1,479** — 그 외 성공 메서드 0. `_m_unknown` 발동 안 함(정상).
+
+**부수 확인**: CR46-2/SR42-4 — `SSHD_RE='sshd(-session)?\[…\]'`(:609) 포함 5곳 `sshd(-session)?` 반영 → `new_sshd`·`_anchor_*` 도 커버. 서버는 8.9p1(`sshd-session` 0건)이라 잠복. CR46-6 — `kv/sshpw_off` 비숫자 시 `blind_add` 후 기준값 재설정(:641-649), 조용한 fail-open 차단 확인.
+
+## 2) 발송 상한이 보안 실패가 되는가 — 심사 결과: **SR43-1 (Medium)**, 무력화 아님
+
+- **SR43-1 (Medium · CWE-703/CWE-400 · OWASP A09)**: 하루 발송 상한(`SEND_MAX_DAY=60`)에 **보안-핵심 예약 쿼터가 없다.** 상한 소진 이후 `sshpw`·`authfake`·`authedit`·`authshrink`·`sshjournal` 등 SSH 트립와이어 경보가 텔레그램에서 **당일 억제(로그 전용)** 된다. `_send_quota` 는 `send_telegram` 진입부(:246)에서 **DRY-RUN 보다도 먼저** 무조건 적용되고 키별 예외가 없다.
+  - **다만 은밀한 무력화 경로는 없다**(그래서 High 아님):
+    (a) 상한을 소진하려면 **60통의 요란한 경보가 먼저 사람에게 도달**한다 — 트립와이어 자체 주입은 §1 앵커로 차단되므로 공격자가 조용히 소진할 키가 없다. 가장 높은 볼륨은 `oom_$name` 쿨다운 0(:292)인데, 이를 60회 채우려면 5시간 연속 OOM kill(사람이 60통을 이미 받음). `api5xx`(쿨다운 3600)는 하루 24통이 상한이라 단독으로 60에 못 미친다.
+    (b) 상한 도달 시 **"폭주 원인을 먼저 확인할 것" 통보 1통**이 같은 채널로 나간다(`return 2`).
+    (c) 사건은 `MON_LOG` 에 남는다(`ALERT-SUPPRESSED …`).
+    (d) 자정 롤오버(`send_day`)로 `send_count` 리셋 → **다음날 재발송**(`.sent` 미기록이라 재시도됨). 영구 손실 아님, 최대 ~24h 지연.
+  - 순영향: **경보 매몰/지연**(alert-fatigue)이지 침묵이 아니다. 그러나 트립와이어가 "사람의 기억이 아니라 기계가 진다"는 설계 보증이 폭주 창에서 약화된다.
+  - **대안**: ① 보안-핵심 키(`sshpw`/`authfake`/`authedit`/`authshrink`/`sshjournal`)를 상한에서 면제하거나 별도 소예약 쿼터(예: 5/일) 부여 · ② `oom` 경보에 소쿨다운(300~900) 부여(OOM 누적치는 어차피 요약에 실린다) · ③ 상한 도달 시 핵심 키는 우회 발송하고 별도 카운트.
+
+## 3) 그 밖에 확인한 것
+
+- **메서드 프로브 정보유출 없음**: `_m_unknown` 은 auth.log 유래지만 (a) 줄머리 앵커로만 추출 → 주입 불가, (b) 문자클래스 `[a-z][a-z/-]*` 로 공백·따옴표·마크업 불가, (c) `add`/`blind_add` 경로 모두 `scrub` 통과. 텔레그램에 실려도 바운드된 메서드명뿐.
+- **주입 지점 추가 탐색 — 전부 방어됨**:
+  - 개행/멀티라인: TCP 1회 프로브로 배너에 `\r\nAccepted password for root` 주입 → sshd 가 **개행에서 배너를 절단**, auth.log 에는 절단 전만 기록, journald `-o cat` 에 `^Accepted` 물리줄 **0건**. journald `^` 우회 불가.
+  - 호스트명 자리(`[^ ]+`)·syslog 접두부 흉내 사용자명: 주입 문자열은 항상 `error:`/`Invalid user ` **뒤**에 와 첫 `sshd[pid]:` 뒤가 `Accepted` 가 될 수 없다(실증 0건).
+- **성능**: `check_sshlogin` 이 매 `--fast`(5분)마다 전수 grep 3회(`_anchor_sshd`·`_anchor_head`·`_m_unknown`). 실측 **7.9MB 0.024s · 회전직전 46MB 0.106s**. 문제 없음.
+- **쿨다운 900 트립와이어 즉시성**: 첫 사건은 `.sent` 부재로 즉시 발송, 이후만 900초 억제. 트립와이어 성격 훼손 없음.
+- **SR43-2 (Low)**: `RE_MON_SEND_MAX_DAY` 값 취약 — 비숫자면 `[ "$count" -ge "$SEND_MAX_DAY" ]` 오류로 **fail-open(항상 발송)**, `0`/음수면 첫 통 뒤 **전부 억제(fail-closed)**. 원격 경로 없음(cron/env = root 필요). 숫자·양수 가드 권함.
+- **SR43-3 (Low/Info)**: `fast`·`daily` 는 **서로 다른 lock**(`monitor.$MODE.lock`) → 동시 실행 시 `send_count` read-modify-write 경쟁(lost update) → 상한 초과(더 보냄) = **fail-safe**. 보안 영향 없음, 기록만.
+- `send_capped` 손상 시 중복 "폭주" 통보 가능(비보안, 경미).
+
+## 4) 이월 미조치 (판정 반영 — 전부 Medium 이하, 게이트 미차단)
+
+- **SR41-3 (M)**: journald·auth.log **수집 경로 비독립**(`/dev/log`→`journal/dev-log`). journald 를 소켓까지 내리면 auth.log 도 멈춰 `new_sshd=0` → `jd_blind` 구조적 불가. `authfresh` 6시간만 남음. 미조치.
+- **SR41-4 (M)**: `new_sshd` 가 `grown` 분기(:787)에만 계산 → 회전/교체/축소(가장 위험한 순간)에는 0 → ③b journald 눈멂 탐지 불가. 단 그 순간 `authshrink`/`authedit`/`replaced` 가 별도로 발화하므로 탬퍼 자체는 알림. 미조치.
+- **SR41-5 (M)**: 미래창 프로브(`now+3600 … +3660`, :923) → 시계 되돌림 시 프로브 non-empty → **모든 교차 판정 영구 보류**. `logblind` 한 줄로만 드러남. 미조치.
+- **SR41-7/8 (L)**: 배포 절차(해시 대조 전 root 실행)·`DEPLOY.md` 기대 숫자 낡음. 미조치.
+- **SR42-4 (M)**: 코드는 `sshd(-session)?` 반영됨. 서버 8.9p1 이라 잠복.
+- **SR42-5 (M · 프로세스)**: 취약한 옛 정규식이 서버 운영본에 아직 떠 있음(`b0001419…`) — 이번 게이트 통과 후 배포로 해소되어야 함.
+- **SR36-1 (ACCEPTED_RISK)**: root 비밀번호 SSH 허용 위험수용 유지. 이번 라운드로 그것을 떠받치는 T2 트립와이어의 **양방향 무력화(SR42-1/2)가 닫혔다** — 수용 전제가 다시 튼튼해졌다.
+
+## 5) 못 잡는 시나리오 목록 (갱신)
+
+| # | 시나리오 | 결과 | 근거 |
+|---|---|---|---|
+| A | 원격 배너/사용자명 주입으로 SSHPW 앵커 우회 | **차단** — 새 앵커 0건(구식 3건) | 서버 실증 §1 |
+| B | 개행 주입으로 journald `^` 앵커 뒤 붙기 | **차단** — sshd 가 배너를 개행에서 절단 | TCP 1회 실증 §3 |
+| C | `keyboard-interactive/pam` 성공 미탐 | **차단** — SSHPW_METHOD + 커버리지 프로브 | 코드+실측 §1 |
+| D | 공격자 유발 폭주로 발송 상한 소진 → 트립와이어 당일 억제 | **부분** — 매몰/최대~24h 지연(요란·capped 통보·로그·다음날 재발송). 은밀 무력화 아님 | §2 (SR43-1 M) |
+| E | 회전/교체/축소 순간 journald 교차 눈멂 | **부분** — ③b 못 켬(SR41-4). 단 authshrink/authedit 는 발화 | §4 |
+| F | journald·auth.log 동시 정지(수집 경로 공유) | **부분** — new_sshd=0, authfresh 6h만 | SR41-3 §4 |
+| G | 시계 되돌림으로 교차 영구 보류 | **미조치** — 프로브 non-empty | SR41-5 §4 |
+| H | 서버 운영본이 취약 옛 정규식(배포 지연) | **미해소** — 게이트 통과 후 배포로 닫힘 | SR42-5 §4 |
+
+> `fail2ban` 은 사용자 지시에 따라 이번 결론에 포함하지 않았다.
+
+---
+
+# SR-044 — 발송 상한 재설계(check/commit 분리) 재판정 + 상한 존치 여부 권고
+
+- **판정**: **PASS** (Critical/High 0 · 하드-fail 5조건 0)
+- **일시**: 2026-08-04T10:05:00+09:00 · **이전**: SR-043 (passed · 차단 0 · SR43-1 Medium 이월)
+- **대상**: 커밋 전 작업트리 `deploy/monitor.sh` · `deploy/monitor-lib.sh` · `deploy/monitor-selftest.sh`.
+  동결 해시 3/3 시작 시 일치(`83bda3dd…` / `7f8a35aa…` / `6c67f837…`).
+- **범위**: SR-043 PASS 이후 바뀐 것만 — check/commit 분리 · 상한값 위생 · `send_count` fail-open ·
+  `ALERT-SUPPRESSED-CAP` 분리 · `sshpw` 쿨다운 900 관문화.
+- **방법**: 코드 읽기 + 짧은 읽기 전용 서버 실측. `monitor-selftest.sh` **미실행**(윈도우 금지 지시 준수).
+  `/opt/realestate/scripts/**` 수정·삭제 0 · 텔레그램 0통 · 격리 디렉터리 생성 0(불필요) ·
+  `frontend/**`·`docs/02-design/**` 미열람.
+
+## 1) SR43-1 재판정 — **부분 해소**. 은밀한 무력화는 닫혔고, 요란한 무력화는 남았다
+
+**닫힌 것.** 소진 시점이 `_send_quota_commit()` 으로 옮겨져 **HTTP 200 을 받은 뒤에만** 카운터가 오른다
+(`monitor-lib.sh:296`). 상한 통보(q=2)도 나간 뒤에야 `send_capped=1` 을 찍는다(`:256`).
+따라서 "한 통도 도달하지 않은 채 상한이 소진되어 채널이 자정까지 죽는" **무발화 소진 경로가 제거**됐다.
+상한 60을 태우려면 이제 **사람이 실제로 60통을 받아야 한다.** 은밀한 무력화는 성립하지 않는다.
+
+**남은 것 → SR44-1.** 소진 자체는 여전히 공격자가 밀어붙일 수 있고, 소진 후 억제 대상에
+**보안 트립와이어가 예외 없이 포함**된다. 소진 경로 실측:
+
+| 근거 | 실측값 |
+|---|---|
+| `--fast` 주기 | `*/5 * * * *` = **288회/일** (서버 root crontab) |
+| 쿨다운 0 인 경보 | **`oom_$name` 단 1종** (`monitor.sh:303`) — 전수 확인, 나머지는 전부 900~604800 |
+| `oom` 이론 상한 | 컨테이너당 288통/일 → 60통 상한을 **약 5시간**에 소진 |
+| `api5xx` | 쿨다운 3600 → 24통/일. 단독 소진 불가 |
+
+즉 **`oom` 이 유일한 고속 소진 경로**이며, 이는 SR-043 의 판단과 동일하다. 메모리 압박을 유발할 수 있는
+공격자(api 컨테이너 `mem_limit 192m`)가 OOM 을 5시간 반복시키면 그날의 `sshpw`·`authedit`·`authfake`·
+`authshrink`·`logperm`·`logleak` 이 **텔레그램에서 사라지고 로그 전용**이 된다.
+
+**보안 키 예약 쿼터가 필요한가 → 필요하다(Medium).** 근거 세 가지:
+1. 상한의 보호 대상은 *요금·채널 폭주*인데, 트립와이어는 **하루 최대 96통(쿨다운 900)** 으로 이미 자체
+   상한이 걸려 있다. 상한 60 이 이들을 억제해서 얻는 이득이 사실상 없다.
+2. 억제되는 순간이 하필 **공격이 진행 중인 순간**이다 — 상한은 "폭주 = 이상사태"일 때만 닿는다.
+3. 완화 비용이 낮다. `send_telegram` 이 키를 모르므로 `raise_alert` 에서 보안 키 집합을 판별해
+   `RE_MON_SEND_EXEMPT=1` 같은 플래그로 `_send_quota_check` 를 건너뛰면 된다(수 줄).
+
+**심각도 조정**: SR-043 의 Medium 을 유지한다(High 아님). 사람이 60통을 먼저 받고, 원문은 억제 전에
+`monitor-lib.sh:326 log "ALERT $key :: $msg"` 로 **항상 로그에 남으며**, 자정에 자동 해제되기 때문이다.
+
+## 2) fail-open 결정 — **타당하다.** 비-root 로 악용 불가(권한 실측 완료)
+
+`_send_quota_check` 는 `send_count` 가 비숫자면 막지 않고 `kv_set send_count 0` 후 통과한다(`:244`).
+"공격자가 그 파일을 망가뜨려 상한을 무력화할 수 있는가"에 대한 **실측 답: 비-root 는 불가능**.
+
+```
+drwx------ 5 root root  /var/lib/realestate-monitor
+drwx------ 2 root root  /var/lib/realestate-monitor/kv
+-rw------- 1 root root  kv/*            (kv_set 이 매번 chmod 600)
+drwxr-xr-x root root    /var/lib , /var  (상위 write 권한 없음)
+동거 계정: ubuntu(1000) · autobtc(1001) — 둘 다 kv 진입 불가
+```
+
+- 상위 경로가 전부 root 소유이므로 동거 계정은 `kv/send_count` 를 읽지도 쓰지도, 디렉터리 교체도 못 한다.
+- 손상을 만들 수 있는 주체는 **root 뿐이며, root 는 이미 `monitor.sh` 자체를 고칠 수 있다** —
+  fail-open 이 새로 열어주는 권한이 없다(신뢰경계를 넘지 않음).
+- 방향성도 옳다. 감시 채널에서 "모르겠으면 침묵"은 **고장과 무사고가 같아 보이는** 최악의 실패다.
+- 다만 기록해 둔다: 이 fail-open 은 *이번 한 통만 통과*가 아니라 **카운터를 0 으로 되돌린다**.
+  root 위협모델 밖이라 무해하지만, 디스크 부분기록이 반복되면 상한이 사실상 무한이 된다 → SR44-2(Low).
+
+## 3) `SEND_MAX_DAY` 0/비숫자 → 60 복귀 — **보안상 옳은 방향.** 단 하한이 없다
+
+- 0 은 *전 경보 영구 침묵*이고 비숫자는 *미정의*다. 둘 다 기본값 복귀는 **"안전한 실패 = 더 시끄러운 쪽"**
+  원칙에 맞다(`:221-223`). 승인.
+- **환경변수 주입 경로 실측 — 없음.**
+  - `RE_MON_*` 를 세팅하는 crontab/`/etc/cron.d`/systemd 유닛 **0건**.
+  - 감시는 root crontab 에서 절대경로로 직접 실행되며, `/opt/realestate/scripts/monitor.sh` 는
+    `-rwxr-x--- root:root`(0750). 상위 `/opt/realestate/scripts` 는 0755 root 라 비-root 는 **교체 불가**.
+  - 따라서 env 를 심으려면 이미 root 여야 한다 = 새 공격면 아님.
+- **잔여(Low)**: `1` 같은 *유효한 소수값*은 그대로 수용된다. 0 만 막고 1 을 허용하면 침묵 효과가 거의
+  같으므로, 굳이 위생 검사를 둔다면 **하한(예: 10 미만은 10으로)** 까지 두는 편이 일관적이다 → SR44-3.
+
+## 4) SR42-5 실측 — **미해소. 운영본은 3라운드째 취약한 옛 정규식이다**
+
+```
+/opt/realestate/scripts/monitor.sh:567:  SSHPW_RE='Accepted (password|keyboard-interactive)'
+sha256  b00014192b5d8576e8d88806e2113c634e61e68d92964b09612cac1e231a7a80  (SR-043 때와 동일 = 무배포)
+sha256  a392fef0ac7775bac0946143433f3f3b0709c516aac0c3816a54f4227fbbff64  monitor-lib.sh (구판)
+kv/send_day · kv/send_count · kv/send_capped → **전부 빈 값** = 상한 기능 자체가 운영에 없음
+kv/fast_runs_today = 275 (감시는 정상 가동 중)
+```
+
+- 즉 지금 돌고 있는 감시는 **줄머리 앵커가 없어 원격 로그 주입에 그대로 노출**된 판이다(SR42-1 원본 결함).
+- 게이트 통과 전 배포 금지 원칙(CR45-6①) 때문에 생긴 상태이므로 이번 판정을 차단하지는 않는다.
+  SR-043 과 동일한 논리를 유지한다. **다만 아래 배포 선후관계는 반드시 지켜야 한다.**
+
+> ⚠️ **배포 선결조건(중요)**: 상한 코드를 **옛 정규식 위에 먼저 얹으면 안 된다.**
+> 앵커 없는 `SSHPW_RE` 는 인증 없는 원격 공격자가 SSH 사용자명에 `Accepted password for root` 를
+> 넣는 것만으로 `sshpw` 경보를 만들어 낼 수 있고, 여기에 상한이 붙으면 **미인증 공격자가 60통 상한을
+> 임의로 태워 다른 모든 경보를 침묵**시킬 수 있다(SR44-1 을 Medium → High 로 끌어올리는 조합).
+> 반드시 **앵커 판(SR42-1 조치)과 상한을 같은 배포에 함께** 올릴 것.
+
+## 5) 이번 라운드 발견
+
+| ID | 심각도 | CWE / OWASP | 요약 | 위치 |
+|---|---|---|---|---|
+| SR44-1 | **Medium** | CWE-703 · CWE-400 · OWASP A09 | 보안 트립와이어 예약 쿼터 부재. `oom` 쿨다운 0 × `--fast` 288회/일 → 상한 60을 약 5h에 소진, 이후 `sshpw` 등이 당일 로그 전용. 은밀 무력화는 아님(60통 도달 + 원문 로그 보존) | `monitor-lib.sh:266` 전 키 무조건 적용 · `monitor.sh:303` 쿨다운 0 |
+| SR44-2 | Low | CWE-703 | `send_count` fail-open 이 통과가 아니라 **카운터 리셋**(`kv_set send_count 0`). root 전용 경로라 무해하나 반복 손상 시 상한이 무력화 | `monitor-lib.sh:244` |
+| SR44-3 | Low | CWE-1188 | `SEND_MAX_DAY` 하한 부재 — 0 은 막지만 `1` 은 허용(침묵 효과 유사). 주입 경로는 실측상 root 한정 | `monitor-lib.sh:221-223` |
+| SR44-4 | Medium(이월) | CWE-116 · OWASP A09 | SR42-5 미해소 — 운영본 `SSHPW_RE` 앵커 없음(`:567`), sha256 `b0001419…` 불변. 배포로만 닫힘 | 서버 `/opt/realestate/scripts/monitor.sh:567` |
+
+**차단(Critical/High): 0건 → PASS.** SR44-1~4 는 모두 비차단 권고이며 SR44-4 는 배포 시 선결조건이다.
+
+## 6) 요청 의견 — 상한 기능을 **뺄 것인가 둘 것인가**
+
+**권고: 둔다(존치). 단 보안 키 예외를 붙이는 조건부 존치.** 결정은 PM.
+
+*존치 근거*
+1. **폭주 방어가 실제로 필요하다.** 쿨다운 0 인 `oom` 이 살아 있고 `--fast` 는 288회/일이다.
+   상한을 빼면 컨테이너 하나가 288통, 두 개면 576통을 하루에 쏟을 수 있다 — 이건 가정이 아니라
+   현재 코드에서 바로 도출되는 값이다. 이 상태에서 상한 제거는 **경보 피로로 채널을 죽이는** 쪽이다.
+2. **2라운드 차단의 원인은 기능이 아니라 배치였다.** 문제는 "판정과 소진을 한 덩어리로 묶어 보내지도
+   못한 통을 셌다"는 것이었고, 그건 check/commit 분리로 정확히 해소됐다(§1). 같은 자리에서 또 나올
+   결함이 아니다.
+3. **남은 결함(SR44-1)의 해법이 제거가 아니다.** 필요한 건 예약 쿼터 수 줄이지 기능 삭제가 아니다.
+   상한을 빼면 SR44-1 은 사라지지만 대신 폭주 방어가 0 이 되어 순 손실이다.
+4. `sshpw` 쿨다운 900(96통/일)과 앵커는 **위조 유입**을 막는 장치이지 **볼륨**을 막는 장치가 아니다.
+   `oom`(쿨다운 0)에는 아무 효과가 없으므로 "이미 막혀 있다"는 근거로는 부족하다.
+
+*존치 조건(둘 다 충족 시에만 배포)*
+- (a) 보안 키(`sshpw`·`sshjournal`·`authedit`·`authfake`·`authshrink`·`logperm`·`logleak`)를 상한에서 면제 —
+  이들은 쿨다운으로 이미 상한이 걸려 있어 폭주 위험이 없다. (SR44-1 해소)
+- (b) 앵커 판(SR42-1 조치)과 **같은 배포**로 올릴 것. 순서가 뒤집히면 미인증 원격 소진이 열린다(§4).
+
+*상한을 정 뺀다면* — 최소한 `oom` 쿨다운을 0 → 3600 으로 올려 폭주 상한을 대체해야 한다.
+그냥 빼기만 하는 선택지는 권하지 않는다.
+
+## 7) 위협 커버리지 (SR-043 대비 변화분만)
+
+| # | 위협 | 상태 | 근거 |
+|---|---|---|---|
+| A | 무발화 상한 소진으로 채널 사망 | **해소** | commit-on-success (`:296`) · 상한 통보도 나간 뒤 잠금(`:256`) |
+| B | 상한값(0/비숫자)으로 전면 침묵 | **해소** | 기본 60 복귀(`:221`) · 주입 경로 root 한정(실측) |
+| C | kv 손상으로 상한 무력화 | **해당 없음** | state 0700 root · kv 파일 0600 root · 동거계정 접근 불가(실측) |
+| D | 공격자 유발 폭주로 트립와이어 억제 | **부분** — 요란한 경로만 잔존 | SR44-1 · `oom` 쿨다운 0 |
+| E | 억제 로그 혼동으로 관문 오통과 | **해소** | `ALERT-SUPPRESSED-CAP` 낱말 분리(`:268`) |
+| F | 운영본 취약 정규식 잔존 | **미해소** | SR44-4 · 배포로만 닫힘 |
+
+> `fail2ban` 은 사용자 지시에 따라 이번 결론에 포함하지 않았다.
