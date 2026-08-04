@@ -1743,6 +1743,861 @@ avoid "$S5Y.log" 'ALERT-CLEARED api5xx' \
       "access 로그가 사라졌는데 '5xx 해소' 를 보낸다 — 거짓 해소(CR40-2 재발)"
 
 # ============================================================================
+sect "T6d. fail2ban 이 **실제로** 막고 있는가 (2026-08-04 적용)"
+
+# ⛔ 왜 이 구획이 생겼나 — fail2ban 을 붙여 놓고 **그 차단을 아무도 감시하지 않았다.**
+#    조용히 죽으면 우리는 다시 무방비인데 아무도 모른다. 이 저장소가 다섯 라운드에 걸쳐
+#    고친 실패형(감시가 자기 자신에 대해 거짓말한다)이 새 보안 장치에서 그대로 재발한
+#    상태였다. 여기서 잡는 것은 셋이다:
+#      ① 데몬이 죽었다        ② **데몬은 사는데 규칙만 빠졌다**  ③ 필터가 로그를 못 읽는다
+#    그리고 ④ **차단 건수 자체로는 절대 울지 않는다**(하루 수백 건이 정상 — 늑대소년 방지).
+#
+# ⚠️ 가짜(픽스처)는 **서버에서 실측한 모양 그대로**다. 이 저장소가 반복해 온 실패가
+#    *"가짜가 우리 가정대로 굴어서 관문이 초록"* 이라, 특히 아래 셋을 흉내낸다:
+#      · `systemctl is-active` 는 inactive 일 때 **낱말을 stdout 에 주고 rc=3** 이다.
+#      · `fail2ban-client status <없는jail>` 은 stdout 에 "Sorry but the jail … does not
+#        exist" 를 적고 **rc=255** 로 끝난다(CR49-1 재측정 · sshd 는 rc=0).
+#        ⛔ 예전 주석과 예전 가짜는 *"rc=0"* 이라고 적고 `exit 0` 했다 — **현실보다 관대했다.**
+#        그래도 우리는 rc 로 판정하지 않는다: rc 는 판(version)에 딸린 계약이라 업그레이드로
+#        조용히 바뀌고, jail 이 살아 있어도 출력 형식이 달라지면 rc=0 인 채로 못 읽는다.
+#      · `status` 는 **차단 IP 목록을 통째로 뱉는다**(`Banned IP list: 9.9.9.9 8.8.8.8`).
+#        그것이 아래 SR45-4 유출 가드의 **대상**이다 — 가짜가 IP 를 안 뱉으면 그 가드는
+#        통과하는 게 아니라 **공허해진다.** 그래서 하네스 관문이 IP 가 나오는지도 확인한다.
+F2B="$TMPROOT/f2b"; mkdir -p "$F2B"
+
+cat >"$F2B/systemctl" <<'F2BEOF'
+#!/bin/sh
+# 실측(2026-08-04/05 · systemd 249) — **가짜가 현실보다 관대하면 검사가 공허하다.**
+#   is-active  <없는 유닛>  → `inactive` 를 **stdout** 에 주고 rc=3
+#   is-enabled <없는 유닛>  → **stdout 은 비고** rc=1 · 사유는 stderr 로만 간다
+#   is-active  re-v6-ssh-drop.service(정상 · oneshot+RemainAfterExit) → `active` rc=0
+#   is-enabled re-v6-ssh-drop.service(정상)                            → `enabled` rc=0
+# ⛔ **유닛 이름으로 갈라 준다.** 예전 가짜는 $2 를 통째로 무시해서, v6 유닛을 물어도
+#    fail2ban 의 상태를 돌려줬다 — 그 상태면 v6 시나리오가 무엇을 시험하든 다 통과한다.
+case "$1" in
+  is-active)
+    case "${2:-}" in
+      fail2ban|fail2ban.service)
+        [ -n "${FAKE_F2B_ACTIVE:-}" ] || exit 3      # 빈 출력 = 못 읽음(systemd/버스 불가)
+        echo "$FAKE_F2B_ACTIVE"
+        [ "$FAKE_F2B_ACTIVE" = active ] || exit 3
+        exit 0 ;;
+      *)
+        v=${FAKE_V6_ACTIVE-active}
+        [ -n "$v" ] || exit 3                        # 빈 출력 = 버스를 못 읽었다
+        echo "$v"
+        [ "$v" = active ] || exit 3
+        exit 0 ;;
+    esac ;;
+  is-enabled)
+    case "${2:-}" in
+      fail2ban|fail2ban.service) echo enabled; exit 0 ;;
+      *)
+        v=${FAKE_V6_ENABLED-enabled}
+        if [ -z "$v" ]; then
+          # **유닛 파일이 없을 때의 실측 모양** — stdout 은 비고 사유는 stderr 로 간다.
+          echo "Failed to get unit file state for ${2:-}: No such file or directory" >&2
+          exit 1
+        fi
+        [ "$v" = NOBUS ] && exit 1                   # 아무것도 못 읽는 상태(버스 불가)
+        echo "$v"
+        [ "$v" = enabled ] && exit 0
+        exit 1 ;;
+    esac ;;
+esac
+exit 1
+F2BEOF
+
+cat >"$F2B/iptables" <<'F2BEOF'
+#!/bin/sh
+# 우리 코드가 `-S INPUT` 말고 다른 것을 부르면 여기서 죽는다(가짜가 관대하면 검사가 공허해진다).
+case "$*" in *"-S INPUT"*) ;; *) echo "iptables: unexpected args: $*" >&2; exit 2 ;; esac
+case "${FAKE_F2B_IPT:-}" in
+  FAIL)  echo "iptables: Permission denied (you must be root)" >&2; exit 4 ;;
+  EMPTY) exit 0 ;;
+esac
+[ -f "${FAKE_F2B_IPT:-}" ] && { cat "$FAKE_F2B_IPT"; exit 0; }
+exit 4
+F2BEOF
+
+cat >"$F2B/fail2ban-client" <<'F2BEOF'
+#!/bin/sh
+# 실측(v0.11.2 · CR49-1 로 재측정) — 없는 jail 은 stdout 에 "Sorry but ..." 를 적고 **rc=255** 다.
+# ⚠️ 예전 이 가짜는 `exit 0` 이었다 — **현실보다 관대해서** rc 를 보는 코드가 들어와도 안 붉어졌다.
+#    가짜가 현실보다 관대하면 그 검사는 공허하다(이 저장소가 반복해서 만난 형태).
+[ "$1" = status ] || exit 255
+j="${2:-}"
+if [ "$j" != "${FAKE_F2B_JAIL:-sshd}" ]; then
+  echo "Sorry but the jail '$j' does not exist"
+  exit 255
+fi
+printf 'Status for the jail: %s\n' "$j"
+printf '|- Filter\n|  |- Currently failed:\t4\n|  |- Total failed:\t%s\n|  `- File list:\t/var/log/auth.log\n' "${FAKE_F2B_TFAIL:-187}"
+printf '`- Actions\n   |- Currently banned:\t%s\n   |- Total banned:\t%s\n   `- Banned IP list:\t9.9.9.9 8.8.8.8\n' "${FAKE_F2B_CUR:-7}" "${FAKE_F2B_TOTAL:-22}"
+exit 0
+F2BEOF
+chmod +x "$F2B/systemctl" "$F2B/iptables" "$F2B/fail2ban-client" 2>/dev/null
+
+# iptables -S INPUT 픽스처 — 서버 실측 그대로
+printf -- '-P INPUT ACCEPT\n-A INPUT -p tcp -m multiport --dports 22 -j f2b-sshd\n' >"$F2B/ipt-ok.txt"
+printf -- '-P INPUT ACCEPT\n-A INPUT -p tcp -m tcp --dport 443 -j ACCEPT\n'         >"$F2B/ipt-norule.txt"
+printf -- '-P INPUT ACCEPT\n-A INPUT -p tcp -m multiport --dports 2222 -j f2b-sshd\n' >"$F2B/ipt-badport.txt"
+printf -- '-P INPUT ACCEPT\n-A INPUT -p tcp -m multiport --dports 22,2222 -j f2b-sshd\n' >"$F2B/ipt-multi.txt"
+# SR45-7 — **순서**용 픽스처. 점프는 셋 다 있다. 다른 것은 그 **앞에 무엇이 있는가** 뿐이다.
+#   ipt-shadow  : 앞선 ACCEPT 가 22/tcp 를 통과시킨다 → 점프가 걸려 있어도 무력하다.
+#                 앞의 두 줄(lo · ESTABLISHED)은 **무해**다 — 그것까지 울면 오탐이다.
+#                 주소를 일부러 넣었다(203.0.113.0/24 = RFC5737 문서용) → 알림에서 가려져야 한다.
+#   ipt-order-ok: 앞은 전부 무해하고, **점프 뒤**에 포괄 ACCEPT 가 있다 → 조용해야 한다.
+#   ipt-subchain: 앞이 하위 체인이다 → 안을 못 본다 → **감시불능**(단정 금지).
+printf -- '%s\n' \
+  '-P INPUT ACCEPT' \
+  '-A INPUT -i lo -j ACCEPT' \
+  '-A INPUT -p tcp -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT' \
+  '-A INPUT -s 203.0.113.7/32 -p tcp -m tcp --dport 22 -j ACCEPT' \
+  '-A INPUT -p tcp -m multiport --dports 22 -j f2b-sshd' >"$F2B/ipt-shadow.txt"
+printf -- '%s\n' \
+  '-P INPUT ACCEPT' \
+  '-A INPUT -i lo -j ACCEPT' \
+  '-A INPUT -p tcp -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT' \
+  '-A INPUT -p tcp -m tcp --dport 443 -j ACCEPT' \
+  '-A INPUT -p udp -m udp --dport 53 -j ACCEPT' \
+  '-A INPUT -p tcp -m tcp --dport 22 -j DROP' \
+  '-A INPUT -p tcp -m multiport --dports 22 -j f2b-sshd' \
+  '-A INPUT -j ACCEPT' >"$F2B/ipt-order-ok.txt"
+printf -- '%s\n' \
+  '-P INPUT ACCEPT' \
+  '-A INPUT -j ufw-before-input' \
+  '-A INPUT -p tcp -m multiport --dports 22 -j f2b-sshd' >"$F2B/ipt-subchain.txt"
+
+# --- IPv6 (SR-046) — 가짜 ip6tables 와 픽스처 -------------------------------
+#   ⚠️ **기본값이 정상이어야 한다.** 위 fail2ban 시나리오도 같은 `RE_MON_BIN_DIR` 을
+#      쓰므로, 여기서 기본을 "없음/실패"로 두면 그 시나리오 전부가 v6 감시불능 때문에
+#      붉어진다 — 검사가 서로를 오염시키는 형태다. 그래서 `FAKE_V6_IPT` 를 안 주면
+#      **서버 실측 그대로의 정상 출력**을 준다.
+{ printf '#!/bin/sh\nV6DEF=%s\n' "$F2B/ip6-ok.txt"
+  cat <<'F2BEOF'
+# 우리 코드가 `-S INPUT` 말고 다른 것을 부르면 여기서 죽는다(가짜가 관대하면 검사가 공허해진다).
+case "$*" in *"-S INPUT"*) ;; *) echo "ip6tables: unexpected args: $*" >&2; exit 2 ;; esac
+f=${FAKE_V6_IPT-$V6DEF}
+case "$f" in
+  # 실측 문구 그대로 — 권한/모듈 실패는 stderr + rc≠0 이고 stdout 은 비어 있다.
+  FAIL)  echo "ip6tables v1.8.7 (nf_tables): can't initialize ip6tables table filter: Permission denied (you must be root)" >&2; exit 3 ;;
+  EMPTY) exit 0 ;;
+esac
+[ -f "$f" ] && { cat "$f"; exit 0; }
+exit 4
+F2BEOF
+} >"$F2B/ip6tables"
+chmod +x "$F2B/ip6tables" 2>/dev/null
+
+# ip6tables -S INPUT 픽스처 — **서버 실측 그대로**(2026-08-05)
+#   ⛔ ip6-ok 의 마지막 줄(f2b-sshd 점프)이 이 라운드의 핵심이다: fail2ban 은 v6 점프를
+#      **이미 만들어 두고도** 한 건도 안 잡는다(<HOST> 정규식이 fe80::…%iface 를 못 읽는다).
+#      그래서 "점프가 있으니 됐다"는 판정은 v6 에서 **거짓**이다 — 이 검사는 DROP 을 본다.
+#   ip6-norule : PM 조치 **이전의 실제 상태** — 점프만 있고 DROP 이 없다(= 무방비)
+#   ip6-shadow : DROP 앞에 22를 통과시키는 ACCEPT (앞 세 줄 lo·ESTABLISHED·3306 DROP 은 무해)
+#     ⛔ CR51-2 — **무관한 DROP(3306) 을 우리 DROP 앞에 일부러 둔다.** v4 의 `_f2b_order_scan`
+#        은 `-j <이름>` 첫 줄에서 멈추는 구조라, 그걸 v6 에 재사용하면 이 3306 DROP 에서 멈춰
+#        **그 뒤의 22번 ACCEPT 를 못 보고 "앞이 깨끗하다"** 고 말한다(조용한 오답).
+#        이 한 줄이 없으면 그 잘못된 '정리'가 51건 전부 초록인 채로 들어온다.
+#                주소는 RFC3849 문서용 2001:db8:: 다 → 알림에서 가려져야 한다
+#   ip6-order-ok: 앞이 전부 무해하고 포괄 ACCEPT 는 DROP **뒤**다 → 조용해야 한다
+#                (`-p ipv6-icmp` 는 v6 에서 실제로 열어 두는 줄이다 — 여기서 울면 오탐)
+#   ip6-subchain: 앞이 하위 체인이다 → 안을 못 본다 → **감시불능**(단정 금지)
+#   ip6-srcdrop : DROP 이지만 **출발지가 붙어 있다** → 그 한 주소만 막는다(우리 보호 아님)
+printf -- '%s\n' \
+  '-P INPUT ACCEPT' \
+  '-A INPUT -p tcp -m tcp --dport 22 -j DROP' \
+  '-A INPUT -p tcp -m multiport --dports 22 -j f2b-sshd' >"$F2B/ip6-ok.txt"
+printf -- '%s\n' \
+  '-P INPUT ACCEPT' \
+  '-A INPUT -p tcp -m multiport --dports 22 -j f2b-sshd' >"$F2B/ip6-norule.txt"
+printf -- '%s\n' \
+  '-P INPUT ACCEPT' \
+  '-A INPUT -i lo -j ACCEPT' \
+  '-A INPUT -p tcp -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT' \
+  '-A INPUT -p tcp -m tcp --dport 3306 -j DROP' \
+  '-A INPUT -s 2001:db8::7/128 -p tcp -m tcp --dport 22 -j ACCEPT' \
+  '-A INPUT -p tcp -m tcp --dport 22 -j DROP' \
+  '-A INPUT -p tcp -m multiport --dports 22 -j f2b-sshd' >"$F2B/ip6-shadow.txt"
+printf -- '%s\n' \
+  '-P INPUT ACCEPT' \
+  '-A INPUT -i lo -j ACCEPT' \
+  '-A INPUT -p tcp -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT' \
+  '-A INPUT -p tcp -m tcp --dport 443 -j ACCEPT' \
+  '-A INPUT -p ipv6-icmp -j ACCEPT' \
+  '-A INPUT -p tcp -m tcp --dport 22 -j DROP' \
+  '-A INPUT -j ACCEPT' >"$F2B/ip6-order-ok.txt"
+printf -- '%s\n' \
+  '-P INPUT ACCEPT' \
+  '-A INPUT -j ufw6-before-input' \
+  '-A INPUT -p tcp -m tcp --dport 22 -j DROP' >"$F2B/ip6-subchain.txt"
+printf -- '%s\n' \
+  '-P INPUT ACCEPT' \
+  '-A INPUT -s 2001:db8::9/128 -p tcp -m tcp --dport 22 -j DROP' \
+  '-A INPUT -p tcp -m multiport --dports 22 -j f2b-sshd' >"$F2B/ip6-srcdrop.txt"
+
+# `ip6tables` 가 **아예 없는** 호스트(v6 를 안 쓰는 서버)를 흉내내는 훅 디렉터리.
+#   ⚠️ `RE_MON_BIN_DIR` 은 "이 안에서만 찾는다"이므로, 여기에 ip6tables 를 안 두면
+#      운영 코드가 진짜 /usr/sbin/ip6tables 를 부르지 않는다(그것이 이 훅의 존재 이유다).
+mkdir -p "$F2B/noip6"
+for f2bb in systemctl iptables fail2ban-client; do
+  cp "$F2B/$f2bb" "$F2B/noip6/$f2bb" 2>/dev/null
+  chmod +x "$F2B/noip6/$f2bb" 2>/dev/null
+done
+
+# ⛔ SR45-5 — 가짜 주입은 **명시적 환경변수 하나**로만 한다. PATH 를 앞에 두는 방식은
+#    운영 코드에 "PATH 를 먼저 보라"를 강제했고, 그것이 root 코드실행 승격 경로였다.
+#    (아래 (파) 가 "PATH 앞의 가짜는 안 불린다"를 따로 시험한다 — 이 줄만 바꾸면 소용없다)
+f2brun() { # $1=상태이름  $2..=추가 환경변수 — 요약(DIGEST)을 stdout 으로 돌려준다
+  local st="$TMPROOT/$1"; shift
+  run_mon "$st" --fast RE_MON_BIN_DIR="$F2B" \
+    RE_MON_LOG_DIR="$FULL" RE_MON_APP_LOG_GLOB="$FULL/realestate-monitor.log*" \
+    RE_MON_ACCESS_LOG="$FULL/realestate.access.log" RE_MON_ERROR_LOG="$FULL/realestate.error.log" \
+    RE_MON_AUTH_LOG="$FULL/auth.log" "$@" 2>/dev/null
+}
+
+# ⛔ SR45-4 — **차단 IP 는 어디에도 실리면 안 된다.**
+#    코드는 지금 옳다(`_f2b_field` 가 `[0-9]` 만 뽑고, `$st` · `$out` 전체는 어느 알림
+#    경로에도 안 실린다). **그런데 그것을 지키는 시험이 하나도 없었다.**
+#    누가 진단 편의로 `add "… $st"` 한 줄만 넣으면 차단 IP 목록이 통째로 텔레그램으로 나가고,
+#    `scrub()` 에는 IP 규칙이 **없어서** 세탁으로도 안 걸린다(확인함).
+#    이 저장소는 SR32-1 에서 금액이 로그로 샌 전력이 있고, 그때도 "코드는 옳았는데 가드가 없었다".
+#    → 요약(캡처 문자열)과 감시 로그(경보 문구가 그대로 남는 곳) **둘 다** 본다.
+noip() { # noip <감시로그> <요약문자열> <상황>
+  avoid "$1" '9\.9\.9\.9\|8\.8\.8\.8' \
+        "(IP유출) $3 — 차단 IP 가 로그·알림에 안 실린다" \
+        "(IP유출) $3 에서 **차단 IP 목록이 샜다** — 감시가 유출 통로가 됐다"
+  if has "$2" '9.9.9.9' || has "$2" '8.8.8.8'; then
+    ng "(IP유출) $3 — **요약에 차단 IP 가 실린다**" "$(printf '%s' "$2" | grep -a fail2ban)"
+  else
+    ok "(IP유출) $3 — 요약에도 차단 IP 가 없다"
+  fi
+}
+
+# --- 픽스처가 기대대로 도는지 먼저 확인한다(CR44-3 ②) — 하네스 고장은 ok 도 ng 도 아니다
+# ⛔ SR45-5 — 가짜를 **PATH 로 부르지 않는다.** 운영 코드가 PATH 를 먼저 보게 만들어야
+#    성립하는 시험이면, 그 시험이 root 실행 경로의 탐색 순서를 정하는 것이다.
+#    여기서는 **경로로 직접** 부르고, monitor.sh 에는 `RE_MON_BIN_DIR` 로만 주입한다.
+F2BOK=0
+F2BST=$(FAKE_F2B_JAIL=sshd "$F2B/fail2ban-client" status sshd 2>/dev/null)
+F2BNO=$("$F2B/fail2ban-client" status nosuchjail 2>/dev/null); F2BNORC=$?
+if [ "$(FAKE_F2B_ACTIVE=active "$F2B/systemctl" is-active fail2ban 2>/dev/null)" = "active" ] &&
+   ! FAKE_F2B_ACTIVE=inactive "$F2B/systemctl" is-active fail2ban >/dev/null 2>&1 &&
+   [ "$(FAKE_F2B_IPT="$F2B/ipt-ok.txt" "$F2B/iptables" -S INPUT 2>/dev/null | tail -1)" = "-A INPUT -p tcp -m multiport --dports 22 -j f2b-sshd" ] &&
+   [ "$F2BNORC" != 0 ] && has "$F2BNO" 'does not exist' &&
+   has "$F2BST" 'Banned IP list:' && has "$F2BST" '9.9.9.9' && has "$F2BST" 'Total banned:' &&
+   [ "$("$F2B/ip6tables" -S INPUT 2>/dev/null | sed -n 2p)" = "-A INPUT -p tcp -m tcp --dport 22 -j DROP" ]; then
+  F2BOK=1
+fi
+if [ "$F2BOK" != 1 ]; then
+  harn "(fail2ban) 시나리오 전체" "가짜 systemctl/iptables/fail2ban-client 가 기대대로 동작하지 않는다 — **검사 결과가 아니다**(하네스·환경 문제). 없는 jail rc=${F2BNORC}"
+else
+  ok "(fail2ban) 가짜가 실측 모양대로 동작한다 — is-active 는 rc=3+낱말, 없는 jail 은 **rc=255**, status 는 **차단 IP 목록을 그대로 뱉는다**(아래 유출 가드가 공허하지 않다는 근거) · v6 가짜 기본값도 정상이다(그래야 이 구획이 v6 때문에 붉어지지 않는다)"
+
+# --- (가) 정상 대조군 — 전부 정상이면 **조용해야** 한다 ----------------------
+F2BO=$(f2brun rf2b1 FAKE_F2B_ACTIVE=active FAKE_F2B_IPT="$F2B/ipt-ok.txt" FAKE_F2B_TOTAL=22)
+avoid "$TMPROOT/rf2b1.log" 'ALERT f2b_' \
+      "(대조군) 서비스 active + 규칙 있음이면 fail2ban 경보가 하나도 없다 (오탐 0)" \
+      "(대조군) 정상인데 fail2ban 경보가 뜬다 — 5분마다 간다"
+avoid "$TMPROOT/rf2b1.log" 'ALERT logblind' \
+      "(대조군) 정상이면 감시불능 사유도 안 남는다" \
+      "(대조군) 정상인데 fail2ban 이 감시불능 사유를 남긴다"
+if has "$F2BO" 'fail2ban: 서비스=active' && has "$F2BO" '규칙 있음'; then
+  ok "(대조군) 요약이 서비스와 **규칙**을 따로 적는다 (is-active 하나로 '보호됨'이라 하지 않는다)"
+else
+  ng "(대조군) 요약에 fail2ban 상태가 제대로 안 실린다" "$(printf '%s' "$F2BO" | grep -a fail2ban)"
+fi
+noip "$TMPROOT/rf2b1.log" "$F2BO" "대조군(정상)"
+
+# --- (나) ① 데몬이 죽었다 — streak 2 회에서만 운다 --------------------------
+f2brun rf2b2 FAKE_F2B_ACTIVE=inactive FAKE_F2B_IPT="$F2B/ipt-norule.txt" >/dev/null
+avoid "$TMPROOT/rf2b2.log" 'ALERT f2b_dead' \
+      "(서비스) 1회차에는 아직 안 운다 (systemctl restart 순간에 울지 않는다)" \
+      "(서비스) 1회 관측으로 바로 운다 — 재시작 5초에 경보가 간다"
+F2BO=$(f2brun rf2b2 FAKE_F2B_ACTIVE=inactive FAKE_F2B_IPT="$F2B/ipt-norule.txt")
+want "$TMPROOT/rf2b2.log" 'ALERT f2b_dead' \
+     "(서비스) 2회 연속 inactive 면 경보 — fail2ban 이 죽은 것을 기계가 안다" \
+     "(서비스) fail2ban 이 죽어도 아무 말이 없다 — 다시 무방비인데 아무도 모른다"
+avoid "$TMPROOT/rf2b2.log" 'ALERT f2b_rule' \
+      "(서비스) 데몬이 죽어 규칙도 같이 사라진 것을 **두 통으로 보내지 않는다**" \
+      "(서비스) 한 사고에 f2b_dead + f2b_rule 두 통이 간다 — 사람이 키를 무시하게 된다"
+
+# --- (다) 해소 — 되살리면 실제로 꺼진다 (clear 경로) ------------------------
+F2BPRE=$(wc -l <"$TMPROOT/rf2b2.log" 2>/dev/null); F2BPRE=${F2BPRE:-0}
+f2brun rf2b2 FAKE_F2B_ACTIVE=active FAKE_F2B_IPT="$F2B/ipt-ok.txt" >/dev/null
+tail -n +$((F2BPRE + 1)) "$TMPROOT/rf2b2.log" >"$TMPROOT/rf2b2.after.log" 2>/dev/null
+want "$TMPROOT/rf2b2.after.log" 'ALERT-CLEARED f2b_dead' \
+     "(서비스 해소) 되살리면 f2b_dead 가 꺼진다 (고친 것이 표시에 반영된다)" \
+     "(서비스 해소) fail2ban 을 되살려도 경보가 안 꺼진다 — 안 꺼지는 경보는 곧 무시된다"
+if [ ! -f "$TMPROOT/rf2b2/alerts/f2b_dead.active" ]; then
+  ok "(서비스 해소) .active 도 지워진다 (요약 머리말의 미해소가 풀린다)"
+else ng "(서비스 해소) 해소 통보는 갔는데 .active 가 남는다"; fi
+
+# --- (라) ⚠️ 핵심 — **서비스는 active 인데 규칙만 빠졌다** ------------------
+#     도커 재시작·방화벽 재적용이 INPUT 을 다시 쓰면 정확히 이 모양이 된다.
+#     `is-active` 만 보는 감시는 여기서 **초록인 채로 거짓말**을 한다.
+f2brun rf2b3 FAKE_F2B_ACTIVE=active FAKE_F2B_IPT="$F2B/ipt-norule.txt" >/dev/null
+F2BO=$(f2brun rf2b3 FAKE_F2B_ACTIVE=active FAKE_F2B_IPT="$F2B/ipt-norule.txt")
+want "$TMPROOT/rf2b3.log" 'ALERT f2b_rule' \
+     "(규칙) 서비스는 active 인데 INPUT 점프가 없으면 경보 — **is-active 는 보호의 증거가 아니다**" \
+     "(규칙) 규칙이 통째로 빠졌는데 서비스가 살아 있다는 이유로 조용하다 — 아무것도 안 막는 상태다"
+avoid "$TMPROOT/rf2b3.log" 'ALERT f2b_dead' \
+      "(규칙) 그때 f2b_dead 는 안 뜬다 (두 원인을 구분한다 — 고칠 곳이 다르다)" \
+      "(규칙) 규칙만 빠졌는데 '서비스가 죽었다'고 알린다 — 엉뚱한 곳을 보게 만든다"
+if has "$F2BO" '규칙 없음' && ! has "$F2BO" '규칙 있음'; then
+  ok "(규칙) 요약이 '규칙 없음' 이라고 적는다 (서비스가 active 여도 보호됨이라 하지 않는다)"
+else
+  ng "(규칙) 요약이 규칙 소실을 말하지 않는다" "$(printf '%s' "$F2BO" | grep -a fail2ban)"
+fi
+
+# --- (마) 규칙 해소 ---------------------------------------------------------
+F2BPRE=$(wc -l <"$TMPROOT/rf2b3.log" 2>/dev/null); F2BPRE=${F2BPRE:-0}
+f2brun rf2b3 FAKE_F2B_ACTIVE=active FAKE_F2B_IPT="$F2B/ipt-ok.txt" >/dev/null
+tail -n +$((F2BPRE + 1)) "$TMPROOT/rf2b3.log" >"$TMPROOT/rf2b3.after.log" 2>/dev/null
+want "$TMPROOT/rf2b3.after.log" 'ALERT-CLEARED f2b_rule' \
+     "(규칙 해소) 규칙이 돌아오면 f2b_rule 이 꺼진다" \
+     "(규칙 해소) 규칙을 다시 걸어도 경보가 안 꺼진다 — 미해소가 영영 남는다"
+if [ ! -f "$TMPROOT/rf2b3/alerts/f2b_rule.active" ]; then
+  ok "(규칙 해소) .active 도 지워진다"
+else ng "(규칙 해소) 해소 통보는 갔는데 .active 가 남는다"; fi
+
+# --- (바) 점프는 있는데 **우리 포트를 안 덮는다** ---------------------------
+f2brun rf2b4 FAKE_F2B_ACTIVE=active FAKE_F2B_IPT="$F2B/ipt-badport.txt" >/dev/null
+f2brun rf2b4 FAKE_F2B_ACTIVE=active FAKE_F2B_IPT="$F2B/ipt-badport.txt" >/dev/null
+want "$TMPROOT/rf2b4.log" 'ALERT f2b_rule' \
+     "(포트) 점프가 있어도 22를 안 덮으면 경보 — 이름만 맞는 규칙에 속지 않는다" \
+     "(포트) f2b-sshd 라는 낱말만 보고 통과한다 — 22는 무방비인데 초록이다"
+f2brun rf2b4b FAKE_F2B_ACTIVE=active FAKE_F2B_IPT="$F2B/ipt-multi.txt" >/dev/null
+f2brun rf2b4b FAKE_F2B_ACTIVE=active FAKE_F2B_IPT="$F2B/ipt-multi.txt" >/dev/null
+avoid "$TMPROOT/rf2b4b.log" 'ALERT f2b_rule' \
+      "(포트 대조군) --dports 22,2222 처럼 목록에 들어 있으면 조용하다 (오탐 0)" \
+      "(포트 대조군) 포트 목록을 문자열로만 비교해 정상 설정에 운다"
+
+# --- (사) ⛔ fail-open — iptables 를 **못 부른 것**과 '규칙 없음'은 다르다 ---
+F2BS="$TMPROOT/rf2b5"; mkdir -p "$F2BS/alerts"
+printf '%s' "$(date +%s)" >"$F2BS/alerts/f2b_rule.active"; printf '%s' "$(date +%s)" >"$F2BS/alerts/f2b_rule.sent"
+F2BO=$(f2brun rf2b5 FAKE_F2B_ACTIVE=active FAKE_F2B_IPT=FAIL)
+want "$TMPROOT/rf2b5.log" 'ALERT logblind' \
+     "(fail-open) iptables 가 실패하면 **감시불능**으로 남는다 (조용히 통과하지 않는다)" \
+     "(fail-open) iptables 를 못 불렀는데 아무 데도 안 남는다"
+avoid "$TMPROOT/rf2b5.log" 'ALERT f2b_rule' \
+      "(fail-open) 못 부른 것을 '규칙 없음'으로 **단정하지 않는다** (오탐 0)" \
+      "(fail-open) iptables 실패를 규칙 소실로 읽는다 — 권한 하나에 매번 경보가 간다"
+avoid "$TMPROOT/rf2b5.log" 'ALERT-CLEARED f2b_rule' \
+      "(fail-open) 못 본 것을 **해소라고도 말하지 않는다** (CR40-2)" \
+      "(fail-open) 아무것도 못 봤는데 '규칙이 다시 걸렸다' 고 해소 통보를 보낸다"
+if [ -f "$F2BS/alerts/f2b_rule.active" ]; then
+  ok "(fail-open) 켜져 있던 f2b_rule 경보가 살아남는다 (감시 불능이 경보를 지우지 못한다)"
+else
+  ng "(fail-open) 눈이 먼 상태에서 켜져 있던 경보가 지워졌다 — 거짓 해소"
+fi
+if has "$F2BO" '판정 못 함'; then
+  ok "(fail-open) 요약 문구가 '판정 못 함' 이다 ('규칙 있음'도 '없음'도 아니다)"
+else ng "(fail-open) 못 본 것을 단정하는 문구가 요약에 적힌다" "$(printf '%s' "$F2BO" | grep -a fail2ban)"; fi
+
+# --- (아) ③ 필터가 로그를 읽는가 — 누적 차단수가 안 는다 --------------------
+#     ⚠️ 창을 실측으로 잡았다: 이 서버는 auth.log 전수 재생 기준 **하루 235~517건**이
+#        차단 조건에 닿는다(10일 연속) → 24시간 0건은 없다. 반면 5분 0건은 정상이다.
+f2brun rf2b6 FAKE_F2B_ACTIVE=active FAKE_F2B_IPT="$F2B/ipt-ok.txt" FAKE_F2B_TOTAL=22 >/dev/null
+printf '%s' "$(( $(date +%s) - 25 * 3600 ))" >"$TMPROOT/rf2b6/kv/f2b_total_at" 2>/dev/null
+F2BO=$(f2brun rf2b6 FAKE_F2B_ACTIVE=active FAKE_F2B_IPT="$F2B/ipt-ok.txt" FAKE_F2B_TOTAL=22)
+want "$TMPROOT/rf2b6.log" 'ALERT f2b_stale' \
+     "(필터) 누적 차단이 25시간째 그대로면 경보 — 필터가 로그를 못 읽는 상태를 잡는다" \
+     "(필터) 차단이 하루 넘게 0건인데 조용하다 — logpath 가 어긋나도 '살아 있음'으로 보인다"
+# 경보가 **실제로 나가는** 상태다 — 유출이 일어난다면 여기가 가장 위험한 자리다.
+noip "$TMPROOT/rf2b6.log" "$F2BO" "f2b_stale 경보가 나가는 순간"
+f2brun rf2b7 FAKE_F2B_ACTIVE=active FAKE_F2B_IPT="$F2B/ipt-ok.txt" FAKE_F2B_TOTAL=22 >/dev/null
+f2brun rf2b7 FAKE_F2B_ACTIVE=active FAKE_F2B_IPT="$F2B/ipt-ok.txt" FAKE_F2B_TOTAL=22 >/dev/null
+avoid "$TMPROOT/rf2b7.log" 'ALERT f2b_stale' \
+      "(필터 대조군) **5분 창의 0 증가는 정상**이라 안 운다 (창을 실측으로 골랐다)" \
+      "(필터 대조군) 5분 사이에 안 늘었다고 운다 — 5분마다 경보가 간다"
+
+# --- (자) 차단이 다시 늘면 해소된다 ----------------------------------------
+F2BPRE=$(wc -l <"$TMPROOT/rf2b6.log" 2>/dev/null); F2BPRE=${F2BPRE:-0}
+f2brun rf2b6 FAKE_F2B_ACTIVE=active FAKE_F2B_IPT="$F2B/ipt-ok.txt" FAKE_F2B_TOTAL=25 >/dev/null
+tail -n +$((F2BPRE + 1)) "$TMPROOT/rf2b6.log" >"$TMPROOT/rf2b6.after.log" 2>/dev/null
+want "$TMPROOT/rf2b6.after.log" 'ALERT-CLEARED f2b_stale' \
+     "(필터 해소) 차단이 다시 늘면 f2b_stale 이 꺼진다" \
+     "(필터 해소) 필터가 되살아나도 경보가 안 꺼진다 — 미해소가 영영 남는다"
+if [ ! -f "$TMPROOT/rf2b6/alerts/f2b_stale.active" ]; then
+  ok "(필터 해소) .active 도 지워진다"
+else ng "(필터 해소) 해소 통보는 갔는데 .active 가 남는다"; fi
+
+# --- (차) 카운터가 **작아진** 경우(데몬 재시작) — 회복이라고 말하지 않는다 ---
+f2brun rf2b8 FAKE_F2B_ACTIVE=active FAKE_F2B_IPT="$F2B/ipt-ok.txt" FAKE_F2B_TOTAL=22 >/dev/null
+printf '%s' "$(( $(date +%s) - 25 * 3600 ))" >"$TMPROOT/rf2b8/kv/f2b_total_at" 2>/dev/null
+f2brun rf2b8 FAKE_F2B_ACTIVE=active FAKE_F2B_IPT="$F2B/ipt-ok.txt" FAKE_F2B_TOTAL=22 >/dev/null
+F2BPRE=$(wc -l <"$TMPROOT/rf2b8.log" 2>/dev/null); F2BPRE=${F2BPRE:-0}
+F2BO=$(f2brun rf2b8 FAKE_F2B_ACTIVE=active FAKE_F2B_IPT="$F2B/ipt-ok.txt" FAKE_F2B_TOTAL=3)
+tail -n +$((F2BPRE + 1)) "$TMPROOT/rf2b8.log" >"$TMPROOT/rf2b8.reset.log" 2>/dev/null
+avoid "$TMPROOT/rf2b8.reset.log" 'ALERT-CLEARED f2b_stale' \
+      "(리셋) 카운터가 작아진 것을 '차단이 다시 늘었다'로 읽지 않는다 (거짓 해소 방지)" \
+      "(리셋) 재시작으로 카운터가 0 이 되면 그것을 회복으로 통보한다"
+if [ -f "$TMPROOT/rf2b8/alerts/f2b_stale.active" ]; then
+  ok "(리셋) 경보가 켜진 채로 남는다 — 진짜 증가가 오면 그때 꺼진다"
+else ng "(리셋) 카운터 리셋만으로 경보가 꺼졌다"; fi
+if has "$F2BO" '카운터 리셋'; then ok "(리셋) 요약이 리셋이라고 적는다 (사람이 왜 값이 줄었는지 안다)"
+else ng "(리셋) 카운터 감소를 요약이 설명하지 않는다" "$(printf '%s' "$F2BO" | grep -a fail2ban)"; fi
+
+# --- (카) ⛔ **rc 로 판정하지 않는다** — 없는 jail 은 rc=255 지만 그것에 기대지 않는다 ---
+#     CR49-1 이 옛 근거(*"없는 jail 도 rc=0"*)가 거짓임을 재측정으로 밝혔고, 가짜도 `exit 255`
+#     로 고쳤다. 그런데도 판정 기준은 그대로다 — **`Total banned:` 를 뽑았는가**.
+#     이 시나리오는 이제 "rc 가 0 이 아닌데도 조용히 넘어가지 않는가"를 겸해서 본다.
+F2BS="$TMPROOT/rf2b9"; mkdir -p "$F2BS/alerts"
+printf '%s' "$(date +%s)" >"$F2BS/alerts/f2b_stale.active"; printf '%s' "$(date +%s)" >"$F2BS/alerts/f2b_stale.sent"
+F2BO=$(f2brun rf2b9 FAKE_F2B_ACTIVE=active FAKE_F2B_IPT="$F2B/ipt-ok.txt" RE_MON_F2B_JAIL=nosuchjail)
+want "$TMPROOT/rf2b9.log" 'ALERT logblind' \
+     "(jail 이름) 누적 차단수를 못 뽑으면 감시불능으로 남는다 — **rc 가 아니라 값으로 판정한다**" \
+     "(jail 이름) jail 이름이 바뀌었는데 조용히 넘어간다 — 필터 정체를 영영 못 본다"
+avoid "$TMPROOT/rf2b9.log" 'ALERT-CLEARED f2b_stale' \
+      "(jail 이름) 못 읽은 상태에서 해소 통보를 보내지 않는다" \
+      "(jail 이름) 상태를 못 읽었는데 '차단이 늘었다' 고 해소한다"
+if [ -f "$F2BS/alerts/f2b_stale.active" ]; then
+  ok "(jail 이름) 켜져 있던 f2b_stale 이 살아남는다"
+else ng "(jail 이름) 못 본 상태에서 켜져 있던 경보가 지워졌다"; fi
+if has "$F2BO" '누적차단 ?'; then
+  ok "(jail 이름) 요약이 '?' 로 남는다 (못 읽은 값을 0 이라 쓰지 않는다)"
+else ng "(jail 이름) 못 읽은 누적 차단수를 숫자처럼 적는다" "$(printf '%s' "$F2BO" | grep -a fail2ban)"; fi
+
+# --- (타) ⛔ **차단 건수 자체는 경보가 아니다** (늑대소년 방지) --------------
+f2brun rf2b10 FAKE_F2B_ACTIVE=active FAKE_F2B_IPT="$F2B/ipt-ok.txt" FAKE_F2B_TOTAL=100 >/dev/null
+F2BO=$(f2brun rf2b10 FAKE_F2B_ACTIVE=active FAKE_F2B_IPT="$F2B/ipt-ok.txt" FAKE_F2B_TOTAL=600 FAKE_F2B_CUR=180)
+avoid "$TMPROOT/rf2b10.log" 'ALERT f2b_' \
+      "(건수) 한 구간에 500건이 차단돼도 경보는 0통이다 (하루 수백 건이 정상이다)" \
+      "(건수) 차단이 많다고 운다 — 늑대소년이 되어 진짜 신호가 묻힌다"
+if has "$F2BO" '+500'; then ok "(건수) 그 사실은 요약에 **사실로만** 실린다"
+else ng "(건수) 차단 증가가 요약에 안 실린다 — 사람이 추이를 못 본다" "$(printf '%s' "$F2BO" | grep -a fail2ban)"; fi
+noip "$TMPROOT/rf2b10.log" "$F2BO" "차단 500건 급증(현재차단 180건)"
+
+# --- (하) ⛔ SR45-7 — **점프가 있어도 순서가 틀리면 아무것도 안 막는다** -------
+#     iptables 는 INPUT 을 위에서부터 읽고 ACCEPT 를 만나면 끝낸다. 점프보다 **앞에**
+#     22/tcp 를 통과시키는 ACCEPT 가 있으면 그 점프는 패킷을 한 개도 못 본다.
+#     예전 검사는 줄의 **존재**만 보고 "규칙 있음"이라 적었다 — 초록인 채로 거짓말이다.
+#     이 모양은 실제로 만들어진다: 도커·방화벽 스크립트의 `-I INPUT 1`(우리 SR45-1
+#     수정안도 `-I INPUT` 을 쓴다) · 관리자가 위에 꽂은 "내 IP 는 통과" 한 줄.
+f2brun rf2b11 FAKE_F2B_ACTIVE=active FAKE_F2B_IPT="$F2B/ipt-shadow.txt" >/dev/null
+F2BO=$(f2brun rf2b11 FAKE_F2B_ACTIVE=active FAKE_F2B_IPT="$F2B/ipt-shadow.txt")
+want "$TMPROOT/rf2b11.log" 'ALERT f2b_rule' \
+     "(순서) 점프 **앞에** 22를 통과시키는 ACCEPT 가 있으면 경보 — 규칙의 존재가 곧 보호가 아니다" \
+     "(순서) 앞선 ACCEPT 로 점프가 무력한데 '규칙 있음'으로 초록이다 — 아무것도 안 막는 상태다"
+if has "$F2BO" '앞선 ACCEPT 로 무력'; then
+  ok "(순서) 요약이 '앞선 ACCEPT 로 무력' 이라고 적는다 (사람이 어디를 볼지 안다)"
+else ng "(순서) 요약이 순서 문제를 말하지 않는다" "$(printf '%s' "$F2BO" | grep -a fail2ban)"; fi
+avoid "$TMPROOT/rf2b11.log" '203\.0\.113\.7' \
+      "(순서) 규칙에 적힌 **출발지 IP 를 알림에 안 싣는다** (차단 IP 와 같은 원칙)" \
+      "(순서) 방화벽 규칙의 IP 가 그대로 텔레그램으로 나간다"
+if has "$F2BO" '203.0.113.7'; then
+  ng "(순서) 요약에 규칙의 출발지 IP 가 그대로 실린다"
+elif has "$F2BO" '<ip>'; then
+  ok "(순서) 주소는 <ip> 로 가리고 규칙 모양은 남긴다 (가린 척이 아니라 실제로 가렸다)"
+else ng "(순서) 규칙을 통째로 안 싣는다 — 사람이 어느 줄인지 못 찾는다" "$(printf '%s' "$F2BO" | grep -a fail2ban)"; fi
+
+# 대조군 — **앞은 전부 무해하고 포괄 ACCEPT 는 점프 뒤에 있다.** 여기서 울면 오탐이다.
+#   lo · ESTABLISHED · 443/tcp · 53/udp · 22 DROP 는 전부 22의 새 연결을 안 가린다.
+f2brun rf2b12 FAKE_F2B_ACTIVE=active FAKE_F2B_IPT="$F2B/ipt-order-ok.txt" >/dev/null
+F2BO=$(f2brun rf2b12 FAKE_F2B_ACTIVE=active FAKE_F2B_IPT="$F2B/ipt-order-ok.txt")
+avoid "$TMPROOT/rf2b12.log" 'ALERT f2b_' \
+      "(순서 대조군) 앞이 무해하고 ACCEPT 가 점프 **뒤**면 조용하다 (오탐 0)" \
+      "(순서 대조군) 흔한 방화벽 구성에 운다 — 5분마다 경보가 가고 곧 무시당한다"
+avoid "$TMPROOT/rf2b12.log" 'ALERT logblind' \
+      "(순서 대조군) 감시불능 사유도 안 남는다 (판정을 실제로 해냈다)" \
+      "(순서 대조군) 판정할 수 있는 규칙을 '못 봤다'고 적는다"
+if has "$F2BO" '규칙 있음' && ! has "$F2BO" '무력'; then
+  ok "(순서 대조군) 요약은 '규칙 있음' 그대로다"
+else ng "(순서 대조군) 정상 구성을 이상으로 적는다" "$(printf '%s' "$F2BO" | grep -a fail2ban)"; fi
+
+# 하위 체인 — `-S INPUT` 으로는 **안을 못 본다**. 단정도 침묵도 아니고 감시불능이다.
+F2BO=$(f2brun rf2b13 FAKE_F2B_ACTIVE=active FAKE_F2B_IPT="$F2B/ipt-subchain.txt")
+want "$TMPROOT/rf2b13.log" 'ALERT logblind' \
+     "(순서 fail-open) 앞이 하위 체인이면 **감시불능**으로 남긴다 (그 안에서 ACCEPT 할 수 있다)" \
+     "(순서 fail-open) 안을 못 보면서 '앞이 깨끗하다'고 통과시킨다"
+avoid "$TMPROOT/rf2b13.log" 'ALERT f2b_rule' \
+      "(순서 fail-open) 못 본 것을 '무력하다'고 **단정하지 않는다** (오탐 0)" \
+      "(순서 fail-open) ufw 를 쓰는 순간 매번 규칙 경보가 간다"
+if has "$F2BO" '앞 순서 판정 못 함'; then
+  ok "(순서 fail-open) 요약이 '앞 순서 판정 못 함' 이라고 적는다 (점프는 봤고 그 앞은 못 봤다)"
+else ng "(순서 fail-open) 못 본 것을 요약이 말하지 않는다" "$(printf '%s' "$F2BO" | grep -a fail2ban)"; fi
+fi   # F2BOK
+
+# --- (파) 실행 파일 탐색 · 포트 판정 · 필드 추출을 **함수째 뽑아** 돌린다 --------
+#     ⛔ SR45-5 — 예전에는 여기서 *"PATH 를 먼저 본다"* 를 **요구**했다. 그래서
+#        운영 코드가 root 로 `iptables`·`systemctl`·`fail2ban-client` 를 찾을 때
+#        PATH 를 먼저 보게 돼 있었고, 그 근거가 "자체검사가 가짜를 앞에 두므로" 였다.
+#        **시험 편의가 root 실행 경로의 탐색 순서를 정하고 있었던 것**이다.
+#        이제 요구가 반대다: **PATH 앞의 가짜는 안 불려야 한다.**
+#     ⛔ 그래도 절대경로 목록은 필요하다 — 크론(root)의 기본 PATH 는 `/usr/bin:/bin` 인데
+#        이 서버의 iptables 는 `/usr/sbin` 에만 있다(실측).
+printf '#!/bin/sh\nexit 0\n' >"$F2B/sh"; chmod +x "$F2B/sh" 2>/dev/null
+eval "$(ext "$HERE/monitor.sh" _f2b_bin)" 2>/dev/null
+if ! declare -f _f2b_bin >/dev/null 2>&1; then
+  ng "monitor.sh 에서 _f2b_bin() 을 못 뽑았다 — 실행 파일 탐색을 검증할 수 없다"
+elif [ ! -x "$F2B/sh" ]; then
+  harn "(탐색)" "가짜 sh 를 못 만들었다 — **검사 결과가 아니다**(하네스·환경 문제)"
+else
+  F2BFB=$(PATH="$F2B:$PATH" _f2b_bin sh)
+  if [ "$F2BFB" = "$F2B/sh" ]; then
+    ng "(탐색) **PATH 앞에 놓인 가짜가 이긴다** — 크론에 PATH= 한 줄이면 root 코드실행이다(SR45-5 회귀)"
+  else
+    case "$F2BFB" in
+      /*/sh) ok "(탐색) PATH 앞의 가짜를 제치고 **절대경로**를 먼저 쓴다 ($F2BFB)" ;;
+      *)     ng "(탐색) 절대경로로도 못 찾는다 — 크론에서 iptables 를 못 찾게 된다" "결과: '${F2BFB}'" ;;
+    esac
+  fi
+  F2BFB=$(RE_MON_BIN_DIR="$F2B" _f2b_bin iptables)
+  if [ "$F2BFB" = "$F2B/iptables" ]; then
+    ok "(탐색) 가짜는 **명시적 RE_MON_BIN_DIR** 로만 들어온다 (위 시나리오가 진짜 iptables 를 안 불렀다는 증거)"
+  else ng "(탐색) RE_MON_BIN_DIR 이 안 먹는다 — 위 fail2ban 시나리오 전체가 **진짜 바이너리**를 부른 것이다" "결과: '${F2BFB}'"; fi
+  if RE_MON_BIN_DIR="$F2B" _f2b_bin f2b-nosuch-binary-xyz >/dev/null 2>&1; then
+    ng "(탐색) 훅에 없는 이름에 성공을 돌려준다 — 엉뚱한 바이너리를 대신 부른다"
+  else ok "(탐색) 훅을 켠 채 없는 이름이면 실패를 돌려준다 (감시불능으로 간다 · 대체 실행 금지)"; fi
+  if _f2b_bin f2b-nosuch-binary-xyz >/dev/null 2>&1; then
+    ng "(탐색) 없는 실행 파일에 성공을 돌려준다 — 감시불능 분기가 죽는다"
+  else ok "(탐색) 정말 없으면 실패를 돌려준다 (그때 감시불능으로 간다)"; fi
+  unset F2BFB
+fi
+
+# ⛔ SR45-4 의 **하중 지점** — 차단 IP 가 알림에 못 가는 이유는 이 함수 하나다.
+#    `Currently banned:<TAB>7` 바로 다음 줄이 `Banned IP list:<TAB>9.9.9.9 8.8.8.8` 이라,
+#    추출이 조금만 느슨해지면(줄 경계를 안 잡거나 `[0-9.]` 로 넓히면) IP 가 딸려 온다.
+eval "$(ext "$HERE/monitor.sh" _f2b_field)" 2>/dev/null
+if ! declare -f _f2b_field >/dev/null 2>&1; then
+  ng "monitor.sh 에서 _f2b_field() 를 못 뽑았다 — 차단수 추출을 검증할 수 없다"
+elif [ -z "$F2BST" ]; then
+  harn "(필드)" "가짜 status 출력이 비었다 — **검사 결과가 아니다**(하네스·환경 문제)"
+else
+  F2BV=$(_f2b_field 'Total banned' "$F2BST")
+  if [ "$F2BV" = 22 ]; then ok "(필드) 'Total banned' 를 22 로 뽑는다"
+  else ng "(필드) 누적 차단수를 못 뽑는다 — 판정이 통째로 감시불능이 된다" "결과: '$F2BV'"; fi
+  F2BV=$(_f2b_field 'Currently banned' "$F2BST")
+  if [ "$F2BV" = 7 ]; then
+    ok "(필드) 'Currently banned' 는 **숫자만** 나온다 — 바로 다음 줄의 차단 IP 를 안 끌고 온다"
+  else ng "(필드) 현재 차단수 추출이 어긋난다 (차단 IP 가 섞였을 수 있다)" "결과: '$F2BV'"; fi
+  unset F2BV
+fi
+eval "$(ext "$HERE/monitor.sh" _f2b_port_covered)" 2>/dev/null
+if ! declare -f _f2b_port_covered >/dev/null 2>&1; then
+  ng "monitor.sh 에서 _f2b_port_covered() 를 못 뽑았다 — 포트 판정을 검증할 수 없다"
+else
+  F2BPBAD=""
+  _f2b_port_covered '22' 22        || F2BPBAD="$F2BPBAD 단일22;"
+  _f2b_port_covered '22,2222' 22   || F2BPBAD="$F2BPBAD 목록22,2222;"
+  _f2b_port_covered '20:25' 22     || F2BPBAD="$F2BPBAD 범위20:25;"
+  _f2b_port_covered '' 22          || F2BPBAD="$F2BPBAD 포트무지정(전포트);"
+  _f2b_port_covered '2222' 22      && F2BPBAD="$F2BPBAD 2222를22로봄;"
+  _f2b_port_covered '80,443' 22    && F2BPBAD="$F2BPBAD 80,443을22로봄;"
+  if [ -z "$F2BPBAD" ]; then
+    ok "(포트 판정) 단일·목록·범위·무지정을 다 맞히고 다른 포트를 22로 보지 않는다"
+  else ng "(포트 판정) 어긋난다:$F2BPBAD"; fi
+fi
+
+# --- 구조: 두 모드가 **실제로** 이 검사를 부르는가 --------------------------
+#     ⛔ T4 의 순서 검사는 "부르는 모드" 안에서만 잰다 — 호출을 통째로 지우면
+#        거기서는 아무 말도 안 한다. 그 변이를 여기서 죽인다.
+for f2bmode in fast daily; do
+  if sed -n "/^  $f2bmode)\$/,/^    ;;\$/p" "$HERE/monitor.sh" |
+     grep -qE '^[[:space:]]*check_fail2ban([[:space:]]|$)'; then
+    ok "--$f2bmode 경로가 check_fail2ban 을 부른다"
+  else
+    ng "--$f2bmode 경로에 check_fail2ban 이 없다 — fail2ban 감시가 통째로 안 돈다"
+  fi
+done
+
+# ============================================================================
+sect "T6e. IPv6 SSH 차단 — **fail2ban 이 못 막는 자리**를 감시하는가 (SR-046)"
+
+# ⛔ 왜 이 구획이 생겼나 (2026-08-05 · 전부 서버 실측)
+#    `sshd` 는 `[::]:22` 도 듣는데 fail2ban 의 `<HOST>` 정규식이 링크로컬 존 접미사
+#    (`fe80::…%enp3s0`)를 못 읽어 **v6 탐지가 0** 이다(`fail2ban-regex` 0 matched).
+#    그런데 `check_fail2ban ②` 는 **`iptables`(v4) 만** 보므로 그 동안 초록이었다.
+#    → `ip6tables -I INPUT 1 -p tcp --dport 22 -j DROP` 으로 닫고, 재부팅 복구는
+#      oneshot 유닛(`re-v6-ssh-drop.service`)이 맡는다.
+#    🔴 **그리고 그 조치를 아무도 안 보고 있었다** — v4 에서 다섯 라운드에 걸쳐 고친
+#      사각지대를 v6 에 그대로 새로 만든 셈이었다. 여기서 잡는 것은 셋이다:
+#        ① 규칙이 지금 걸려 있는가(존재 + 우리 포트 + **그 앞 순서**)
+#        ② 재부팅 뒤에도 걸릴 것인가(유닛이 **enabled** 인가)
+#        ③ 못 본 것은 "없다"가 아니라 **감시불능**인가(fail-open · 거짓 해소 금지)
+#
+# ⚠️ 이 구획의 가짜도 **서버 실측 모양 그대로**다. 특히 두 가지를 흉내낸다:
+#      · `is-enabled <없는 유닛>` 은 **stdout 이 비고** rc=1 이다 — 그 빈 출력이
+#        "유닛 삭제"와 "systemd 못 읽음" **둘 다**의 모양이라 코드가 그것을 갈라야 한다.
+#      · 정상 `ip6tables -S INPUT` 에는 **fail2ban 이 만든 v6 점프가 이미 들어 있다.**
+#        가짜가 그 줄을 안 주면 "점프만 보고 통과하는" 오답을 시험할 수 없다.
+V6OK=0
+V6EN=$("$F2B/systemctl" is-enabled re-v6-ssh-drop.service 2>/dev/null)
+V6GONE=$(FAKE_V6_ENABLED= "$F2B/systemctl" is-enabled re-v6-ssh-drop.service 2>/dev/null); V6GONERC=$?
+V6GA=$(FAKE_V6_ENABLED= "$F2B/systemctl" is-active re-v6-ssh-drop.service 2>/dev/null)
+V6NOBUS=$(FAKE_V6_ENABLED=NOBUS FAKE_V6_ACTIVE= "$F2B/systemctl" is-active re-v6-ssh-drop.service 2>/dev/null)
+V6OUT=$("$F2B/ip6tables" -S INPUT 2>/dev/null)
+if [ "$V6EN" = enabled ] && [ "$V6GA" = active ] &&
+   [ -z "$V6GONE" ] && [ "$V6GONERC" != 0 ] && [ -z "$V6NOBUS" ] &&
+   has "$V6OUT" '-A INPUT -p tcp -m tcp --dport 22 -j DROP' &&
+   has "$V6OUT" '-j f2b-sshd' &&
+   [ ! -x "$F2B/noip6/ip6tables" ] && [ -x "$F2B/noip6/systemctl" ]; then
+  V6OK=1
+fi
+if [ "$V6OK" != 1 ]; then
+  harn "(IPv6) 시나리오 전체" "가짜 ip6tables/systemctl 이 기대대로 동작하지 않는다 — **검사 결과가 아니다**(하네스·환경 문제). is-enabled=[$V6EN] 없는유닛=[$V6GONE](rc=$V6GONERC)"
+else
+  ok "(IPv6) 가짜가 실측 모양대로 동작한다 — 없는 유닛의 is-enabled 는 **빈 출력+rc≠0**, 정상 ip6tables 출력에는 **fail2ban v6 점프가 이미 들어 있다**"
+
+v6run() { # $1=상태이름  $2=바이너리 디렉터리  $3..=추가 환경변수 — 요약을 stdout 으로
+  # ⚠️ fail2ban(v4) 쪽은 **정상**으로 고정한다. 그래야 v6 경보가 뜰 때
+  #    "v4 는 초록인데 v6 만 무방비" 라는 이 라운드의 사실을 그대로 시험할 수 있다.
+  local st="$TMPROOT/$1" dir="$2"; shift 2
+  run_mon "$st" --fast RE_MON_BIN_DIR="$dir" \
+    RE_MON_LOG_DIR="$FULL" RE_MON_APP_LOG_GLOB="$FULL/realestate-monitor.log*" \
+    RE_MON_ACCESS_LOG="$FULL/realestate.access.log" RE_MON_ERROR_LOG="$FULL/realestate.error.log" \
+    RE_MON_AUTH_LOG="$FULL/auth.log" \
+    FAKE_F2B_ACTIVE=active FAKE_F2B_IPT="$F2B/ipt-ok.txt" "$@" 2>/dev/null
+}
+
+# --- (가) 대조군 — 규칙 있음 + 유닛 enabled 면 **조용해야** 한다 -------------
+v6run rv6a "$F2B" >/dev/null
+V6O=$(v6run rv6a "$F2B")
+avoid "$TMPROOT/rv6a.log" 'ALERT v6ssh_' \
+      "(대조군) DROP 있음 + 유닛 enabled 면 v6 경보가 하나도 없다 (오탐 0)" \
+      "(대조군) 정상인데 v6 경보가 뜬다 — 5분마다 간다"
+avoid "$TMPROOT/rv6a.log" 'ALERT logblind' \
+      "(대조군) 감시불능 사유도 안 남는다 (판정을 실제로 해냈다)" \
+      "(대조군) 정상인데 v6 가 감시불능 사유를 남긴다"
+if has "$V6O" 'IPv6SSH' && has "$V6O" '22번 DROP 걸려 있음' && has "$V6O" 'enabled'; then
+  ok "(대조군) 요약이 **규칙과 유닛을 따로** 적는다 (하나로 뭉뚱그리지 않는다)"
+else ng "(대조군) 요약에 v6 상태가 제대로 안 실린다" "$(printf '%s' "$V6O" | grep -a IPv6SSH)"; fi
+if has "$V6O" '보호의 증거는 아니다'; then
+  ok "(대조군) 요약이 is-active 를 **보호의 증거가 아니라고** 못박는다 (oneshot+RemainAfterExit)"
+else ng "(대조군) 요약이 is-active 를 보호의 증거처럼 적는다" "$(printf '%s' "$V6O" | grep -a IPv6SSH)"; fi
+
+# --- (나) ⚠️ 핵심 — **PM 조치 이전의 실제 상태**(점프만 있고 DROP 이 없다) ----
+#     이 픽스처에는 fail2ban 의 v6 `f2b-sshd` 점프가 **들어 있다.** 점프의 존재로
+#     판정하는 코드는 여기서 초록인 채로 거짓말을 한다 — 그것이 이 사고 자체였다.
+V6O=$(v6run rv6b "$F2B" FAKE_V6_IPT="$F2B/ip6-norule.txt")
+avoid "$TMPROOT/rv6b.log" 'ALERT v6ssh_rule' \
+      "(규칙) 1회차에는 아직 안 운다 (규칙 재적용 순간에 울지 않는다)" \
+      "(규칙) 1회 관측으로 바로 운다 — ip6tables 재적용 몇 초에 경보가 간다"
+V6O=$(v6run rv6b "$F2B" FAKE_V6_IPT="$F2B/ip6-norule.txt")
+want "$TMPROOT/rv6b.log" 'ALERT v6ssh_rule' \
+     "(규칙) v6 22번 DROP 이 없으면 2회 연속에서 경보 — **f2b-sshd 점프가 있어도** 속지 않는다" \
+     "(규칙) v6 가 통째로 열려 있는데 조용하다 — fail2ban 은 v6 를 못 막는다(탐지 0)"
+avoid "$TMPROOT/rv6b.log" 'ALERT f2b_' \
+      "(규칙) 그때 v4 경보(f2b_*)는 안 뜬다 — **v4 는 초록인데 v6 만 무방비**인 상태를 따로 말한다" \
+      "(규칙) v6 문제를 v4 키로 알린다 — 고칠 곳이 다른데 사람이 iptables 만 본다"
+avoid "$TMPROOT/rv6b.log" 'ALERT v6ssh_unit' \
+      "(규칙) 유닛 경보는 안 뜬다 (두 원인을 구분한다 — 고칠 곳이 다르다)" \
+      "(규칙) 규칙만 빠졌는데 '유닛이 문제'라고 알린다"
+if has "$V6O" '22번 DROP 없음'; then
+  ok "(규칙) 요약이 'DROP 없음' 이라고 적는다 (점프가 있다는 이유로 '있음'이라 하지 않는다)"
+else ng "(규칙) 요약이 v6 규칙 소실을 말하지 않는다" "$(printf '%s' "$V6O" | grep -a IPv6SSH)"; fi
+
+# --- (다) 규칙 해소 — 다시 걸면 실제로 꺼진다 -------------------------------
+V6PRE=$(wc -l <"$TMPROOT/rv6b.log" 2>/dev/null); V6PRE=${V6PRE:-0}
+v6run rv6b "$F2B" >/dev/null
+tail -n +$((V6PRE + 1)) "$TMPROOT/rv6b.log" >"$TMPROOT/rv6b.after.log" 2>/dev/null
+want "$TMPROOT/rv6b.after.log" 'ALERT-CLEARED v6ssh_rule' \
+     "(규칙 해소) DROP 을 다시 걸면 v6ssh_rule 이 꺼진다 (고친 것이 표시에 반영된다)" \
+     "(규칙 해소) 규칙을 다시 걸어도 경보가 안 꺼진다 — 안 꺼지는 경보는 곧 무시된다"
+if [ ! -f "$TMPROOT/rv6b/alerts/v6ssh_rule.active" ]; then
+  ok "(규칙 해소) .active 도 지워진다 (요약 머리말의 미해소가 풀린다)"
+else ng "(규칙 해소) 해소 통보는 갔는데 .active 가 남는다"; fi
+
+# --- (라) 순서 — DROP 앞에 22를 통과시키는 ACCEPT 가 있으면 DROP 은 무의미하다 --
+v6run rv6c "$F2B" FAKE_V6_IPT="$F2B/ip6-shadow.txt" >/dev/null
+V6O=$(v6run rv6c "$F2B" FAKE_V6_IPT="$F2B/ip6-shadow.txt")
+want "$TMPROOT/rv6c.log" 'ALERT v6ssh_rule' \
+     "(순서) DROP **앞에** 22를 통과시키는 ACCEPT 가 있으면 경보 — 규칙의 존재가 곧 보호가 아니다" \
+     "(순서) 앞선 ACCEPT 로 DROP 이 무력한데 '걸려 있음'으로 초록이다 — 아무것도 안 막는 상태다"
+if has "$V6O" '앞선 ACCEPT 가 v6 22번을 통과시킨다'; then
+  ok "(순서) 요약이 순서 문제라고 적는다 (사람이 어디를 볼지 안다)"
+else ng "(순서) 요약이 순서 문제를 말하지 않는다" "$(printf '%s' "$V6O" | grep -a IPv6SSH)"; fi
+avoid "$TMPROOT/rv6c.log" '2001:db8' \
+      "(순서) 규칙에 적힌 **v6 출발지 주소를 알림에 안 싣는다** (차단 IP 와 같은 원칙)" \
+      "(순서) 방화벽 규칙의 v6 주소가 그대로 텔레그램으로 나간다"
+if has "$V6O" '2001:db8'; then
+  ng "(순서) 요약에 규칙의 v6 출발지가 그대로 실린다"
+elif has "$V6O" '<ip>'; then
+  ok "(순서) v6 주소도 <ip> 로 가리고 규칙 모양은 남긴다 (v4 정규식만 있는 게 아니다)"
+else ng "(순서) 규칙을 통째로 안 싣는다 — 사람이 어느 줄인지 못 찾는다" "$(printf '%s' "$V6O" | grep -a IPv6SSH)"; fi
+
+# --- (마) 순서 대조군 — 앞이 무해하고 포괄 ACCEPT 는 DROP **뒤**다 ------------
+#     lo · ESTABLISHED · 443/tcp · **ipv6-icmp**(v6 에서는 실제로 열어 둔다)는
+#     전부 22의 새 연결을 안 가린다. 여기서 울면 흔한 v6 방화벽 구성에 매번 우는 것이다.
+v6run rv6d "$F2B" FAKE_V6_IPT="$F2B/ip6-order-ok.txt" >/dev/null
+V6O=$(v6run rv6d "$F2B" FAKE_V6_IPT="$F2B/ip6-order-ok.txt")
+avoid "$TMPROOT/rv6d.log" 'ALERT v6ssh_' \
+      "(순서 대조군) 앞이 무해하면 조용하다 (오탐 0 — ipv6-icmp 를 위험으로 읽지 않는다)" \
+      "(순서 대조군) 흔한 v6 방화벽 구성에 운다 — 5분마다 경보가 가고 곧 무시당한다"
+avoid "$TMPROOT/rv6d.log" 'ALERT logblind' \
+      "(순서 대조군) 감시불능 사유도 안 남는다 (판정을 실제로 해냈다)" \
+      "(순서 대조군) 판정할 수 있는 규칙을 '못 봤다'고 적는다"
+if has "$V6O" '22번 DROP 걸려 있음' && ! has "$V6O" '통과시킨다'; then
+  ok "(순서 대조군) 요약은 'DROP 걸려 있음' 그대로다"
+else ng "(순서 대조군) 정상 구성을 이상으로 적는다" "$(printf '%s' "$V6O" | grep -a IPv6SSH)"; fi
+
+# --- (바) 하위 체인 — `-S INPUT` 으로는 **안을 못 본다**(단정도 침묵도 아니다) --
+V6O=$(v6run rv6e "$F2B" FAKE_V6_IPT="$F2B/ip6-subchain.txt")
+want "$TMPROOT/rv6e.log" 'ALERT logblind' \
+     "(순서 fail-open) 앞이 하위 체인이면 **감시불능**으로 남긴다 (그 안에서 ACCEPT 할 수 있다)" \
+     "(순서 fail-open) 안을 못 보면서 '앞이 깨끗하다'고 통과시킨다"
+avoid "$TMPROOT/rv6e.log" 'ALERT v6ssh_rule' \
+      "(순서 fail-open) 못 본 것을 '무력하다'고 **단정하지 않는다** (오탐 0)" \
+      "(순서 fail-open) ufw6 를 쓰는 순간 매번 v6 규칙 경보가 간다"
+if has "$V6O" '앞 순서 판정 못 함'; then
+  ok "(순서 fail-open) 요약이 '앞 순서 판정 못 함' 이라고 적는다 (DROP 은 봤고 그 앞은 못 봤다)"
+else ng "(순서 fail-open) 못 본 것을 요약이 말하지 않는다" "$(printf '%s' "$V6O" | grep -a IPv6SSH)"; fi
+
+# --- (사) **출발지가 붙은 DROP** 에 속지 않는다 -------------------------------
+#     `-s 2001:db8::9/128 … -j DROP` 은 그 한 주소만 막는다. 낱말('DROP')만 보면 통과다.
+v6run rv6f "$F2B" FAKE_V6_IPT="$F2B/ip6-srcdrop.txt" >/dev/null
+V6O=$(v6run rv6f "$F2B" FAKE_V6_IPT="$F2B/ip6-srcdrop.txt")
+want "$TMPROOT/rv6f.log" 'ALERT v6ssh_rule' \
+     "(가짜 DROP) 출발지가 붙은 DROP 은 우리 보호로 세지 않는다 — 이름만 맞는 규칙에 안 속는다" \
+     "(가짜 DROP) 'DROP' 이라는 낱말만 보고 통과한다 — 나머지 전 세계는 무방비인데 초록이다"
+avoid "$TMPROOT/rv6f.log" '2001:db8' \
+      "(가짜 DROP) 그 경보에도 v6 주소는 안 싣는다" \
+      "(가짜 DROP) 규칙의 v6 주소가 알림에 실린다"
+
+# --- (아) ⛔ fail-open — `ip6tables` 가 **없는** 호스트는 '규칙 없음'이 아니다 --
+#     v6 를 안 쓰는 서버가 있다. 그걸 '무방비'로 단정하면 그 호스트는 매 5분 운다.
+V6S="$TMPROOT/rv6g"; mkdir -p "$V6S/alerts"
+printf '%s' "$(date +%s)" >"$V6S/alerts/v6ssh_rule.active"; printf '%s' "$(date +%s)" >"$V6S/alerts/v6ssh_rule.sent"
+V6O=$(v6run rv6g "$F2B/noip6")
+want "$TMPROOT/rv6g.log" 'ALERT logblind' \
+     "(fail-open) ip6tables 가 없으면 **감시불능**으로 남는다 (조용히 통과하지 않는다)" \
+     "(fail-open) ip6tables 가 없는데 아무 데도 안 남는다"
+avoid "$TMPROOT/rv6g.log" 'ALERT v6ssh_rule' \
+      "(fail-open) 못 부른 것을 '규칙 없음'으로 **단정하지 않는다** (v6 미사용 호스트에서 오탐 0)" \
+      "(fail-open) ip6tables 부재를 규칙 소실로 읽는다 — v6 안 쓰는 서버는 5분마다 운다"
+avoid "$TMPROOT/rv6g.log" 'ALERT-CLEARED v6ssh_rule' \
+      "(fail-open) 못 본 것을 **해소라고도 말하지 않는다** (CR40-2)" \
+      "(fail-open) 아무것도 못 봤는데 'v6 가 다시 닫혔다' 고 해소 통보를 보낸다"
+if [ -f "$V6S/alerts/v6ssh_rule.active" ]; then
+  ok "(fail-open) 켜져 있던 v6ssh_rule 경보가 살아남는다 (감시 불능이 경보를 지우지 못한다)"
+else ng "(fail-open) 눈이 먼 상태에서 켜져 있던 경보가 지워졌다 — 거짓 해소"; fi
+if has "$V6O" '판정 못 함(ip6tables)'; then
+  ok "(fail-open) 요약이 '판정 못 함' 이다 ('걸려 있음'도 '없음'도 아니다)"
+else ng "(fail-open) 못 본 것을 단정하는 문구가 요약에 적힌다" "$(printf '%s' "$V6O" | grep -a IPv6SSH)"; fi
+
+# --- (자) ip6tables 는 있는데 **실행이 실패**한다(권한·모듈) — 같은 fail-open ---
+V6S="$TMPROOT/rv6h"; mkdir -p "$V6S/alerts"
+printf '%s' "$(date +%s)" >"$V6S/alerts/v6ssh_rule.active"; printf '%s' "$(date +%s)" >"$V6S/alerts/v6ssh_rule.sent"
+v6run rv6h "$F2B" FAKE_V6_IPT=FAIL >/dev/null
+want "$TMPROOT/rv6h.log" 'ALERT logblind' \
+     "(fail-open2) ip6tables 실행 실패도 감시불능이다 (권한·ip6_tables 모듈 미적재)" \
+     "(fail-open2) ip6tables 가 실패했는데 아무 데도 안 남는다"
+avoid "$TMPROOT/rv6h.log" 'ALERT-CLEARED v6ssh_rule' \
+      "(fail-open2) 실패를 해소로 읽지 않는다" \
+      "(fail-open2) 못 읽었는데 해소 통보를 보낸다"
+if [ -f "$V6S/alerts/v6ssh_rule.active" ]; then ok "(fail-open2) 켜져 있던 경보가 살아남는다"
+else ng "(fail-open2) 못 본 상태에서 켜져 있던 경보가 지워졌다"; fi
+
+# --- (차) ⚠️ 유닛이 enabled 가 아니다 — **지금은 막고 있어도 재부팅하면 열린다** --
+#     이 서버에는 ip6tables-persistent 가 없다(실측). 규칙을 다시 거는 것은 이 유닛뿐이다.
+v6run rv6i "$F2B" FAKE_V6_ENABLED=disabled >/dev/null
+V6O=$(v6run rv6i "$F2B" FAKE_V6_ENABLED=disabled)
+want "$TMPROOT/rv6i.log" 'ALERT v6ssh_unit' \
+     "(유닛) enabled 가 아니면 경보 — **지금 규칙이 살아 있어도** 재부팅하면 사라진다" \
+     "(유닛) 유닛이 disabled 인데 규칙이 있다는 이유로 조용하다 — 다음 재부팅에 v6 가 열린다"
+avoid "$TMPROOT/rv6i.log" 'ALERT v6ssh_rule' \
+      "(유닛) 그때 규칙 경보는 안 뜬다 (규칙은 실제로 걸려 있다 — 두 사실을 구분한다)" \
+      "(유닛) 유닛 문제를 규칙 경보로 알린다 — 사람이 ip6tables 만 보고 '멀쩡한데?' 한다"
+if has "$V6O" 'disabled'; then ok "(유닛) 요약이 현재 상태(disabled)를 그대로 적는다"
+else ng "(유닛) 요약이 유닛 상태를 말하지 않는다" "$(printf '%s' "$V6O" | grep -a IPv6SSH)"; fi
+
+# --- (카) 유닛 해소 ---------------------------------------------------------
+V6PRE=$(wc -l <"$TMPROOT/rv6i.log" 2>/dev/null); V6PRE=${V6PRE:-0}
+v6run rv6i "$F2B" >/dev/null
+tail -n +$((V6PRE + 1)) "$TMPROOT/rv6i.log" >"$TMPROOT/rv6i.after.log" 2>/dev/null
+want "$TMPROOT/rv6i.after.log" 'ALERT-CLEARED v6ssh_unit' \
+     "(유닛 해소) 다시 enable 하면 v6ssh_unit 이 꺼진다" \
+     "(유닛 해소) enable 해도 경보가 안 꺼진다 — 미해소가 영영 남는다"
+if [ ! -f "$TMPROOT/rv6i/alerts/v6ssh_unit.active" ]; then ok "(유닛 해소) .active 도 지워진다"
+else ng "(유닛 해소) 해소 통보는 갔는데 .active 가 남는다"; fi
+
+# --- (타) ⛔ **함정** — 유닛 파일이 삭제되면 `is-enabled` 가 빈 출력 + rc=1 이다 --
+#     그 빈 출력은 "systemd 를 못 읽었다"의 모양과 **같다.** 그것을 감시불능으로 덮으면
+#     사람이 유닛을 지운 사고가 조용히 사라진다 — 우리가 가장 알아야 하는 쪽인데.
+#     → `is-active` 가 낱말을 줬다(=버스는 산다)면 **유닛 부재**로 판정해야 한다.
+v6run rv6j "$F2B" FAKE_V6_ENABLED= FAKE_V6_ACTIVE=inactive >/dev/null
+V6O=$(v6run rv6j "$F2B" FAKE_V6_ENABLED= FAKE_V6_ACTIVE=inactive)
+want "$TMPROOT/rv6j.log" 'ALERT v6ssh_unit' \
+     "(유닛 삭제) 유닛 파일이 없으면 **경보**다 (빈 출력을 감시불능으로 덮지 않는다)" \
+     "(유닛 삭제) 유닛을 지웠는데 조용하다 — is-enabled 의 빈 출력을 '못 읽음'으로 넘겼다"
+avoid "$TMPROOT/rv6j.log" 'ALERT logblind' \
+      "(유닛 삭제) 그것을 '감시불능'으로 적지 않는다 (버스는 살아 있다 — is-active 가 답했다)" \
+      "(유닛 삭제) 삭제를 감시불능으로 읽는다 — logblind 한 통에 묻혀 6시간 쿨다운을 탄다"
+if has "$V6O" '없음/inactive'; then ok "(유닛 삭제) 요약이 '없음/inactive' 로 적는다"
+else ng "(유닛 삭제) 요약이 유닛 부재를 말하지 않는다" "$(printf '%s' "$V6O" | grep -a IPv6SSH)"; fi
+
+# --- (파) 반대쪽 — systemd 를 **정말 못 읽는** 상태는 감시불능이다 -------------
+V6S="$TMPROOT/rv6k"; mkdir -p "$V6S/alerts"
+printf '%s' "$(date +%s)" >"$V6S/alerts/v6ssh_unit.active"; printf '%s' "$(date +%s)" >"$V6S/alerts/v6ssh_unit.sent"
+V6O=$(v6run rv6k "$F2B" FAKE_V6_ENABLED=NOBUS FAKE_V6_ACTIVE=)
+want "$TMPROOT/rv6k.log" 'ALERT logblind' \
+     "(유닛 fail-open) is-enabled·is-active 가 **둘 다** 비면 감시불능이다 (삭제라고 단정하지 않는다)" \
+     "(유닛 fail-open) systemd 를 못 읽었는데 조용히 넘어간다"
+avoid "$TMPROOT/rv6k.log" 'ALERT v6ssh_unit' \
+      "(유닛 fail-open) 못 읽은 것을 '유닛이 없다'로 **단정하지 않는다** (오탐 0)" \
+      "(유닛 fail-open) 버스 장애 때마다 '유닛 삭제' 경보가 간다"
+avoid "$TMPROOT/rv6k.log" 'ALERT-CLEARED v6ssh_unit' \
+      "(유닛 fail-open) 못 본 것을 해소라고도 말하지 않는다" \
+      "(유닛 fail-open) 아무것도 못 봤는데 '유닛 정상' 해소를 보낸다"
+if [ -f "$V6S/alerts/v6ssh_unit.active" ]; then ok "(유닛 fail-open) 켜져 있던 v6ssh_unit 이 살아남는다"
+else ng "(유닛 fail-open) 눈이 먼 상태에서 켜져 있던 경보가 지워졌다"; fi
+if has "$V6O" '판정 못 함(systemctl)'; then ok "(유닛 fail-open) 요약이 '판정 못 함' 이다"
+else ng "(유닛 fail-open) 못 본 것을 단정하는 문구가 요약에 적힌다" "$(printf '%s' "$V6O" | grep -a IPv6SSH)"; fi
+
+# --- (하) 유닛이 **실패**해서 규칙이 안 걸린 경우 — 한 사고에 한 통 -----------
+v6run rv6l "$F2B" FAKE_V6_ACTIVE=failed FAKE_V6_IPT="$F2B/ip6-norule.txt" >/dev/null
+V6O=$(v6run rv6l "$F2B" FAKE_V6_ACTIVE=failed FAKE_V6_IPT="$F2B/ip6-norule.txt")
+want "$TMPROOT/rv6l.log" 'ALERT v6ssh_unit' \
+     "(유닛 실패) enabled 인데 마지막 실행이 failed 면 경보 — 재부팅해도 규칙이 안 걸린다" \
+     "(유닛 실패) enabled 라는 이유로 통과한다 — is-enabled 만 보면 실패한 유닛을 못 본다"
+avoid "$TMPROOT/rv6l.log" 'ALERT v6ssh_rule' \
+      "(유닛 실패) 같은 사고로 두 통을 보내지 않는다 (규칙 경보는 보류)" \
+      "(유닛 실패) 한 사고에 v6ssh_unit + v6ssh_rule 두 통이 간다 — 사람이 키를 무시하게 된다"
+if has "$V6O" '유닛 실패가 원인이라 규칙 경보는 보류' && has "$V6O" 'DROP 없음'; then
+  ok "(유닛 실패) 요약에는 규칙 소실도 **그대로 남긴다** (보류했다고 숨기지 않는다)"
+else ng "(유닛 실패) 보류한 사실이 요약에 안 남는다" "$(printf '%s' "$V6O" | grep -a IPv6SSH)"; fi
+fi   # V6OK
+
+# --- 함수째 뽑아 판정표를 돌린다 (시나리오로 다 못 덮는 경계) ----------------
+eval "$(ext "$HERE/monitor.sh" _f2b_port_covered)" 2>/dev/null
+eval "$(ext "$HERE/monitor.sh" _v6_rule_is_drop)" 2>/dev/null
+if ! declare -f _v6_rule_is_drop >/dev/null 2>&1; then
+  ng "monitor.sh 에서 _v6_rule_is_drop() 을 못 뽑았다 — v6 규칙 판정을 검증할 수 없다"
+else
+  V6BAD=""
+  # 인정해야 하는 것 (실측 규칙 · 더 넓게 막는 변형)
+  _v6_rule_is_drop '-A INPUT -p tcp -m tcp --dport 22 -j DROP' 22            || V6BAD="$V6BAD 실측규칙;"
+  _v6_rule_is_drop '-A INPUT -p tcp --dport 22 -j REJECT --reject-with icmp6-adm-prohibited' 22 || V6BAD="$V6BAD REJECT;"
+  _v6_rule_is_drop '-A INPUT -p tcp -m multiport --dports 20:25 -j DROP' 22  || V6BAD="$V6BAD 포트범위;"
+  _v6_rule_is_drop '-A INPUT -p tcp -j DROP' 22                              || V6BAD="$V6BAD 전포트tcp;"
+  _v6_rule_is_drop '-A INPUT -p tcp -m conntrack --ctstate NEW --dport 22 -j DROP' 22 || V6BAD="$V6BAD NEW만;"
+  # 인정하면 **안 되는** 것 (여기가 이 함수의 존재 이유다)
+  _v6_rule_is_drop '-A INPUT -s 2001:db8::9/128 -p tcp --dport 22 -j DROP' 22 && V6BAD="$V6BAD 출발지붙은DROP;"
+  _v6_rule_is_drop '-A INPUT -i lo -p tcp --dport 22 -j DROP' 22             && V6BAD="$V6BAD lo전용;"
+  _v6_rule_is_drop '-A INPUT -p tcp --dport 2222 -j DROP' 22                 && V6BAD="$V6BAD 다른포트;"
+  _v6_rule_is_drop '-A INPUT -p udp --dport 22 -j DROP' 22                   && V6BAD="$V6BAD udp;"
+  _v6_rule_is_drop '-A INPUT -p tcp -m conntrack --ctstate ESTABLISHED --dport 22 -j DROP' 22 && V6BAD="$V6BAD 맺힌연결만;"
+  _v6_rule_is_drop '-A INPUT -p tcp -m multiport --dports 22 -j f2b-sshd' 22 && V6BAD="$V6BAD f2b점프를DROP로봄;"
+  _v6_rule_is_drop '-A INPUT -p tcp --dport 22 -j ACCEPT' 22                 && V6BAD="$V6BAD ACCEPT;"
+  if [ -z "$V6BAD" ]; then
+    ok "(v6 규칙 판정) 실측 규칙·REJECT·범위·NEW 는 인정하고, **출발지 붙은 DROP·lo 전용·다른 포트·udp·f2b 점프**는 인정하지 않는다"
+  else ng "(v6 규칙 판정) 어긋난다:$V6BAD"; fi
+fi
+
+# --- 구조: 두 모드가 **실제로** 이 검사를 부르는가 --------------------------
+#     호출을 통째로 지우는 변이는 시나리오로 안 잡힌다(가짜가 무슨 답을 주든 조용하다).
+for v6mode in fast daily; do
+  if sed -n "/^  $v6mode)\$/,/^    ;;\$/p" "$HERE/monitor.sh" |
+     grep -qE '^[[:space:]]*check_v6ssh([[:space:]]|$)'; then
+    ok "--$v6mode 경로가 check_v6ssh 를 부른다"
+  else
+    ng "--$v6mode 경로에 check_v6ssh 가 없다 — IPv6 SSH 감시가 통째로 안 돈다"
+  fi
+done
+
+# ============================================================================
 sect "T7. scrub — 알림에 실리면 안 되는 것 (CR40-4 / SR36-3)"
 
 chk_scrub() { # chk_scrub <설명> <입력> <남아 있으면 안 되는 문자열>

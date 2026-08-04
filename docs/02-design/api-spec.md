@@ -631,6 +631,60 @@ over_budget = recent_price_krw > max_purchase(area = price_area_m2)
 > 상한 500단지 × 공간질의 = N+1). 운영 실측(강남·송파 밀집 bbox, 500건): **125~157ms**,
 > 최대 bbox(2도)에서도 135ms — 목표 1초 안이다.
 
+## 4.5 `character` — 단지 유형 ("학군형 · 역세권") (2026-08-04 추가)
+
+> 🔴 **아직 응답에 실리지 않는다(2026-08-04).** 규칙과 순수 함수는 있으나 리포지토리 배선(백분위 입력 · 가격 배율 쿼리)이 남아 있다.
+> 그래서 위 §4.4 지도 예시와 §5.3 추천 예시에는 **일부러 넣지 않았다** — 예시에 넣으면 `test_map_budget_parity.py`(CR37-6)가 문서와 구현의 키 불일치로 붉어진다.
+> **그 검사가 옳다**: 문서가 구현보다 앞서 나가면, 읽는 사람은 없는 필드를 있다고 믿는다.
+> 배선이 끝나 응답에 실을 때 예시도 같이 갱신할 것.
+
+> 규칙·실측·탈락 규칙·한계의 정본: **[`ux/complex-typing.md`](ux/complex-typing.md)**
+> 구현: `backend/app/domain/character/` (순수 함수) · `GET /map/complexes` 와
+> `GET /recommendations/{job_id}` 가 **같은 이름·같은 모양**으로 싣는다.
+
+```json
+"character": {
+  "type_code": "school",          // school|transit|infra|liquidity|allround|value|balanced|withheld
+  "label": "학군형",
+  "sub_type_code": "transit",     // 두 번째 축도 두드러질 때만. 없으면 null
+  "sub_label": "역세권형",
+  "headline": "학군과 교통 둘 다 최상위인 조합입니다(상위 5% · 상위 4%). 대신 …",
+  "axes": [                       // 순서 고정: school → transit → infra → liquidity
+    { "axis": "school", "label": "학군", "score": 96.2,
+      "percentile": 94.6, "deviation": 31.2 },
+    { "axis": "liquidity", "label": "거래 회전", "score": null,
+      "percentile": null, "deviation": null } ],   // 미확보는 **null**, 0 이 아니다
+  "weak_axis": "liquidity",       // 자기 평균 대비 −25p 이하인 축. 없으면 null
+  "margin": 11.2,                 // 최대 편차 − 임계(20). 0 에 가까울수록 경계
+  "borderline": false,
+  "price_status": "premium",      // cheap|typical|premium|unknown
+  "price_gap_pct": 32.4,          // 같은 시군구·같은 면적대 대비 %. 모르면 null
+  "withheld_reason": null,        // 유형이 없을 때만 "too_few_axes"
+  "axes_used": 3, "axes_total": 4,
+  "notes": [ "유형은 수도권 전체 단지 분포(2026-08-04 측정) 안에서의 상대 위치로 정합니다.",
+             "거래 회전 축이 미확보라 나머지 3개 축만으로 판정했습니다 — …" ]
+}
+```
+
+**계약 규약**
+
+| 규칙 | 왜 |
+|---|---|
+| `type_code == "withheld"` 면 **`label` 을 화면 태그로 쓰지 않는다** | 축이 3개 미만이라 판정 자체를 안 했다. 실측 **901개(5.5%)**. "특징 없음"이 아니라 "모른다"다 — 태그 자리를 비운다 |
+| `axes[].percentile == null` 을 **0 으로 접지 않는다** | 미확보와 "쟀더니 최하"는 다른 사실이다. `score:0` 은 실제로 나온다(역이 1.5km 밖) |
+| **이모지는 서버가 만들지 않는다** | 표시 관례라 바뀐다. `lib/tags.ts` 한 곳에만 둔다(§4 "판정이 아니라 값을 준다"와 같은 이유) |
+| `borderline == true` 면 단정적으로 그리지 않는다 | 최대 편차가 임계 ±3p 안. 실측 **2,775개(16.9%)** 가 여기 있다 |
+| **유형으로 정렬·필터하는 UI 를 만들지 않는다** | 유형은 우열이 아니라 모양이다. 무엇이 좋은지는 사용자 가중치(`score_axes`)가 정한다 |
+| `headline` 을 태그 없이 버리지 않는다 | 태그만 보면 오해가 난다 — 실측상 시장 최상급 단지(파크리오·고덕그라시움)가 `균형형` 에 들어온다 |
+| `price_status == "unknown"` 이면 가격 이야기를 **하지 않는다** | 실거래 5건 미만 또는 기준선 없음. 실측 **36.1%** |
+
+> **`character` 와 `score_axes`(§5.3)는 다른 것이다.**
+> `score_axes` 는 **사용자 가중치를 반영한 점수**(무엇이 이 사람에게 좋은가),
+> `character` 는 **가중치와 무관한 모양**(이 단지가 어떤 곳인가)이다.
+> 그래서 `character` 는 사용자가 슬라이더를 움직여도 **바뀌지 않는다** —
+> 같은 단지가 사람마다 다른 유형이 되면 "이 단지의 성격"이라는 개념이 무너진다
+> (viz-research.md §3-③ 이 레이더 모양에 대해 내린 것과 같은 결정).
+
 ### `GET /complexes/{id}` — 단지 상세
 ```json
 { "id": 1024, "name": "○○아파트", "region": {...},
@@ -904,6 +958,11 @@ over_budget = recent_price_krw > max_purchase(area = price_area_m2)
                            "basis": "straight_line" },   // 입지 데이터 없으면 null
       // basis="straight_line": **직선거리**다. 도보 시간이 아니다(재계산하지 않고
       // location-analyst 가 이미 잰 값을 그대로 노출한다).
+      // --- 단지 유형 (§4.5) — 🔴 **아직 안 실린다.** 배선이 끝나면 여기 들어온다.
+      //     예시에 미리 넣지 않는다: 문서가 구현보다 앞서면 없는 필드를 있다고 믿게 된다.
+      //     ⚠️ 지도 예시(§4.4)는 `test_map_budget_parity.py` 가 키 일치를 강제하는데
+      //        **이 추천 예시에는 같은 검사가 없다** — 그래서 여기 잘못 적어도 아무도 안 붉어진다.
+      //        (그 자체가 결함이다. 배선할 때 추천 쪽 parity 검사도 같이 만들 것.)
       "timing_signal": "unknown",          // MVP 에 타이밍 분석가 없음 — 있는 척하지 않는다
       // portfolio-advisor 종합. LLM 실패 시 규칙 기반으로 채운다(문장은 투박해도 근거는 정확).
       // summary_basis: "llm" | "fallback" — **이 카드의 문장을 누가 썼나**(§5.4).
@@ -1293,6 +1352,7 @@ python scripts/manage_users.py --history <email>       # 감사 이력
 | F4 동·층·타입 편차 | `GET /complexes/{id}/trades?group_by=`, `building.confidence` |
 | F5 선호/기피 | `PUT /me/preferences` |
 | F6 근거 제시 | `findings[].evidence`, `findings[].risks`, `why_not[]`, **`excluded[]`(§5.2)**, `disclaimer` |
+| F1 단지 성격 요약 | **`character`(§4.5)** — 지도·추천 카드 공통. 규칙은 `ux/complex-typing.md` |
 
 ---
 

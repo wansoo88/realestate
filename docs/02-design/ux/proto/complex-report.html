@@ -1,0 +1,872 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>단지 육각형 리포트 — 실데이터 프로토타입</title>
+<!--
+  ⚠️ 프로토타입. frontend/src/** · backend/app/** 는 건드리지 않았다.
+  · 데이터는 운영 DB 읽기전용 SELECT 결과(2026-08-04). 단지·실거래는 공개 데이터다.
+    개인정보·자격증명 없음.
+  · 외부 CDN·폰트·이미지 0건(CSP 차단 대응). SVG 는 JS 로 직접 그린다. 차트 라이브러리 없음.
+  · 색·간격·폰트 토큰은 frontend/src/styles/tokens.css 와 같은 이름·같은 값.
+  · 설계 근거: docs/02-design/ux/hexagon-report-data.md, viz-research.md
+-->
+<style>
+:root{
+  color-scheme: light dark;
+  --accent:#0071e3; --accent-text:#0060c7; --accent-weak:rgba(0,113,227,.12); --on-accent:#fff;
+  --bg:#fff; --bg-elev:#fff; --bg-grouped:#f2f2f7; --material:#fff;
+  --hairline:rgba(60,60,67,.18); --hairline-strong:rgba(60,60,67,.29);
+  --text:#000; --text-secondary:#636366; --text-estimated:#6b6b70;
+  --badge-bg:rgba(120,120,128,.12);
+  --warn:#ff9500; --warn-text:#b25000; --danger:#ff3b30; --danger-text:#d70015;
+  --tag-station-bg:rgba(0,122,145,.12); --tag-station-fg:#0a6c7d;
+  --tag-redev-bg:rgba(175,82,222,.12); --tag-redev-fg:#8a3fae;
+  --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px; --sp-5:20px; --sp-6:24px; --sp-8:32px;
+  --fs-caption:13px; --fs-footnote:15px; --fs-body:17px; --fs-title:20px;
+  --fs-price:26px; --fs-large-title:32px;
+  --ff:-apple-system,BlinkMacSystemFont,"SF Pro Text","Apple SD Gothic Neo",
+       system-ui,"Malgun Gothic",sans-serif;
+  --r-sheet:20px; --r-card:16px; --r-btn:12px; --r-pill:999px;
+  --shadow-1:0 1px 3px rgba(0,0,0,.06);
+  --touch-min:44px;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --accent:#0a6fd8; --accent-text:#409fff; --accent-weak:rgba(10,111,216,.22);
+    --bg:#000; --bg-elev:#1c1c1e; --bg-grouped:#000; --material:#000;
+    --hairline:rgba(84,84,88,.4); --hairline-strong:rgba(84,84,88,.6);
+    --text:#fff; --text-secondary:#aeaeb2; --text-estimated:#8e8e93;
+    --badge-bg:rgba(120,120,128,.24);
+    --warn:#ff9f0a; --warn-text:#ffb340; --danger:#ff453a; --danger-text:#ff6961;
+    --tag-station-bg:rgba(64,200,224,.22); --tag-station-fg:#7fdcec;
+    --tag-redev-bg:rgba(191,90,242,.22); --tag-redev-fg:#dfa6f5;
+  }
+}
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%}
+body{font-family:var(--ff);font-size:var(--fs-body);color:var(--text);
+  background:var(--bg-grouped);-webkit-font-smoothing:antialiased}
+.num{font-variant-numeric:tabular-nums}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;
+  clip:rect(0,0,0,0);white-space:nowrap;border:0}
+@media (prefers-reduced-motion: reduce){*{transition:none!important;animation:none!important}}
+
+header{padding:var(--sp-4);background:var(--bg);border-bottom:1px solid var(--hairline);
+  position:sticky;top:0;z-index:5}
+h1{font-size:var(--fs-title);font-weight:600;margin:0 0 var(--sp-1)}
+.asof{font-size:var(--fs-caption);color:var(--text-estimated);margin:0;line-height:1.55}
+main{padding:var(--sp-4) var(--sp-4) var(--sp-8);max-width:1120px;margin:0 auto}
+
+.card{background:var(--bg-elev);border-radius:var(--r-card);padding:var(--sp-4);
+  margin-bottom:var(--sp-4);box-shadow:var(--shadow-1)}
+.card h2{font-size:var(--fs-footnote);font-weight:600;margin:0 0 var(--sp-1);letter-spacing:.01em}
+.card h3{font-size:var(--fs-caption);font-weight:600;margin:var(--sp-5) 0 var(--sp-2);
+  color:var(--text-secondary);text-transform:none}
+.sub{font-size:var(--fs-caption);color:var(--text-secondary);margin:0 0 var(--sp-3);line-height:1.6}
+
+.grid{display:grid;grid-template-columns:1fr;gap:var(--sp-4)}
+@media (min-width:760px){.grid{grid-template-columns:1fr 1fr}}
+
+/* 단지 카드 = 버튼(키보드 접근) */
+.cx{display:block;width:100%;text-align:left;font:inherit;color:inherit;cursor:pointer;
+  background:var(--bg-elev);border:1px solid var(--hairline);border-radius:var(--r-card);
+  padding:var(--sp-4);box-shadow:var(--shadow-1);-webkit-tap-highlight-color:transparent}
+.cx:hover{border-color:var(--hairline-strong)}
+.cx .nm{font-size:var(--fs-body);font-weight:600;line-height:1.3}
+.cx .rg{font-size:var(--fs-caption);color:var(--text-secondary);margin-top:3px;line-height:1.5}
+.cx .go{font-size:var(--fs-caption);color:var(--accent-text);margin-top:var(--sp-3);
+  font-weight:600}
+button:focus-visible,select:focus-visible,input:focus-visible,[tabindex]:focus-visible{
+  outline:2px solid var(--accent);outline-offset:2px;border-radius:var(--r-btn)}
+
+.chips{display:flex;gap:var(--sp-2);flex-wrap:wrap;margin-bottom:var(--sp-3)}
+.chip{min-height:var(--touch-min);padding:var(--sp-2) var(--sp-4);border-radius:var(--r-pill);
+  border:1px solid var(--hairline);background:var(--bg-elev);font:inherit;
+  font-size:var(--fs-caption);color:var(--text);cursor:pointer}
+.chip[aria-pressed=true]{background:var(--accent);color:var(--on-accent);
+  border-color:var(--accent);font-weight:600}
+
+.toggle{display:flex;align-items:flex-start;gap:var(--sp-3);min-height:var(--touch-min);
+  border:1px solid var(--hairline);border-radius:var(--r-btn);padding:var(--sp-3);
+  background:var(--bg-elev);font:inherit;font-size:var(--fs-caption);color:var(--text);
+  cursor:pointer;text-align:left;width:100%;margin-top:var(--sp-2)}
+.toggle[aria-pressed=true]{border-color:var(--accent);background:var(--accent-weak)}
+.toggle .box{flex:0 0 auto;width:20px;height:20px;border-radius:6px;
+  border:1.5px solid var(--hairline-strong);display:grid;place-items:center;font-size:13px;
+  line-height:1;color:var(--on-accent);margin-top:1px}
+.toggle[aria-pressed=true] .box{background:var(--accent);border-color:var(--accent)}
+.toggle .t{flex:1;line-height:1.5}
+.toggle .t small{display:block;color:var(--text-secondary);font-size:12px;line-height:1.5;
+  margin-top:3px}
+
+.badge{display:inline-block;padding:2px var(--sp-2);border-radius:var(--r-pill);
+  font-size:12px;background:var(--badge-bg);color:var(--text-secondary);line-height:1.5}
+.badge--est{color:var(--text-estimated)}
+.badge--warn{background:rgba(255,149,0,.14);color:var(--warn-text)}
+.badge--bad{background:rgba(255,59,48,.10);color:var(--danger-text)}
+
+.note{font-size:var(--fs-caption);line-height:1.65;color:var(--text-secondary);
+  background:var(--badge-bg);border-radius:var(--r-btn);padding:var(--sp-3);margin-top:var(--sp-3)}
+.note.warn{background:rgba(255,149,0,.12);color:var(--warn-text)}
+.note.bad{background:rgba(255,59,48,.10);color:var(--danger-text)}
+.note b,.note strong{font-weight:600}
+
+.axis-list{list-style:none;margin:var(--sp-3) 0 0;padding:0;border-top:1px solid var(--hairline)}
+.axis-list li{display:flex;align-items:flex-start;gap:var(--sp-3);padding:var(--sp-3) 0;
+  border-bottom:1px solid var(--hairline)}
+.axis-body{flex:1;min-width:0}
+.axis-name{font-size:var(--fs-footnote);font-weight:600;display:flex;align-items:center;
+  gap:var(--sp-2);flex-wrap:wrap}
+.axis-name.dim{font-weight:400;color:var(--text-estimated)}
+.axis-raw{font-size:var(--fs-caption);color:var(--text-secondary);margin:3px 0 0;line-height:1.6}
+.axis-miss{font-size:var(--fs-caption);color:var(--text-estimated);margin:3px 0 0;line-height:1.6}
+.axis-score{flex:0 0 auto;font-size:var(--fs-title);font-weight:600;
+  font-variant-numeric:tabular-nums;min-width:58px;text-align:right}
+.axis-score.dim{font-size:var(--fs-caption);font-weight:400;color:var(--text-estimated);
+  padding-top:5px}
+
+.total{display:flex;align-items:baseline;gap:var(--sp-2);margin:var(--sp-2) 0 0;flex-wrap:wrap}
+.total .v{font-size:var(--fs-price);font-weight:600;font-variant-numeric:tabular-nums}
+.total .u{font-size:var(--fs-footnote);color:var(--text-secondary)}
+.total .none{font-size:var(--fs-footnote);color:var(--text-estimated)}
+
+table.alt{width:100%;border-collapse:collapse;font-size:var(--fs-caption);margin-top:var(--sp-3)}
+table.alt th,table.alt td{text-align:left;padding:6px var(--sp-2);
+  border-bottom:1px solid var(--hairline);vertical-align:top}
+table.alt th{color:var(--text-secondary);font-weight:600}
+table.alt td.n{text-align:right;font-variant-numeric:tabular-nums}
+.linkbtn{background:none;border:none;font:inherit;font-size:var(--fs-caption);
+  color:var(--accent-text);cursor:pointer;padding:var(--sp-2) 0;min-height:var(--touch-min);
+  text-decoration:underline;text-underline-offset:3px}
+.backbtn{background:var(--bg-elev);border:1px solid var(--hairline);border-radius:var(--r-btn);
+  font:inherit;font-size:var(--fs-caption);color:var(--accent-text);cursor:pointer;
+  min-height:var(--touch-min);padding:0 var(--sp-4);margin-bottom:var(--sp-3);font-weight:600}
+
+label.fld{display:flex;align-items:center;gap:var(--sp-2);font-size:var(--fs-caption);
+  color:var(--text-secondary);margin:var(--sp-2) 0;flex-wrap:wrap}
+select,input[type=number]{font:inherit;font-size:var(--fs-caption);min-height:var(--touch-min);
+  border:1px solid var(--hairline);border-radius:var(--r-btn);background:var(--bg-elev);
+  color:var(--text);padding:0 var(--sp-3);max-width:160px}
+svg{display:block;max-width:100%;height:auto;margin:0 auto}
+
+/* 호가 사다리 */
+.lad{list-style:none;margin:var(--sp-3) 0 0;padding:0;font-size:var(--fs-caption);line-height:1.6}
+.lad li{display:flex;gap:var(--sp-2);padding:var(--sp-2) 0;border-bottom:1px solid var(--hairline);
+  align-items:baseline}
+.lad .k{flex:1;color:var(--text-secondary)}
+.lad .v{font-variant-numeric:tabular-nums;font-weight:600;white-space:nowrap}
+.lad .top .k,.lad .top .v{color:var(--text);font-size:var(--fs-footnote)}
+.lad .miss .v{font-weight:400;color:var(--text-estimated)}
+
+/* SVG 클래스(다크모드 자동) */
+.s-grid{fill:none;stroke:var(--hairline);stroke-width:1}
+.s-spoke{stroke:var(--hairline-strong);stroke-width:1;fill:none}
+.s-spoke-miss{stroke:var(--text-estimated);stroke-width:1;fill:none;stroke-dasharray:2 4;opacity:.8}
+.s-poly{fill:var(--accent);fill-opacity:.12;stroke:var(--accent);stroke-width:2;stroke-linejoin:round}
+.s-dot{fill:var(--accent);stroke:var(--bg-elev);stroke-width:1.5}
+.s-dot-est{fill:var(--bg-elev);stroke:var(--accent);stroke-width:2}
+.s-dot-miss{fill:none;stroke:var(--text-estimated);stroke-width:1.5;stroke-dasharray:2 2}
+.s-lab{font-size:11px;fill:var(--text);font-weight:600}
+.s-lab-dim{font-size:11px;fill:var(--text-estimated)}
+.s-lab-sm{font-size:10px;fill:var(--text-secondary)}
+.s-tick{font-size:10px;fill:var(--text-estimated)}
+.s-ring-full{fill:var(--accent);fill-opacity:.85;stroke:none}
+.s-ring-est{fill:var(--accent);fill-opacity:.30;stroke:var(--accent);stroke-width:1;stroke-opacity:.5}
+.s-ring-none{fill:none;stroke:var(--text-estimated);stroke-width:1;stroke-dasharray:3 3;opacity:.8}
+.s-ring-bed{fill:var(--badge-bg);stroke:none}
+.s-hatch{stroke:var(--accent);stroke-width:2;opacity:.55}
+.s-bar-bed{fill:var(--badge-bg)}
+.s-bar{fill:var(--accent)}
+.s-axisline{stroke:var(--hairline-strong);stroke-width:1}
+.s-strip-bed{fill:var(--badge-bg)}
+.s-mid{stroke:var(--text);stroke-width:1.5;stroke-dasharray:4 3;opacity:.55}
+.s-dong{fill:var(--accent);fill-opacity:.85;stroke:var(--bg-elev);stroke-width:1.5}
+.s-dong-low{fill:var(--text-estimated);fill-opacity:.55;stroke:var(--bg-elev);stroke-width:1.5}
+.s-dong-raw{fill:none;stroke:var(--danger);stroke-width:1.5;stroke-dasharray:2 2}
+.s-floor{fill:var(--tag-station-fg);fill-opacity:.85;stroke:var(--bg-elev);stroke-width:1.5}
+.s-band{fill:var(--badge-bg)}
+.s-ask{stroke:var(--danger);stroke-width:2}
+</style>
+</head>
+<body>
+<header>
+  <h1>단지 육각형 리포트 <span class="badge">실데이터 프로토</span></h1>
+  <p class="asof" id="asof"></p>
+</header>
+<main id="main"></main>
+<script>
+"use strict";
+/* ═══════════════════════════════════════════════════════════════════════════
+   실측 데이터 — docs/02-design/ux/hexagon-report-data.md 의 SELECT 결과 그대로.
+   ⚠️ 이 안에는 개인정보·자격증명이 없다(단지·실거래는 공개 데이터).
+   ═══════════════════════════════════════════════════════════════════════════ */
+const DB = {"meta":{"tradeMax":"2026-07-25","asOf":"2026-08-04","winRecent":"2025-07-01~2026-06-30","winPrior":"2024-07-01~2025-06-30","nComplex":16462,"nTrade":611518,"nListing":0,"attrP10":0.761,"attrP90":1.472,"trendP10":-5.3,"trendP90":19.7,"covTrend":50.2,"covAttr":51.7,"cov6":26.2,"cov4plus":76.7},"complexes":[{"id":16,"name":"까치마을","sido":"서울특별시","sgg":"강남구","built":1993,"hh":1403,"gc":"exact","nogeom":false,"sggCode":"11680","band":"1_lt60","nr":86,"np":86,"mr":39911748,"mp":26103368,"pmed":25587598,"ncx":141,"n12":86,"schoolM":144,"subwayM":309,"subwayName":"일원","martM":105,"parkM":257,"hospM":445,"sdZone":"서울왕북초통학구역","schoolName":"대왕중학교","regionTrend":4.7,"regionRefComplete":true,"attrRaw":1.56,"attrAdj":1.489,"trendRaw":52.9,"trendExcess":32.2,"peerMed":25587598,"price":{"n":86,"area":39.6,"p10":1180000000,"p25":1355000000,"p50":1457500000,"p75":1591000000,"p90":1735000000},"bfl":{"n":7,"minf":15,"maxf":15,"avgf":15.0},"refYm":"2026-06","adjCov":100.0,"dongs":[{"d":"1002","n":37,"na":37,"rawR":1.061,"adjR":1.024,"adjP":1237728470,"minF":1,"maxF":15,"floors":15,"rawP":1160000000},{"d":"1006","n":29,"na":29,"rawR":1.061,"adjR":1.013,"adjP":1476749114,"minF":1,"maxF":15,"floors":15,"rawP":1400000000},{"d":"1003","n":25,"na":25,"rawR":0.919,"adjR":0.947,"adjP":1178707801,"minF":1,"maxF":15,"floors":15,"rawP":1040000000},{"d":"1005","n":21,"na":21,"rawR":0.915,"adjR":0.949,"adjP":1026380496,"minF":1,"maxF":15,"floors":15,"rawP":900000000},{"d":"(미상)","n":18,"na":18,"rawR":1.434,"adjR":1.323,"adjP":1555842972,"minF":1,"maxF":14,"floors":null,"rawP":1540000000},{"d":"1007","n":16,"na":16,"rawR":0.977,"adjR":0.969,"adjP":1410987943,"minF":1,"maxF":15,"floors":15,"rawP":1305000000},{"d":"1004","n":14,"na":14,"rawR":1.275,"adjR":1.164,"adjP":1259468408,"minF":3,"maxF":14,"floors":15,"rawP":1255000000},{"d":"1001","n":12,"na":12,"rawR":0.951,"adjR":0.98,"adjP":1523245165,"minF":2,"maxF":14,"floors":15,"rawP":1345000000}],"floors":[{"fb":"1~2층","key":"1_1_2","n":18,"rawR":0.909,"adjR":0.95,"adjP":1341609696},{"fb":"3~5층","key":"2_3_5","n":39,"rawR":1.105,"adjR":1.046,"adjP":1413908726},{"fb":"6~10층","key":"3_6_10","n":59,"rawR":1.008,"adjR":1.0,"adjP":1332847357},{"fb":"11~15층","key":"4_11_15","n":56,"rawR":0.992,"adjR":0.997,"adjP":1260730519}],"axes":{"school":{"score":100.0,"conf":0.85,"raw":"최근접 학교 144m · 서울왕북초통학구역"},"transit":{"score":95.3,"conf":0.85,"raw":"최근접 일원역 309m"},"infra":{"score":98.5,"conf":0.85,"raw":"마트 105m · 공원 257m · 병원 445m"},"liquidity":{"score":100.0,"conf":0.7,"raw":"12개월 회전율 6.1% (거래 86건 / 1403세대)","capped":true},"attr":{"score":0.0,"conf":0.85,"raw":"같은 구·같은 면적대 중위 대비 ×1.489 (비교 단지 141곳)","clipped":true},"trend":{"score":100.0,"conf":0.85,"raw":"최근 12개월 +52.9% (직전 12개월 대비 · 표본 86/86건)","clipped":true}},"total":78.8,"coverage":100.0,"nAxes":6},{"id":343,"name":"래미안서초유니빌","sido":"서울특별시","sgg":"서초구","built":2003,"hh":440,"gc":"exact","nogeom":false,"sggCode":"11650","band":"1_lt60","nr":35,"np":20,"mr":11159403,"mp":10634982,"pmed":26458472,"ncx":111,"n12":39,"schoolM":464,"subwayM":62,"subwayName":"남부터미널","martM":60,"parkM":610,"hospM":242,"sdZone":"서울서일초통학구역","schoolName":"서울서일초등학교","regionTrend":4.8,"regionRefComplete":true,"attrRaw":0.422,"attrAdj":0.413,"trendRaw":4.9,"trendExcess":-7.6,"peerMed":26458472,"price":{"n":35,"area":45.26,"p10":425000000,"p25":460000000,"p50":500000000,"p75":550000000,"p90":648000000},"refYm":"2026-05","adjCov":98.2,"dongs":[{"d":"래미안 서초유니빌","n":51,"na":50,"rawR":1.0,"adjR":1.002,"adjP":507025005,"minF":3,"maxF":24,"floors":null,"rawP":490000000},{"d":"(미상)","n":4,"na":4,"rawR":0.985,"adjR":0.964,"adjP":493480383,"minF":4,"maxF":16,"floors":null,"rawP":492500000}],"floors":[{"fb":"3~5층","key":"2_3_5","n":9,"rawR":0.947,"adjR":0.986,"adjP":483073648},{"fb":"6~10층","key":"3_6_10","n":13,"rawR":0.954,"adjR":1.0,"adjP":500163721},{"fb":"11~15층","key":"4_11_15","n":18,"rawR":1.02,"adjR":1.033,"adjP":509050010},{"fb":"16층~","key":"5_16up","n":15,"rawR":1.02,"adjR":1.011,"adjP":517815315}],"axes":{"school":{"score":86.3,"conf":0.85,"raw":"최근접 학교 464m · 서울서일초통학구역"},"transit":{"score":100.0,"conf":0.85,"raw":"최근접 남부터미널역 62m"},"infra":{"score":89.5,"conf":0.85,"raw":"마트 60m · 공원 610m · 병원 242m"},"liquidity":{"score":100.0,"conf":0.7,"raw":"12개월 회전율 8.9% (거래 39건 / 440세대)","capped":true},"attr":{"score":100.0,"conf":0.85,"raw":"같은 구·같은 면적대 중위 대비 ×0.413 (비교 단지 111곳)","clipped":true},"trend":{"score":40.8,"conf":0.85,"raw":"최근 12개월 +4.9% (직전 12개월 대비 · 표본 35/20건)","clipped":false}},"total":89.8,"coverage":100.0,"nAxes":6},{"id":632,"name":"파크리오","sido":"서울특별시","sgg":"송파구","built":2008,"hh":6864,"gc":"exact","nogeom":false,"sggCode":"11710","band":"2_60_85","nr":104,"np":192,"mr":34202146,"mp":27921925,"pmed":14329573,"ncx":218,"n12":185,"schoolM":171,"subwayM":474,"subwayName":"몽촌토성","martM":479,"parkM":38,"hospM":583,"sdZone":"서울잠실초통학구역","schoolName":"서울잠실초등학교","regionTrend":18.7,"regionRefComplete":false,"attrRaw":2.387,"attrAdj":2.33,"trendRaw":22.5,"trendExcess":-0.8,"peerMed":14329573,"price":{"n":104,"area":84.79,"p10":2793000000,"p25":2820000000,"p50":2900000000,"p75":2985000000,"p90":3047000000},"bfl":{"n":66,"minf":20,"maxf":36,"avgf":31.1},"refYm":"2026-05","adjCov":100.0,"dongs":[{"d":"(미상)","n":28,"na":28,"rawR":1.123,"adjR":0.952,"adjP":2835988859,"minF":3,"maxF":34,"floors":null,"rawP":2810000000},{"d":"229","n":15,"na":15,"rawR":0.905,"adjR":0.976,"adjP":2908445031,"minF":1,"maxF":35,"floors":36,"rawP":2265000000},{"d":"309","n":14,"na":14,"rawR":0.932,"adjR":1.0,"adjP":2980339026,"minF":5,"maxF":33,"floors":33,"rawP":2330000000},{"d":"113","n":14,"na":14,"rawR":1.045,"adjR":1.068,"adjP":3180562378,"minF":9,"maxF":36,"floors":36,"rawP":2615000000},{"d":"311","n":12,"na":12,"rawR":0.971,"adjR":0.99,"adjP":2948324201,"minF":4,"maxF":30,"floors":30,"rawP":2427500000},{"d":"217","n":11,"na":11,"rawR":1.14,"adjR":1.024,"adjP":3048572356,"minF":2,"maxF":35,"floors":36,"rawP":2850000000},{"d":"112","n":11,"na":11,"rawR":1.024,"adjR":1.06,"adjP":3155185144,"minF":3,"maxF":32,"floors":36,"rawP":2560000000},{"d":"114","n":11,"na":11,"rawR":1.076,"adjR":1.032,"adjP":3076488522,"minF":4,"maxF":32,"floors":36,"rawP":2690000000},{"d":"314","n":10,"na":10,"rawR":0.893,"adjR":0.976,"adjP":2910757279,"minF":2,"maxF":29,"floors":32,"rawP":2235000000},{"d":"115","n":10,"na":10,"rawR":1.02,"adjR":1.045,"adjP":3110907962,"minF":5,"maxF":36,"floors":36,"rawP":2550000000},{"d":"228","n":10,"na":10,"rawR":1.099,"adjR":1.007,"adjP":3001667493,"minF":1,"maxF":32,"floors":33,"rawP":2750000000},{"d":"304","n":10,"na":10,"rawR":0.989,"adjR":1.001,"adjP":2983104696,"minF":3,"maxF":24,"floors":36,"rawP":2472500000},{"d":"305","n":10,"na":10,"rawR":0.94,"adjR":1.008,"adjP":3001789136,"minF":9,"maxF":36,"floors":36,"rawP":2350000000},{"d":"306","n":9,"na":9,"rawR":1.007,"adjR":1.009,"adjP":3007527065,"minF":9,"maxF":36,"floors":36,"rawP":2520000000},{"d":"307","n":9,"na":9,"rawR":0.96,"adjR":1.005,"adjP":2994695575,"minF":5,"maxF":25,"floors":36,"rawP":2400000000},{"d":"216","n":8,"na":8,"rawR":1.164,"adjR":1.003,"adjP":2990265538,"minF":3,"maxF":35,"floors":36,"rawP":2915000000},{"d":"211","n":8,"na":8,"rawR":1.045,"adjR":1.05,"adjP":3126278057,"minF":1,"maxF":34,"floors":36,"rawP":2612500000},{"d":"312","n":7,"na":7,"rawR":0.94,"adjR":0.985,"adjP":2932306084,"minF":1,"maxF":26,"floors":27,"rawP":2350000000},{"d":"214","n":7,"na":7,"rawR":1.119,"adjR":1.002,"adjP":2986003565,"minF":4,"maxF":34,"floors":36,"rawP":2800000000},{"d":"224","n":7,"na":7,"rawR":0.963,"adjR":0.99,"adjP":2947775388,"minF":4,"maxF":34,"floors":36,"rawP":2408000000},{"d":"225","n":7,"na":7,"rawR":0.972,"adjR":0.981,"adjP":2919828186,"minF":6,"maxF":33,"floors":33,"rawP":2430000000},{"d":"227","n":7,"na":7,"rawR":0.979,"adjR":1.006,"adjP":2994695575,"minF":2,"maxF":19,"floors":30,"rawP":2450000000},{"d":"308","n":7,"na":7,"rawR":0.999,"adjR":0.982,"adjP":2926629462,"minF":1,"maxF":34,"floors":36,"rawP":2500000000},{"d":"107","n":7,"na":7,"rawR":1.158,"adjR":1.079,"adjP":3218114226,"minF":1,"maxF":23,"floors":26,"rawP":2900000000},{"d":"213","n":7,"na":7,"rawR":0.919,"adjR":0.997,"adjP":2967659770,"minF":1,"maxF":34,"floors":36,"rawP":2300000000},{"d":"313","n":6,"na":6,"rawR":0.899,"adjR":0.972,"adjP":2896982501,"minF":5,"maxF":22,"floors":27,"rawP":2250000000},{"d":"210","n":5,"na":5,"rawR":0.926,"adjR":1.005,"adjP":2992466777,"minF":9,"maxF":34,"floors":36,"rawP":2315000000},{"d":"106","n":5,"na":5,"rawR":1.038,"adjR":1.087,"adjP":3244253540,"minF":1,"maxF":26,"floors":27,"rawP":2600000000},{"d":"310","n":5,"na":5,"rawR":1.087,"adjR":0.973,"adjP":2897813094,"minF":7,"maxF":29,"floors":30,"rawP":2720000000},{"d":"212","n":5,"na":5,"rawR":0.963,"adjR":0.997,"adjP":2969586018,"minF":5,"maxF":25,"floors":36,"rawP":2410000000},{"d":"226","n":5,"na":5,"rawR":0.909,"adjR":1.0,"adjP":2978859350,"minF":8,"maxF":29,"floors":30,"rawP":2275000000},{"d":"215","n":4,"na":4,"rawR":0.929,"adjR":1.001,"adjP":2983437835,"minF":1,"maxF":29,"floors":36,"rawP":2325000000},{"d":"108","n":3,"na":3,"rawR":0.998,"adjR":1.075,"adjP":3206508704,"minF":1,"maxF":23,"floors":26,"rawP":2500000000},{"d":"109","n":2,"na":2,"rawR":1.071,"adjR":1.098,"adjP":3276033073,"minF":9,"maxF":16,"floors":27,"rawP":2682500000}],"floors":[{"fb":"1~2층","key":"1_1_2","n":14,"rawR":0.979,"adjR":0.977,"adjP":2916173088},{"fb":"3~5층","key":"2_3_5","n":30,"rawR":0.992,"adjR":0.972,"adjP":2895257822},{"fb":"6~10층","key":"3_6_10","n":44,"rawR":0.96,"adjR":1.004,"adjP":2989480340},{"fb":"11~15층","key":"4_11_15","n":51,"rawR":1.0,"adjR":0.997,"adjP":2969586018},{"fb":"16층~","key":"5_16up","n":157,"rawR":1.02,"adjR":1.006,"adjP":2999693948}],"axes":{"school":{"score":100.0,"conf":0.85,"raw":"최근접 학교 171m · 서울잠실초통학구역"},"transit":{"score":82.1,"conf":0.85,"raw":"최근접 몽촌토성역 474m"},"infra":{"score":98.4,"conf":0.85,"raw":"마트 479m · 공원 38m · 병원 583m"},"liquidity":{"score":53.9,"conf":0.7,"raw":"12개월 회전율 2.7% (거래 185건 / 6864세대)","capped":false},"attr":{"score":0.0,"conf":0.85,"raw":"같은 구·같은 면적대 중위 대비 ×2.330 (비교 단지 218곳)","clipped":true},"trend":{"score":100.0,"conf":0.85,"raw":"최근 12개월 +22.5% (직전 12개월 대비 · 표본 104/192건)","clipped":true}},"total":69.3,"coverage":100.0,"nAxes":6},{"id":639,"name":"문정시영","sido":"서울특별시","sgg":"송파구","built":1989,"hh":1316,"gc":"exact","nogeom":false,"sggCode":"11710","band":"1_lt60","nr":164,"np":90,"mr":22884941,"mp":15873016,"pmed":16911995,"ncx":119,"n12":164,"schoolM":534,"subwayM":797,"subwayName":"개롱","martM":64,"parkM":58,"hospM":648,"sdZone":"서울문정초통학구역","schoolName":"문정중학교","regionTrend":18.7,"regionRefComplete":false,"attrRaw":1.353,"attrAdj":1.292,"trendRaw":44.2,"trendExcess":18.8,"peerMed":16911995,"price":{"n":164,"area":39.69,"p10":578400000,"p25":743750000,"p50":835000000,"p75":1011250000,"p90":1060000000},"bfl":{"n":10,"minf":14,"maxf":14,"avgf":14.0},"refYm":"2026-05","adjCov":100.0,"dongs":[{"d":"(미상)","n":34,"na":34,"rawR":1.297,"adjR":1.198,"adjP":911475448,"minF":1,"maxF":14,"floors":null,"rawP":907500000},{"d":"10","n":32,"na":32,"rawR":1.0,"adjR":0.956,"adjP":730768659,"minF":1,"maxF":14,"floors":14,"rawP":699000000},{"d":"7","n":32,"na":32,"rawR":0.942,"adjR":0.976,"adjP":540134615,"minF":2,"maxF":14,"floors":14,"rawP":476500000},{"d":"4","n":23,"na":23,"rawR":0.952,"adjR":0.978,"adjP":837341135,"minF":1,"maxF":14,"floors":14,"rawP":745000000},{"d":"1","n":23,"na":23,"rawR":1.122,"adjR":1.051,"adjP":899521835,"minF":1,"maxF":13,"floors":14,"rawP":878000000},{"d":"8","n":22,"na":22,"rawR":0.861,"adjR":0.932,"adjP":929638386,"minF":1,"maxF":14,"floors":14,"rawP":785000000},{"d":"9","n":21,"na":21,"rawR":0.932,"adjR":0.991,"adjP":988535922,"minF":1,"maxF":14,"floors":14,"rawP":850000000},{"d":"6","n":20,"na":20,"rawR":0.984,"adjR":1.021,"adjP":873793097,"minF":2,"maxF":14,"floors":14,"rawP":770000000},{"d":"2","n":20,"na":20,"rawR":0.901,"adjR":0.962,"adjP":823407696,"minF":1,"maxF":14,"floors":14,"rawP":705000000},{"d":"3","n":14,"na":14,"rawR":0.837,"adjR":0.954,"adjP":816873503,"minF":3,"maxF":14,"floors":14,"rawP":655000000},{"d":"5","n":13,"na":13,"rawR":1.023,"adjR":1.003,"adjP":858438355,"minF":2,"maxF":14,"floors":14,"rawP":800000000}],"floors":[{"fb":"1~2층","key":"1_1_2","n":33,"rawR":1.097,"adjR":1.004,"adjP":823114536},{"fb":"3~5층","key":"2_3_5","n":52,"rawR":0.905,"adjR":0.958,"adjP":809401300},{"fb":"6~10층","key":"3_6_10","n":93,"rawR":1.023,"adjR":1.015,"adjP":846780550},{"fb":"11~15층","key":"4_11_15","n":76,"rawR":0.96,"adjR":0.997,"adjP":878160070}],"axes":{"school":{"score":80.5,"conf":0.85,"raw":"최근접 학교 534m · 서울문정초통학구역"},"transit":{"score":56.2,"conf":0.85,"raw":"최근접 개롱역 797m"},"infra":{"score":100.0,"conf":0.85,"raw":"마트 64m · 공원 58m · 병원 648m"},"liquidity":{"score":100.0,"conf":0.7,"raw":"12개월 회전율 12.5% (거래 164건 / 1316세대)","capped":true},"attr":{"score":25.3,"conf":0.85,"raw":"같은 구·같은 면적대 중위 대비 ×1.292 (비교 단지 119곳)","clipped":false},"trend":{"score":100.0,"conf":0.85,"raw":"최근 12개월 +44.2% (직전 12개월 대비 · 표본 164/90건)","clipped":true}},"total":72.4,"coverage":100.0,"nAxes":6},{"id":1004,"name":"성산시영(대우)","sido":"서울특별시","sgg":"마포구","built":1986,"hh":1330,"gc":"exact","nogeom":false,"sggCode":"11440","band":"1_lt60","nr":53,"np":68,"mr":23965621,"mp":19438337,"pmed":16836645,"ncx":125,"n12":53,"schoolM":369,"subwayM":252,"subwayName":"월드컵경기장","martM":99,"parkM":490,"hospM":634,"sdZone":"서울성원초통학구역","schoolName":"중암중학교","regionTrend":16.7,"regionRefComplete":true,"attrRaw":1.423,"attrAdj":1.409,"trendRaw":23.3,"trendExcess":8.5,"peerMed":16836645,"price":{"n":53,"area":50.03,"p10":1000000000,"p25":1128000000,"p50":1199000000,"p75":1270000000,"p90":1382000000},"bfl":{"n":10,"minf":14,"maxf":14,"avgf":14.0},"refYm":"2026-05","adjCov":100.0,"dongs":[{"d":"24","n":17,"na":17,"rawR":0.96,"adjR":0.962,"adjP":1118220700,"minF":1,"maxF":14,"floors":14,"rawP":970000000},{"d":"32","n":16,"na":16,"rawR":1.005,"adjR":1.007,"adjP":1170074558,"minF":1,"maxF":14,"floors":14,"rawP":1015000000},{"d":"31","n":16,"na":16,"rawR":0.994,"adjR":0.99,"adjP":1150207697,"minF":2,"maxF":14,"floors":14,"rawP":1004000000},{"d":"33","n":16,"na":16,"rawR":0.98,"adjR":0.993,"adjP":1153640472,"minF":1,"maxF":14,"floors":14,"rawP":990000000},{"d":"25","n":15,"na":15,"rawR":0.988,"adjR":0.986,"adjP":1145469860,"minF":1,"maxF":14,"floors":14,"rawP":998000000},{"d":"29","n":13,"na":13,"rawR":1.015,"adjR":1.0,"adjP":1162151460,"minF":1,"maxF":13,"floors":14,"rawP":1025000000},{"d":"30","n":7,"na":7,"rawR":1.188,"adjR":1.048,"adjP":1217756793,"minF":1,"maxF":14,"floors":14,"rawP":1200000000},{"d":"27","n":7,"na":7,"rawR":1.025,"adjR":0.99,"adjP":1151030394,"minF":1,"maxF":14,"floors":14,"rawP":1035000000},{"d":"28","n":5,"na":5,"rawR":0.995,"adjR":0.981,"adjP":1139645603,"minF":2,"maxF":14,"floors":14,"rawP":1005000000},{"d":"(미상)","n":5,"na":5,"rawR":1.465,"adjR":1.214,"adjP":1410371406,"minF":1,"maxF":12,"floors":null,"rawP":1480000000},{"d":"26","n":4,"na":4,"rawR":1.153,"adjR":1.066,"adjP":1238827020,"minF":5,"maxF":14,"floors":14,"rawP":1165000000}],"floors":[{"fb":"1~2층","key":"1_1_2","n":23,"rawR":0.97,"adjR":0.938,"adjP":1089864527},{"fb":"3~5층","key":"2_3_5","n":20,"rawR":1.005,"adjR":0.976,"adjP":1134183688},{"fb":"6~10층","key":"3_6_10","n":42,"rawR":0.996,"adjR":1.003,"adjP":1165243219},{"fb":"11~15층","key":"4_11_15","n":36,"rawR":1.089,"adjR":1.025,"adjP":1191341947}],"axes":{"school":{"score":94.2,"conf":0.85,"raw":"최근접 학교 369m · 서울성원초통학구역"},"transit":{"score":99.8,"conf":0.85,"raw":"최근접 월드컵경기장역 252m"},"infra":{"score":92.6,"conf":0.85,"raw":"마트 99m · 공원 490m · 병원 634m"},"liquidity":{"score":79.7,"conf":0.7,"raw":"12개월 회전율 4.0% (거래 53건 / 1330세대)","capped":false},"attr":{"score":8.9,"conf":0.85,"raw":"같은 구·같은 면적대 중위 대비 ×1.409 (비교 단지 125곳)","clipped":false},"trend":{"score":100.0,"conf":0.85,"raw":"최근 12개월 +23.3% (직전 12개월 대비 · 표본 53/68건)","clipped":true}},"total":76.4,"coverage":100.0,"nAxes":6},{"id":1155,"name":"한솔마을(4단지)(주공)","sido":"경기도","sgg":"성남시 분당구","built":1994,"hh":1651,"gc":"exact","nogeom":false,"sggCode":"41135","band":"1_lt60","nr":123,"np":96,"mr":21111111,"mp":16125731,"pmed":21883725,"ncx":102,"n12":123,"schoolM":178,"subwayM":888,"subwayName":"정자","martM":429,"parkM":224,"hospM":876,"sdZone":"한솔초통학구역","schoolName":"한솔초등학교","regionTrend":28.2,"regionRefComplete":true,"attrRaw":0.965,"attrAdj":0.993,"trendRaw":30.9,"trendExcess":12.0,"peerMed":21883725,"price":{"n":123,"area":41.85,"p10":640000000,"p25":710000000,"p50":810000000,"p75":1000000000,"p90":1080000000},"bfl":{"n":17,"minf":10,"maxf":25,"avgf":15.6},"refYm":"2026-06","adjCov":100.0,"dongs":[{"d":"(미상)","n":27,"na":27,"rawR":1.506,"adjR":1.223,"adjP":1043000000,"minF":1,"maxF":25,"floors":null,"rawP":1040000000},{"d":"415","n":18,"na":18,"rawR":0.991,"adjR":1.007,"adjP":953224204,"minF":1,"maxF":25,"floors":25,"rawP":741500000},{"d":"414","n":17,"na":17,"rawR":0.962,"adjR":0.972,"adjP":919888256,"minF":1,"maxF":24,"floors":25,"rawP":720000000},{"d":"408","n":15,"na":15,"rawR":0.845,"adjR":0.879,"adjP":814814753,"minF":2,"maxF":15,"floors":15,"rawP":619000000},{"d":"416","n":14,"na":14,"rawR":0.952,"adjR":1.009,"adjP":790669271,"minF":1,"maxF":13,"floors":15,"rawP":595000000},{"d":"403","n":14,"na":14,"rawR":0.969,"adjR":0.982,"adjP":767083070,"minF":2,"maxF":9,"floors":10,"rawP":598500000},{"d":"401","n":12,"na":12,"rawR":1.014,"adjR":1.023,"adjP":802867593,"minF":4,"maxF":14,"floors":15,"rawP":626000000},{"d":"407","n":12,"na":12,"rawR":0.888,"adjR":0.939,"adjP":870641612,"minF":1,"maxF":15,"floors":15,"rawP":650000000},{"d":"412","n":12,"na":12,"rawR":1.018,"adjR":1.048,"adjP":818716856,"minF":2,"maxF":15,"floors":15,"rawP":635000000},{"d":"417","n":11,"na":11,"rawR":1.048,"adjR":1.022,"adjP":798277776,"minF":1,"maxF":15,"floors":15,"rawP":660000000},{"d":"405","n":10,"na":10,"rawR":0.992,"adjR":1.013,"adjP":807982804,"minF":3,"maxF":13,"floors":15,"rawP":619000000},{"d":"402","n":10,"na":10,"rawR":0.988,"adjR":0.99,"adjP":773176011,"minF":1,"maxF":7,"floors":10,"rawP":610000000},{"d":"406","n":9,"na":9,"rawR":0.913,"adjR":0.926,"adjP":858479646,"minF":4,"maxF":15,"floors":15,"rawP":669000000},{"d":"413","n":8,"na":8,"rawR":1.014,"adjR":1.027,"adjP":816790430,"minF":1,"maxF":13,"floors":15,"rawP":632500000},{"d":"411","n":8,"na":8,"rawR":1.0,"adjR":0.942,"adjP":873500572,"minF":2,"maxF":15,"floors":15,"rawP":732500000},{"d":"409","n":8,"na":8,"rawR":0.85,"adjR":0.891,"adjP":826035457,"minF":3,"maxF":14,"floors":15,"rawP":622500000},{"d":"404","n":7,"na":7,"rawR":1.134,"adjR":1.068,"adjP":846669496,"minF":1,"maxF":14,"floors":15,"rawP":710000000},{"d":"410","n":7,"na":7,"rawR":0.965,"adjR":0.945,"adjP":875908698,"minF":5,"maxF":15,"floors":15,"rawP":707000000}],"floors":[{"fb":"1~2층","key":"1_1_2","n":23,"rawR":1.016,"adjR":0.992,"adjP":797033367},{"fb":"3~5층","key":"2_3_5","n":36,"rawR":0.972,"adjR":0.984,"adjP":851860289},{"fb":"6~10층","key":"3_6_10","n":68,"rawR":1.022,"adjR":1.012,"adjP":858165721},{"fb":"11~15층","key":"4_11_15","n":73,"rawR":0.98,"adjR":1.0,"adjP":846669496},{"fb":"16층~","key":"5_16up","n":19,"rawR":1.003,"adjR":1.015,"adjP":961256980}],"axes":{"school":{"score":100.0,"conf":0.85,"raw":"최근접 학교 178m · 한솔초통학구역"},"transit":{"score":49.0,"conf":0.85,"raw":"최근접 정자역 888m"},"infra":{"score":98.0,"conf":0.85,"raw":"마트 429m · 공원 224m · 병원 876m"},"liquidity":{"score":100.0,"conf":0.7,"raw":"12개월 회전율 7.5% (거래 123건 / 1651세대)","capped":true},"attr":{"score":67.4,"conf":0.85,"raw":"같은 구·같은 면적대 중위 대비 ×0.993 (비교 단지 102곳)","clipped":false},"trend":{"score":100.0,"conf":0.85,"raw":"최근 12개월 +30.9% (직전 12개월 대비 · 표본 123/96건)","clipped":true}},"total":83.0,"coverage":100.0,"nAxes":6},{"id":1991,"name":"남산타운","sido":"서울특별시","sgg":"중구","built":2002,"hh":3116,"gc":"exact","nogeom":false,"sggCode":"11140","band":"1_lt60","nr":55,"np":83,"mr":24774775,"mp":17734401,"pmed":10536298,"ncx":62,"n12":141,"schoolM":265,"subwayM":188,"subwayName":"버티고개","martM":270,"parkM":166,"hospM":535,"sdZone":"서울동호초통학구역","schoolName":"서울동호초등학교","regionTrend":17.9,"regionRefComplete":false,"attrRaw":2.351,"attrAdj":2.214,"trendRaw":39.7,"trendExcess":16.3,"peerMed":10536298,"price":{"n":55,"area":59.94,"p10":1280000000,"p25":1356500000,"p50":1485000000,"p75":1503500000,"p90":1542000000},"bfl":{"n":35,"minf":11,"maxf":18,"avgf":17.7},"refYm":"2025-06","adjCov":96.4,"dongs":[{"d":"20","n":31,"na":30,"rawR":1.0,"adjR":0.989,"adjP":1127500000,"minF":1,"maxF":18,"floors":18,"rawP":1120000000},{"d":"3","n":30,"na":29,"rawR":1.009,"adjR":1.023,"adjP":1166775692,"minF":1,"maxF":18,"floors":18,"rawP":1130000000},{"d":"21","n":27,"na":27,"rawR":0.978,"adjR":0.982,"adjP":1120000000,"minF":1,"maxF":18,"floors":18,"rawP":1095000000},{"d":"(미상)","n":18,"na":18,"rawR":1.339,"adjR":1.12,"adjP":1276673808,"minF":1,"maxF":14,"floors":null,"rawP":1500000000},{"d":"2","n":18,"na":17,"rawR":0.982,"adjR":0.993,"adjP":1132524594,"minF":1,"maxF":18,"floors":18,"rawP":1100000000},{"d":"25","n":14,"na":12,"rawR":0.95,"adjR":0.972,"adjP":1107880224,"minF":2,"maxF":17,"floors":18,"rawP":1063500000}],"floors":[{"fb":"1~2층","key":"1_1_2","n":17,"rawR":0.982,"adjR":0.993,"adjP":1132524594},{"fb":"3~5층","key":"2_3_5","n":29,"rawR":1.0,"adjR":0.982,"adjP":1120000000},{"fb":"6~10층","key":"3_6_10","n":33,"rawR":0.978,"adjR":0.985,"adjP":1122500000},{"fb":"11~15층","key":"4_11_15","n":36,"rawR":1.025,"adjR":1.062,"adjP":1211095119},{"fb":"16층~","key":"5_16up","n":23,"rawR":1.011,"adjR":0.995,"adjP":1134682795}],"axes":{"school":{"score":100.0,"conf":0.85,"raw":"최근접 학교 265m · 서울동호초통학구역"},"transit":{"score":100.0,"conf":0.85,"raw":"최근접 버티고개역 188m"},"infra":{"score":100.0,"conf":0.85,"raw":"마트 270m · 공원 166m · 병원 535m"},"liquidity":{"score":90.5,"conf":0.7,"raw":"12개월 회전율 4.5% (거래 141건 / 3116세대)","capped":false},"attr":{"score":0.0,"conf":0.85,"raw":"같은 구·같은 면적대 중위 대비 ×2.214 (비교 단지 62곳)","clipped":true},"trend":{"score":100.0,"conf":0.85,"raw":"최근 12개월 +39.7% (직전 12개월 대비 · 표본 55/83건)","clipped":true}},"total":78.6,"coverage":100.0,"nAxes":6},{"id":2128,"name":"어반허브서울스테이션(UrbanHubSeoulStation)","sido":"서울특별시","sgg":"용산구","built":null,"hh":null,"gc":null,"nogeom":true,"sggCode":"11170","band":"1_lt60","nr":60,"np":0,"mr":18148511,"mp":null,"pmed":22094708,"ncx":60,"n12":60,"regionTrend":10.5,"regionRefComplete":false,"attrRaw":0.821,"attrAdj":0.865,"trendRaw":null,"trendExcess":null,"peerMed":22094708,"price":{"n":60,"area":22.03,"p10":390000000,"p25":398000000,"p50":428500000,"p75":444000000,"p90":450000000},"refYm":"2025-03","adjCov":100.0,"dongs":[{"d":"(미상)","n":60,"na":60,"rawR":1.0,"adjR":1.0,"adjP":407038408,"minF":1,"maxF":10,"floors":null,"rawP":428500000}],"floors":[{"fb":"1~2층","key":"1_1_2","n":16,"rawR":0.978,"adjR":0.978,"adjP":407038408},{"fb":"3~5층","key":"2_3_5","n":23,"rawR":0.992,"adjR":0.992,"adjP":410363109},{"fb":"6~10층","key":"3_6_10","n":21,"rawR":1.019,"adjR":1.019,"adjP":393739603}],"axes":{"school":{"score":null,"conf":0,"miss":"단지 좌표가 없어 거리를 계산할 수 없습니다. '입지가 나쁘다'가 아니라 '측정 자체가 불가'입니다 — 주소 지오코딩 실패분입니다."},"transit":{"score":null,"conf":0,"miss":"단지 좌표가 없어 거리를 계산할 수 없습니다. '입지가 나쁘다'가 아니라 '측정 자체가 불가'입니다 — 주소 지오코딩 실패분입니다."},"infra":{"score":null,"conf":0,"miss":"단지 좌표가 없어 거리를 계산할 수 없습니다. '입지가 나쁘다'가 아니라 '측정 자체가 불가'입니다 — 주소 지오코딩 실패분입니다."},"liquidity":{"score":null,"conf":0,"miss":"단지 세대수를 알 수 없어 거래회전율을 계산할 수 없습니다(전 DB 2,666단지 16.2%가 동일)."},"attr":{"score":85.4,"conf":0.85,"raw":"같은 구·같은 면적대 중위 대비 ×0.865 (비교 단지 60곳)","clipped":false},"trend":{"score":null,"conf":0,"miss":"직전 12개월(2024-07~2025-06) 실거래가 0건뿐이라 변화율을 만들지 않았습니다. 전 DB에서 이 축이 계산되는 단지는 50.2%뿐입니다."}},"total":85.4,"coverage":20.0,"nAxes":1},{"id":3043,"name":"한진(609-1)","sido":"서울특별시","sgg":"성북구","built":1998,"hh":2134,"gc":null,"nogeom":true,"sggCode":"11290","band":"1_lt60","nr":70,"np":57,"mr":11958711,"mp":9818731,"pmed":12485490,"ncx":110,"n12":132,"regionTrend":18.7,"regionRefComplete":true,"attrRaw":0.958,"attrAdj":0.908,"trendRaw":21.8,"trendExcess":6.9,"peerMed":12485490,"price":{"n":70,"area":59.58,"p10":599800000,"p25":630000000,"p50":712500000,"p75":790750000,"p90":820000000},"bfl":{"n":15,"minf":20,"maxf":21,"avgf":20.1},"refYm":"2026-06","adjCov":100.0,"dongs":[{"d":"209동","n":66,"na":66,"rawR":0.985,"adjR":0.992,"adjP":725968492,"minF":1,"maxF":20,"floors":null,"rawP":606000000},{"d":"202동","n":39,"na":39,"rawR":0.972,"adjR":0.993,"adjP":726549920,"minF":1,"maxF":20,"floors":null,"rawP":598000000},{"d":"(미상)","n":22,"na":22,"rawR":1.301,"adjR":1.125,"adjP":823500000,"minF":3,"maxF":20,"floors":null,"rawP":800000000}],"floors":[{"fb":"1~2층","key":"1_1_2","n":14,"rawR":0.94,"adjR":0.929,"adjP":679950290},{"fb":"3~5층","key":"2_3_5","n":17,"rawR":1.024,"adjR":1.018,"adjP":745298427},{"fb":"6~10층","key":"3_6_10","n":40,"rawR":1.024,"adjR":1.0,"adjP":732077437},{"fb":"11~15층","key":"4_11_15","n":28,"rawR":1.044,"adjR":1.016,"adjP":743777222},{"fb":"16층~","key":"5_16up","n":28,"rawR":1.002,"adjR":0.999,"adjP":731019895}],"axes":{"school":{"score":null,"conf":0,"miss":"단지 좌표가 없어 거리를 계산할 수 없습니다. '입지가 나쁘다'가 아니라 '측정 자체가 불가'입니다 — 주소 지오코딩 실패분입니다."},"transit":{"score":null,"conf":0,"miss":"단지 좌표가 없어 거리를 계산할 수 없습니다. '입지가 나쁘다'가 아니라 '측정 자체가 불가'입니다 — 주소 지오코딩 실패분입니다."},"infra":{"score":null,"conf":0,"miss":"단지 좌표가 없어 거리를 계산할 수 없습니다. '입지가 나쁘다'가 아니라 '측정 자체가 불가'입니다 — 주소 지오코딩 실패분입니다."},"liquidity":{"score":100.0,"conf":0.7,"raw":"12개월 회전율 6.2% (거래 132건 / 2134세대)","capped":true},"attr":{"score":79.3,"conf":0.85,"raw":"같은 구·같은 면적대 중위 대비 ×0.908 (비교 단지 110곳)","clipped":false},"trend":{"score":100.0,"conf":0.85,"raw":"최근 12개월 +21.8% (직전 12개월 대비 · 표본 70/57건)","clipped":true}},"total":90.8,"coverage":45.0,"nAxes":3},{"id":3450,"name":"상계주공6(고층)","sido":"서울특별시","sgg":"노원구","built":1988,"hh":2646,"gc":"address","nogeom":false,"sggCode":"11350","band":"1_lt60","nr":183,"np":75,"mr":12590799,"mp":11170488,"pmed":9596025,"ncx":156,"n12":183,"schoolM":221,"subwayM":306,"subwayName":"노원","martM":337,"parkM":221,"hospM":230,"sdZone":"서울상수초통학구역","schoolName":"신상중학교","regionTrend":11.6,"regionRefComplete":true,"attrRaw":1.312,"attrAdj":1.302,"trendRaw":12.7,"trendExcess":5.6,"peerMed":9596025,"price":{"n":183,"area":58.01,"p10":481000000,"p25":550000000,"p50":630000000,"p75":710000000,"p90":754000000},"bfl":{"n":28,"minf":9,"maxf":15,"avgf":13.9},"refYm":"2026-06","adjCov":100.0,"dongs":[{"d":"(미상)","n":46,"na":46,"rawR":1.117,"adjR":1.053,"adjP":663688277,"minF":1,"maxF":15,"floors":null,"rawP":647500000},{"d":"606","n":24,"na":24,"rawR":1.023,"adjR":1.052,"adjP":557528103,"minF":1,"maxF":14,"floors":15,"rawP":498500000},{"d":"615","n":23,"na":23,"rawR":1.003,"adjR":1.012,"adjP":563583888,"minF":1,"maxF":15,"floors":15,"rawP":510000000},{"d":"616","n":22,"na":22,"rawR":1.008,"adjR":1.028,"adjP":595775422,"minF":1,"maxF":15,"floors":15,"rawP":567500000},{"d":"617","n":16,"na":16,"rawR":0.979,"adjR":1.007,"adjP":556294561,"minF":1,"maxF":15,"floors":15,"rawP":495500000},{"d":"618","n":11,"na":11,"rawR":0.936,"adjR":0.955,"adjP":725405005,"minF":3,"maxF":13,"floors":15,"rawP":655000000},{"d":"613","n":8,"na":8,"rawR":0.954,"adjR":0.949,"adjP":737073816,"minF":1,"maxF":13,"floors":15,"rawP":682500000},{"d":"621","n":8,"na":8,"rawR":0.939,"adjR":0.983,"adjP":746894436,"minF":2,"maxF":10,"floors":12,"rawP":657500000},{"d":"627","n":7,"na":7,"rawR":0.963,"adjR":0.956,"adjP":743627470,"minF":4,"maxF":15,"floors":15,"rawP":690000000},{"d":"605","n":7,"na":7,"rawR":0.936,"adjR":0.961,"adjP":729869035,"minF":1,"maxF":15,"floors":15,"rawP":655000000},{"d":"604","n":7,"na":7,"rawR":0.929,"adjR":0.958,"adjP":727453339,"minF":1,"maxF":15,"floors":15,"rawP":650000000},{"d":"628","n":6,"na":6,"rawR":0.875,"adjR":0.901,"adjP":699928461,"minF":3,"maxF":14,"floors":15,"rawP":625750000},{"d":"607","n":6,"na":6,"rawR":1.014,"adjR":1.021,"adjP":775530593,"minF":1,"maxF":14,"floors":15,"rawP":710000000},{"d":"611","n":6,"na":6,"rawR":0.999,"adjR":0.993,"adjP":754443427,"minF":2,"maxF":11,"floors":15,"rawP":699000000},{"d":"622","n":6,"na":6,"rawR":0.901,"adjR":0.936,"adjP":711143218,"minF":5,"maxF":7,"floors":12,"rawP":631000000},{"d":"624","n":6,"na":6,"rawR":1.0,"adjR":0.982,"adjP":745801974,"minF":2,"maxF":7,"floors":12,"rawP":700000000},{"d":"610","n":5,"na":5,"rawR":0.993,"adjR":1.033,"adjP":784599597,"minF":3,"maxF":13,"floors":15,"rawP":695000000},{"d":"609","n":5,"na":5,"rawR":0.948,"adjR":0.977,"adjP":758311094,"minF":4,"maxF":15,"floors":15,"rawP":678000000},{"d":"601","n":5,"na":5,"rawR":1.024,"adjR":1.04,"adjP":510319539,"minF":4,"maxF":7,"floors":9,"rawP":463000000},{"d":"612","n":5,"na":5,"rawR":0.9,"adjR":0.914,"adjP":710920309,"minF":2,"maxF":13,"floors":15,"rawP":645000000},{"d":"619","n":4,"na":4,"rawR":0.971,"adjR":0.965,"adjP":733264199,"minF":1,"maxF":14,"floors":15,"rawP":680000000},{"d":"614","n":4,"na":4,"rawR":0.947,"adjR":0.958,"adjP":743699338,"minF":5,"maxF":11,"floors":15,"rawP":677500000},{"d":"625","n":4,"na":4,"rawR":0.918,"adjR":0.95,"adjP":721354816,"minF":3,"maxF":10,"floors":12,"rawP":642500000},{"d":"626","n":4,"na":4,"rawR":0.926,"adjR":0.952,"adjP":723172989,"minF":3,"maxF":10,"floors":12,"rawP":648000000},{"d":"608","n":3,"na":3,"rawR":0.926,"adjR":0.972,"adjP":738117022,"minF":6,"maxF":13,"floors":15,"rawP":648000000},{"d":"603","n":3,"na":3,"rawR":0.864,"adjR":0.898,"adjP":682225878,"minF":2,"maxF":9,"floors":15,"rawP":605000000},{"d":"623","n":3,"na":3,"rawR":1.0,"adjR":0.97,"adjP":737199269,"minF":7,"maxF":12,"floors":12,"rawP":700000000},{"d":"620","n":2,"na":2,"rawR":0.857,"adjR":0.883,"adjP":670687953,"minF":8,"maxF":15,"floors":15,"rawP":600000000},{"d":"602","n":2,"na":2,"rawR":1.109,"adjR":1.107,"adjP":547184731,"minF":6,"maxF":7,"floors":9,"rawP":505000000}],"floors":[{"fb":"1~2층","key":"1_1_2","n":35,"rawR":0.962,"adjR":0.959,"adjP":657728682},{"fb":"3~5층","key":"2_3_5","n":48,"rawR":1.0,"adjR":0.991,"adjP":689617123},{"fb":"6~10층","key":"3_6_10","n":104,"rawR":0.995,"adjR":1.003,"adjP":677146012},{"fb":"11~15층","key":"4_11_15","n":71,"rawR":1.019,"adjR":1.012,"adjP":707971209}],"axes":{"school":{"score":100.0,"conf":0.55,"raw":"최근접 학교 221m · 서울상수초통학구역"},"transit":{"score":95.5,"conf":0.55,"raw":"최근접 노원역 306m"},"infra":{"score":99.5,"conf":0.55,"raw":"마트 337m · 공원 221m · 병원 230m"},"liquidity":{"score":100.0,"conf":0.7,"raw":"12개월 회전율 6.9% (거래 183건 / 2646세대)","capped":true},"attr":{"score":23.9,"conf":0.85,"raw":"같은 구·같은 면적대 중위 대비 ×1.302 (비교 단지 156곳)","clipped":false},"trend":{"score":72.0,"conf":0.85,"raw":"최근 12개월 +12.7% (직전 12개월 대비 · 표본 183/75건)","clipped":false}},"total":81.0,"coverage":100.0,"nAxes":6},{"id":4044,"name":"DMC래미안e편한세상","sido":"서울특별시","sgg":"서대문구","built":2012,"hh":3293,"gc":"exact","nogeom":false,"sggCode":"11410","band":"2_60_85","nr":80,"np":91,"mr":16244850,"mp":14598540,"pmed":9662465,"ncx":145,"n12":128,"schoolM":141,"subwayM":676,"subwayName":"가좌","martM":559,"parkM":163,"hospM":459,"sdZone":"서울북가좌초통학구역","schoolName":"가재울고등학교","regionTrend":18.1,"regionRefComplete":true,"attrRaw":1.681,"attrAdj":1.713,"trendRaw":11.3,"trendExcess":2.2,"peerMed":9662465,"price":{"n":80,"area":84.95,"p10":1289500000,"p25":1310000000,"p50":1380000000,"p75":1500000000,"p90":1548200000},"bfl":{"n":51,"minf":7,"maxf":35,"avgf":16.9},"refYm":"2026-06","adjCov":100.0,"dongs":[{"d":"(미상)","n":17,"na":17,"rawR":1.19,"adjR":1.034,"adjP":1577209181,"minF":4,"maxF":33,"floors":null,"rawP":1535000000},{"d":"109","n":11,"na":11,"rawR":0.996,"adjR":1.024,"adjP":1561854316,"minF":8,"maxF":19,"floors":21,"rawP":1285000000},{"d":"108","n":10,"na":10,"rawR":1.019,"adjR":1.006,"adjP":1534819290,"minF":2,"maxF":17,"floors":22,"rawP":1315000000},{"d":"302","n":9,"na":9,"rawR":1.004,"adjR":1.017,"adjP":1551488911,"minF":5,"maxF":30,"floors":30,"rawP":1295000000},{"d":"311","n":8,"na":8,"rawR":0.942,"adjR":0.967,"adjP":1474919387,"minF":2,"maxF":18,"floors":18,"rawP":1215000000},{"d":"115","n":8,"na":8,"rawR":1.029,"adjR":1.005,"adjP":1532267774,"minF":3,"maxF":28,"floors":35,"rawP":1327500000},{"d":"215","n":7,"na":7,"rawR":0.992,"adjR":0.972,"adjP":1482850012,"minF":2,"maxF":12,"floors":12,"rawP":1280000000},{"d":"113","n":7,"na":7,"rawR":0.969,"adjR":0.975,"adjP":1488079901,"minF":2,"maxF":29,"floors":35,"rawP":1250000000},{"d":"206","n":6,"na":6,"rawR":0.942,"adjR":0.962,"adjP":1467549555,"minF":2,"maxF":11,"floors":20,"rawP":1215000000},{"d":"211","n":6,"na":6,"rawR":0.938,"adjR":0.949,"adjP":1448413803,"minF":1,"maxF":7,"floors":7,"rawP":1210000000},{"d":"112","n":6,"na":6,"rawR":0.96,"adjR":0.985,"adjP":1502094634,"minF":4,"maxF":21,"floors":26,"rawP":1238000000},{"d":"216","n":6,"na":6,"rawR":1.015,"adjR":0.99,"adjP":1510894838,"minF":2,"maxF":14,"floors":16,"rawP":1310000000},{"d":"304","n":5,"na":5,"rawR":0.961,"adjR":1.0,"adjP":1525599481,"minF":1,"maxF":10,"floors":11,"rawP":1240000000},{"d":"114","n":5,"na":5,"rawR":1.008,"adjR":1.013,"adjP":1544899187,"minF":7,"maxF":32,"floors":35,"rawP":1300000000},{"d":"212","n":5,"na":5,"rawR":1.0,"adjR":0.977,"adjP":1491440056,"minF":5,"maxF":16,"floors":17,"rawP":1290000000},{"d":"213","n":5,"na":5,"rawR":0.907,"adjR":0.945,"adjP":1441504620,"minF":2,"maxF":7,"floors":7,"rawP":1170000000},{"d":"306","n":5,"na":5,"rawR":1.043,"adjR":0.999,"adjP":1524183925,"minF":3,"maxF":15,"floors":18,"rawP":1345000000},{"d":"307","n":5,"na":5,"rawR":0.992,"adjR":1.006,"adjP":1535320532,"minF":3,"maxF":13,"floors":17,"rawP":1280000000},{"d":"308","n":5,"na":5,"rawR":0.93,"adjR":0.981,"adjP":1497479018,"minF":1,"maxF":16,"floors":17,"rawP":1200000000},{"d":"210","n":4,"na":4,"rawR":1.103,"adjR":1.005,"adjP":1533240646,"minF":1,"maxF":17,"floors":20,"rawP":1422500000},{"d":"110","n":4,"na":4,"rawR":1.039,"adjR":1.01,"adjP":1541863895,"minF":7,"maxF":19,"floors":21,"rawP":1340000000},{"d":"310","n":4,"na":4,"rawR":0.994,"adjR":1.004,"adjP":1532332932,"minF":6,"maxF":9,"floors":17,"rawP":1282500000},{"d":"207","n":4,"na":4,"rawR":1.015,"adjR":1.014,"adjP":1546650252,"minF":8,"maxF":16,"floors":23,"rawP":1308500000},{"d":"111","n":4,"na":4,"rawR":1.041,"adjR":1.01,"adjP":1540832307,"minF":4,"maxF":22,"floors":22,"rawP":1342500000},{"d":"205","n":3,"na":3,"rawR":0.956,"adjR":0.982,"adjP":1498650873,"minF":6,"maxF":15,"floors":15,"rawP":1233000000},{"d":"303","n":3,"na":3,"rawR":1.0,"adjR":0.975,"adjP":1486906340,"minF":1,"maxF":8,"floors":14,"rawP":1290000000},{"d":"106","n":2,"na":2,"rawR":0.981,"adjR":0.991,"adjP":1511416867,"minF":6,"maxF":12,"floors":20,"rawP":1265000000},{"d":"208","n":2,"na":2,"rawR":1.07,"adjR":1.016,"adjP":1550134181,"minF":3,"maxF":26,"floors":26,"rawP":1380000000},{"d":"309","n":2,"na":2,"rawR":0.977,"adjR":0.975,"adjP":1488313054,"minF":1,"maxF":5,"floors":17,"rawP":1260000000},{"d":"214","n":2,"na":2,"rawR":1.034,"adjR":1.032,"adjP":1575268950,"minF":7,"maxF":7,"floors":16,"rawP":1334000000},{"d":"305","n":1,"na":1,"rawR":0.93,"adjR":0.981,"adjP":1497479018,"minF":2,"maxF":2,"floors":18,"rawP":1200000000}],"floors":[{"fb":"1~2층","key":"1_1_2","n":20,"rawR":0.93,"adjR":0.948,"adjP":1446847159},{"fb":"3~5층","key":"2_3_5","n":31,"rawR":0.985,"adjR":0.969,"adjP":1478760531},{"fb":"6~10층","key":"3_6_10","n":47,"rawR":1.0,"adjR":1.005,"adjP":1532308060},{"fb":"11~15층","key":"4_11_15","n":26,"rawR":1.025,"adjR":1.014,"adjP":1547277869},{"fb":"16층~","key":"5_16up","n":47,"rawR":1.008,"adjR":1.016,"adjP":1550000000}],"axes":{"school":{"score":100.0,"conf":0.85,"raw":"최근접 학교 141m · 서울북가좌초통학구역"},"transit":{"score":65.9,"conf":0.85,"raw":"최근접 가좌역 676m"},"infra":{"score":96.7,"conf":0.85,"raw":"마트 559m · 공원 163m · 병원 459m"},"liquidity":{"score":77.7,"conf":0.7,"raw":"12개월 회전율 3.9% (거래 128건 / 3293세대)","capped":false},"attr":{"score":0.0,"conf":0.85,"raw":"같은 구·같은 면적대 중위 대비 ×1.713 (비교 단지 145곳)","clipped":true},"trend":{"score":66.4,"conf":0.85,"raw":"최근 12개월 +11.3% (직전 12개월 대비 · 표본 80/91건)","clipped":false}},"total":66.0,"coverage":100.0,"nAxes":6},{"id":5396,"name":"영등포푸르지오","sido":"서울특별시","sgg":"영등포구","built":2002,"hh":2462,"gc":"exact","nogeom":false,"sggCode":"11560","band":"2_60_85","nr":79,"np":101,"mr":17621405,"mp":14589857,"pmed":13016810,"ncx":172,"n12":102,"schoolM":127,"subwayM":561,"subwayName":"영등포","martM":319,"parkM":198,"hospM":446,"sdZone":"서울영원초통학구역","schoolName":"서울영원초등학교","regionTrend":20.5,"regionRefComplete":true,"attrRaw":1.354,"attrAdj":1.371,"trendRaw":20.8,"trendExcess":6.8,"peerMed":13016810,"price":{"n":79,"area":79.78,"p10":1240600000,"p25":1295000000,"p50":1390000000,"p75":1513500000,"p90":1577600000},"bfl":{"n":31,"minf":17,"maxf":23,"avgf":22.0},"refYm":"2026-06","adjCov":100.0,"dongs":[{"d":"(미상)","n":15,"na":15,"rawR":1.296,"adjR":1.047,"adjP":1570000000,"minF":3,"maxF":19,"floors":null,"rawP":1555000000},{"d":"106","n":11,"na":11,"rawR":1.021,"adjR":0.934,"adjP":1409717209,"minF":1,"maxF":19,"floors":20,"rawP":1245000000},{"d":"105","n":11,"na":11,"rawR":1.002,"adjR":1.017,"adjP":1408057635,"minF":3,"maxF":20,"floors":23,"rawP":1120000000},{"d":"216","n":11,"na":11,"rawR":1.106,"adjR":1.017,"adjP":1534946281,"minF":1,"maxF":23,"floors":23,"rawP":1348000000},{"d":"110","n":10,"na":10,"rawR":1.091,"adjR":1.022,"adjP":1542777723,"minF":4,"maxF":23,"floors":23,"rawP":1330000000},{"d":"103","n":10,"na":10,"rawR":0.965,"adjR":0.936,"adjP":1503965845,"minF":2,"maxF":21,"floors":23,"rawP":1252500000},{"d":"211","n":8,"na":8,"rawR":0.984,"adjR":1.005,"adjP":1390227092,"minF":1,"maxF":19,"floors":21,"rawP":1100000000},{"d":"205","n":8,"na":8,"rawR":0.984,"adjR":0.997,"adjP":1504941524,"minF":4,"maxF":16,"floors":19,"rawP":1200000000},{"d":"217","n":8,"na":8,"rawR":1.007,"adjR":1.007,"adjP":1392972984,"minF":1,"maxF":21,"floors":22,"rawP":1125000000},{"d":"202","n":7,"na":7,"rawR":0.987,"adjR":0.961,"adjP":1496378393,"minF":3,"maxF":20,"floors":22,"rawP":1235000000},{"d":"215","n":7,"na":7,"rawR":0.962,"adjR":0.958,"adjP":1537346033,"minF":4,"maxF":23,"floors":23,"rawP":1247000000},{"d":"107","n":7,"na":7,"rawR":0.969,"adjR":1.019,"adjP":1410743305,"minF":8,"maxF":20,"floors":22,"rawP":1083000000},{"d":"201","n":7,"na":7,"rawR":1.009,"adjR":0.954,"adjP":1439676521,"minF":2,"maxF":22,"floors":23,"rawP":1230000000},{"d":"104","n":6,"na":6,"rawR":0.975,"adjR":1.023,"adjP":1415770884,"minF":1,"maxF":23,"floors":23,"rawP":1090000000},{"d":"203","n":6,"na":6,"rawR":0.908,"adjR":0.96,"adjP":1449492498,"minF":2,"maxF":23,"floors":23,"rawP":1107500000},{"d":"204","n":6,"na":6,"rawR":1.217,"adjR":1.11,"adjP":1535995388,"minF":7,"maxF":21,"floors":23,"rawP":1360000000},{"d":"213","n":6,"na":6,"rawR":0.912,"adjR":0.943,"adjP":1423359622,"minF":1,"maxF":12,"floors":21,"rawP":1112500000},{"d":"206","n":5,"na":5,"rawR":1.011,"adjR":1.038,"adjP":1436662968,"minF":7,"maxF":19,"floors":23,"rawP":1130000000},{"d":"113","n":5,"na":5,"rawR":1.05,"adjR":0.986,"adjP":1488044308,"minF":3,"maxF":20,"floors":21,"rawP":1280000000},{"d":"212","n":5,"na":5,"rawR":1.041,"adjR":0.975,"adjP":1565977388,"minF":8,"maxF":23,"floors":23,"rawP":1350000000},{"d":"210","n":4,"na":4,"rawR":1.056,"adjR":1.027,"adjP":1421417226,"minF":3,"maxF":23,"floors":23,"rawP":1180500000},{"d":"214","n":3,"na":3,"rawR":1.098,"adjR":1.058,"adjP":1464730325,"minF":8,"maxF":17,"floors":23,"rawP":1227000000},{"d":"111","n":3,"na":3,"rawR":0.898,"adjR":0.922,"adjP":1481161379,"minF":10,"maxF":19,"floors":23,"rawP":1165000000},{"d":"101","n":3,"na":3,"rawR":0.902,"adjR":0.928,"adjP":1401265003,"minF":2,"maxF":21,"floors":22,"rawP":1100000000},{"d":"109","n":2,"na":2,"rawR":0.96,"adjR":0.966,"adjP":1458812318,"minF":6,"maxF":10,"floors":19,"rawP":1170000000},{"d":"112","n":2,"na":2,"rawR":0.894,"adjR":0.863,"adjP":1302264981,"minF":1,"maxF":1,"floors":17,"rawP":1090000000},{"d":"209","n":2,"na":2,"rawR":0.886,"adjR":0.926,"adjP":1488394574,"minF":13,"maxF":20,"floors":23,"rawP":1150000000},{"d":"108","n":1,"na":1,"rawR":1.107,"adjR":1.012,"adjP":1624854775,"minF":17,"maxF":17,"floors":23,"rawP":1435000000},{"d":"208","n":1,"na":1,"rawR":1.071,"adjR":0.98,"adjP":1573901141,"minF":14,"maxF":14,"floors":23,"rawP":1390000000}],"floors":[{"fb":"1~2층","key":"1_1_2","n":16,"rawR":0.897,"adjR":0.889,"adjP":1320757516},{"fb":"3~5층","key":"2_3_5","n":21,"rawR":0.998,"adjR":1.0,"adjP":1439539214},{"fb":"6~10층","key":"3_6_10","n":41,"rawR":1.009,"adjR":1.017,"adjP":1478940426},{"fb":"11~15층","key":"4_11_15","n":50,"rawR":1.03,"adjR":1.005,"adjP":1517015601},{"fb":"16층~","key":"5_16up","n":52,"rawR":0.995,"adjR":1.011,"adjP":1479640761}],"axes":{"school":{"score":100.0,"conf":0.85,"raw":"최근접 학교 127m · 서울영원초통학구역"},"transit":{"score":75.1,"conf":0.85,"raw":"최근접 영등포역 561m"},"infra":{"score":100.0,"conf":0.85,"raw":"마트 319m · 공원 198m · 병원 446m"},"liquidity":{"score":82.9,"conf":0.7,"raw":"12개월 회전율 4.1% (거래 102건 / 2462세대)","capped":false},"attr":{"score":14.2,"conf":0.85,"raw":"같은 구·같은 면적대 중위 대비 ×1.371 (비교 단지 172곳)","clipped":false},"trend":{"score":100.0,"conf":0.85,"raw":"최근 12개월 +20.8% (직전 12개월 대비 · 표본 79/101건)","clipped":true}},"total":75.3,"coverage":100.0,"nAxes":6},{"id":6545,"name":"솔빛마을주공","sido":"인천광역시","sgg":"제물포구","built":null,"hh":null,"gc":null,"nogeom":true,"sggCode":"28125","band":"1_lt60","nr":36,"np":51,"mr":3811865,"mp":3729753,"pmed":3078943,"ncx":46,"n12":36,"regionTrend":-0.3,"regionRefComplete":true,"attrRaw":1.238,"attrAdj":1.205,"trendRaw":2.2,"trendExcess":2.6,"peerMed":3078943,"price":{"n":36,"area":46.92,"p10":157500000,"p25":171500000,"p50":178750000,"p75":187125000,"p90":226000000},"refYm":null,"adjCov":0.0,"dongs":[{"d":"103","n":20,"na":0,"rawR":0.999,"adjR":null,"adjP":null,"minF":2,"maxF":24,"floors":null,"rawP":177000000},{"d":"101","n":17,"na":0,"rawR":0.988,"adjR":null,"adjP":null,"minF":5,"maxF":18,"floors":null,"rawP":175000000},{"d":"102","n":13,"na":0,"rawR":1.005,"adjR":null,"adjP":null,"minF":1,"maxF":26,"floors":null,"rawP":178000000},{"d":"109","n":12,"na":0,"rawR":1.093,"adjR":null,"adjP":null,"minF":1,"maxF":21,"floors":null,"rawP":153000000},{"d":"111","n":12,"na":0,"rawR":0.93,"adjR":null,"adjP":null,"minF":1,"maxF":14,"floors":null,"rawP":210000000},{"d":"121","n":8,"na":0,"rawR":1.033,"adjR":null,"adjP":null,"minF":5,"maxF":14,"floors":null,"rawP":233750000},{"d":"(미상)","n":5,"na":0,"rawR":1.008,"adjR":null,"adjP":null,"minF":8,"maxF":19,"floors":null,"rawP":177000000}],"floors":[{"fb":"1~2층","key":"1_1_2","n":5,"rawR":0.877,"adjR":null,"adjP":null},{"fb":"3~5층","key":"2_3_5","n":13,"rawR":0.96,"adjR":null,"adjP":null},{"fb":"6~10층","key":"3_6_10","n":22,"rawR":1.007,"adjR":null,"adjP":null},{"fb":"11~15층","key":"4_11_15","n":31,"rawR":1.005,"adjR":null,"adjP":null},{"fb":"16층~","key":"5_16up","n":16,"rawR":1.022,"adjR":null,"adjP":null}],"axes":{"school":{"score":null,"conf":0,"miss":"단지 좌표가 없어 거리를 계산할 수 없습니다. '입지가 나쁘다'가 아니라 '측정 자체가 불가'입니다 — 주소 지오코딩 실패분입니다."},"transit":{"score":null,"conf":0,"miss":"단지 좌표가 없어 거리를 계산할 수 없습니다. '입지가 나쁘다'가 아니라 '측정 자체가 불가'입니다 — 주소 지오코딩 실패분입니다."},"infra":{"score":null,"conf":0,"miss":"단지 좌표가 없어 거리를 계산할 수 없습니다. '입지가 나쁘다'가 아니라 '측정 자체가 불가'입니다 — 주소 지오코딩 실패분입니다."},"liquidity":{"score":null,"conf":0,"miss":"단지 세대수를 알 수 없어 거래회전율을 계산할 수 없습니다(전 DB 2,666단지 16.2%가 동일)."},"attr":{"score":37.6,"conf":0.85,"raw":"같은 구·같은 면적대 중위 대비 ×1.205 (비교 단지 46곳)","clipped":false},"trend":{"score":30.0,"conf":0.85,"raw":"최근 12개월 +2.2% (직전 12개월 대비 · 표본 36/51건)","clipped":false}},"total":35.1,"coverage":30.0,"nAxes":2},{"id":6572,"name":"평촌어바인퍼스트","sido":"경기도","sgg":"안양시 동안구","built":2021,"hh":3850,"gc":"address","nogeom":false,"sggCode":"41173","band":"1_lt60","nr":259,"np":264,"mr":14028898,"mp":12719225,"pmed":10477141,"ncx":125,"n12":329,"schoolM":171,"subwayM":1089,"subwayName":"금정","martM":371,"parkM":199,"hospM":532,"sdZone":"호원초통학구역","schoolName":"호원초등학교","regionTrend":19.4,"regionRefComplete":true,"attrRaw":1.339,"attrAdj":1.411,"trendRaw":10.3,"trendExcess":1.9,"peerMed":10477141,"price":{"n":259,"area":59.52,"p10":429800000,"p25":450000000,"p50":820000000,"p75":902500000,"p90":975000000},"bfl":{"n":34,"minf":17,"maxf":29,"avgf":25.3},"refYm":"2026-06","adjCov":100.0,"dongs":[{"d":"101","n":54,"na":54,"rawR":0.833,"adjR":0.814,"adjP":506720758,"minF":1,"maxF":21,"floors":21,"rawP":426000000},{"d":"(미상)","n":53,"na":53,"rawR":1.237,"adjR":1.05,"adjP":990000000,"minF":1,"maxF":23,"floors":null,"rawP":955000000},{"d":"102","n":49,"na":49,"rawR":0.841,"adjR":0.824,"adjP":513235852,"minF":2,"maxF":21,"floors":21,"rawP":430000000},{"d":"212","n":40,"na":40,"rawR":0.841,"adjR":0.783,"adjP":487439869,"minF":1,"maxF":20,"floors":21,"rawP":430000000},{"d":"211","n":38,"na":38,"rawR":0.937,"adjR":0.847,"adjP":527247585,"minF":2,"maxF":21,"floors":21,"rawP":492500000},{"d":"103","n":23,"na":23,"rawR":1.056,"adjR":1.029,"adjP":765790055,"minF":2,"maxF":19,"floors":20,"rawP":650000000},{"d":"110","n":22,"na":22,"rawR":1.035,"adjR":1.027,"adjP":971968168,"minF":1,"maxF":25,"floors":29,"rawP":805000000},{"d":"111","n":22,"na":22,"rawR":1.033,"adjR":1.027,"adjP":974804335,"minF":1,"maxF":27,"floors":29,"rawP":803500000},{"d":"108","n":21,"na":21,"rawR":1.032,"adjR":1.025,"adjP":967017781,"minF":1,"maxF":25,"floors":25,"rawP":800000000},{"d":"205","n":20,"na":20,"rawR":1.024,"adjR":1.007,"adjP":954126036,"minF":1,"maxF":24,"floors":26,"rawP":799000000},{"d":"107","n":17,"na":17,"rawR":1.038,"adjR":1.019,"adjP":967183802,"minF":1,"maxF":27,"floors":29,"rawP":810000000},{"d":"207","n":16,"na":16,"rawR":1.01,"adjR":1.014,"adjP":962835870,"minF":3,"maxF":25,"floors":25,"rawP":787500000},{"d":"119","n":15,"na":15,"rawR":1.032,"adjR":1.023,"adjP":970703999,"minF":1,"maxF":25,"floors":28,"rawP":800000000},{"d":"109","n":14,"na":14,"rawR":1.016,"adjR":1.019,"adjP":966988459,"minF":2,"maxF":23,"floors":25,"rawP":790000000},{"d":"118","n":14,"na":14,"rawR":1.032,"adjR":1.027,"adjP":973835177,"minF":2,"maxF":27,"floors":29,"rawP":802500000},{"d":"201","n":14,"na":14,"rawR":1.031,"adjR":1.017,"adjP":965289503,"minF":3,"maxF":22,"floors":24,"rawP":804500000},{"d":"104","n":13,"na":13,"rawR":1.019,"adjR":1.023,"adjP":971175361,"minF":3,"maxF":24,"floors":25,"rawP":795000000},{"d":"206","n":12,"na":12,"rawR":1.038,"adjR":1.028,"adjP":973847808,"minF":1,"maxF":18,"floors":20,"rawP":807500000},{"d":"106","n":11,"na":11,"rawR":1.058,"adjR":1.018,"adjP":960825258,"minF":2,"maxF":17,"floors":17,"rawP":825000000},{"d":"203","n":11,"na":11,"rawR":1.024,"adjR":1.026,"adjP":973847808,"minF":1,"maxF":21,"floors":22,"rawP":799000000},{"d":"202","n":11,"na":11,"rawR":1.032,"adjR":1.013,"adjP":961918321,"minF":3,"maxF":17,"floors":25,"rawP":800000000},{"d":"204","n":8,"na":8,"rawR":1.051,"adjR":1.028,"adjP":974416993,"minF":5,"maxF":17,"floors":23,"rawP":817500000},{"d":"105","n":8,"na":8,"rawR":1.042,"adjR":1.027,"adjP":975112968,"minF":1,"maxF":28,"floors":29,"rawP":812500000},{"d":"208","n":7,"na":7,"rawR":1.006,"adjR":1.0,"adjP":948889540,"minF":1,"maxF":19,"floors":24,"rawP":785000000},{"d":"210","n":6,"na":6,"rawR":1.035,"adjR":1.001,"adjP":950660451,"minF":3,"maxF":21,"floors":21,"rawP":805000000},{"d":"209","n":4,"na":4,"rawR":1.194,"adjR":1.031,"adjP":978661642,"minF":5,"maxF":22,"floors":24,"rawP":929000000}],"floors":[{"fb":"1~2층","key":"1_1_2","n":35,"rawR":0.927,"adjR":0.948,"adjP":894591824},{"fb":"3~5층","key":"2_3_5","n":83,"rawR":1.006,"adjR":0.997,"adjP":941503415},{"fb":"6~10층","key":"3_6_10","n":99,"rawR":0.974,"adjR":0.99,"adjP":911291041},{"fb":"11~15층","key":"4_11_15","n":134,"rawR":1.002,"adjR":1.01,"adjP":942876556},{"fb":"16층~","key":"5_16up","n":172,"rawR":1.014,"adjR":1.013,"adjP":952932464}],"axes":{"school":{"score":100.0,"conf":0.55,"raw":"최근접 학교 171m · 호원초통학구역"},"transit":{"score":32.9,"conf":0.55,"raw":"최근접 금정역 1.1km"},"infra":{"score":100.0,"conf":0.55,"raw":"마트 371m · 공원 199m · 병원 532m"},"liquidity":{"score":100.0,"conf":0.7,"raw":"12개월 회전율 8.5% (거래 329건 / 3850세대)","capped":true},"attr":{"score":8.6,"conf":0.85,"raw":"같은 구·같은 면적대 중위 대비 ×1.411 (비교 단지 125곳)","clipped":false},"trend":{"score":62.4,"conf":0.85,"raw":"최근 12개월 +10.3% (직전 12개월 대비 · 표본 259/264건)","clipped":false}},"total":64.5,"coverage":100.0,"nAxes":6},{"id":6694,"name":"하늘도시우미린1단지","sido":"인천광역시","sgg":"영종구","built":null,"hh":null,"gc":"exact","nogeom":false,"sggCode":"28155","band":"1_lt60","nr":94,"np":92,"mr":4756342,"mp":4841002,"pmed":4076644,"ncx":12,"n12":94,"schoolM":519,"subwayM":3517,"subwayName":"영종","martM":544,"parkM":263,"hospM":6107,"sdZone":"인천하늘초통학구역","schoolName":"인천영종초등학교","regionTrend":-1.3,"regionRefComplete":true,"attrRaw":1.167,"attrAdj":1.169,"trendRaw":-1.7,"trendExcess":-0.3,"peerMed":4076644,"price":{"n":94,"area":59.94,"p10":265000000,"p25":273500000,"p50":284000000,"p75":290000000,"p90":295000000},"refYm":"2024-08","adjCov":100.0,"dongs":[{"d":"826","n":20,"na":20,"rawR":1.014,"adjR":1.013,"adjP":296936930,"minF":3,"maxF":36,"floors":null,"rawP":292000000},{"d":"830","n":20,"na":20,"rawR":0.98,"adjR":0.988,"adjP":289313417,"minF":4,"maxF":30,"floors":null,"rawP":281500000},{"d":"822","n":18,"na":18,"rawR":0.996,"adjR":0.986,"adjP":288049541,"minF":4,"maxF":29,"floors":null,"rawP":287000000},{"d":"829","n":17,"na":17,"rawR":0.983,"adjR":0.977,"adjP":286020686,"minF":2,"maxF":29,"floors":null,"rawP":283000000},{"d":"824","n":17,"na":17,"rawR":1.035,"adjR":1.035,"adjP":303394979,"minF":1,"maxF":34,"floors":null,"rawP":298000000},{"d":"828","n":17,"na":17,"rawR":1.0,"adjR":1.0,"adjP":291168539,"minF":6,"maxF":30,"floors":null,"rawP":288000000},{"d":"(미상)","n":13,"na":13,"rawR":1.007,"adjR":1.02,"adjP":294474528,"minF":4,"maxF":31,"floors":null,"rawP":290000000},{"d":"827","n":13,"na":13,"rawR":1.007,"adjR":1.004,"adjP":294495356,"minF":9,"maxF":35,"floors":null,"rawP":290000000},{"d":"832","n":12,"na":12,"rawR":0.992,"adjR":0.996,"adjP":284949130,"minF":5,"maxF":29,"floors":null,"rawP":277000000},{"d":"821","n":11,"na":11,"rawR":0.989,"adjR":0.977,"adjP":286428325,"minF":2,"maxF":29,"floors":null,"rawP":285000000},{"d":"825","n":11,"na":11,"rawR":1.038,"adjR":1.028,"adjP":301302600,"minF":11,"maxF":34,"floors":null,"rawP":299000000},{"d":"823","n":10,"na":10,"rawR":1.0,"adjR":1.005,"adjP":294410387,"minF":14,"maxF":30,"floors":null,"rawP":288000000},{"d":"831","n":7,"na":7,"rawR":0.978,"adjR":0.979,"adjP":280898792,"minF":4,"maxF":28,"floors":null,"rawP":277000000}],"floors":[{"fb":"1~2층","key":"1_1_2","n":3,"rawR":0.92,"adjR":0.906,"adjP":265576034},{"fb":"3~5층","key":"2_3_5","n":18,"rawR":0.938,"adjR":0.947,"adjP":275039596},{"fb":"6~10층","key":"3_6_10","n":34,"rawR":0.979,"adjR":0.975,"adjP":285433782},{"fb":"11~15층","key":"4_11_15","n":25,"rawR":1.021,"adjR":1.006,"adjP":294499329},{"fb":"16층~","key":"5_16up","n":106,"rawR":1.007,"adjR":1.012,"adjP":296122645}],"axes":{"school":{"score":81.8,"conf":0.85,"raw":"최근접 학교 519m · 인천하늘초통학구역"},"transit":{"score":0.0,"conf":0.85,"raw":"최근접 영종역 3.5km"},"infra":{"score":62.1,"conf":0.85,"raw":"마트 544m · 공원 263m · 병원 6107m"},"liquidity":{"score":null,"conf":0,"miss":"단지 세대수를 알 수 없어 거래회전율을 계산할 수 없습니다(전 DB 2,666단지 16.2%가 동일)."},"attr":{"score":42.6,"conf":0.55,"raw":"같은 구·같은 면적대 중위 대비 ×1.169 (비교 단지 12곳)","clipped":false},"trend":{"score":14.4,"conf":0.85,"raw":"최근 12개월 -1.7% (직전 12개월 대비 · 표본 94/92건)","clipped":false}},"total":41.9,"coverage":85.0,"nAxes":5},{"id":6785,"name":"힐스테이트푸르지오주안","sido":"인천광역시","sgg":"미추홀구","built":2023,"hh":2958,"gc":"address","nogeom":false,"sggCode":"28177","band":"1_lt60","nr":118,"np":36,"mr":7870987,"mp":7602534,"pmed":2909848,"ncx":236,"n12":168,"schoolM":261,"subwayM":746,"subwayName":"시민공원","martM":226,"parkM":37,"hospM":534,"sdZone":"인천주안초통학구역","schoolName":"인천남부초등학교","regionTrend":0.7,"regionRefComplete":true,"attrRaw":2.705,"attrAdj":2.698,"trendRaw":3.5,"trendExcess":2.7,"peerMed":2909848,"price":{"n":118,"area":59.72,"p10":403500000,"p25":458500000,"p50":470000000,"p75":480000000,"p90":490000000},"refYm":"2026-06","adjCov":100.0,"dongs":[{"d":"(미상)","n":25,"na":25,"rawR":1.011,"adjR":1.011,"adjP":474188622,"minF":2,"maxF":29,"floors":null,"rawP":473000000},{"d":"118동","n":19,"na":19,"rawR":0.973,"adjR":0.98,"adjP":461860232,"minF":1,"maxF":28,"floors":null,"rawP":457000000},{"d":"105동","n":14,"na":14,"rawR":1.028,"adjR":1.028,"adjP":482391219,"minF":3,"maxF":27,"floors":null,"rawP":481000000},{"d":"119동","n":13,"na":13,"rawR":0.994,"adjR":0.99,"adjP":465770860,"minF":4,"maxF":27,"floors":null,"rawP":467000000},{"d":"121동","n":13,"na":13,"rawR":0.99,"adjR":0.987,"adjP":465203596,"minF":3,"maxF":23,"floors":null,"rawP":465000000},{"d":"122동","n":12,"na":12,"rawR":1.0,"adjR":1.001,"adjP":351479807,"minF":9,"maxF":17,"floors":null,"rawP":351500000},{"d":"115동","n":12,"na":12,"rawR":0.992,"adjR":0.996,"adjP":469219010,"minF":3,"maxF":26,"floors":null,"rawP":466000000},{"d":"117동","n":9,"na":9,"rawR":0.99,"adjR":0.995,"adjP":466828771,"minF":1,"maxF":27,"floors":null,"rawP":465000000},{"d":"107동","n":9,"na":9,"rawR":1.039,"adjR":1.041,"adjP":490684218,"minF":11,"maxF":26,"floors":null,"rawP":488000000},{"d":"104동","n":8,"na":8,"rawR":1.011,"adjR":1.006,"adjP":471984996,"minF":5,"maxF":30,"floors":null,"rawP":473000000},{"d":"120동","n":7,"na":7,"rawR":0.973,"adjR":0.968,"adjP":454380482,"minF":10,"maxF":19,"floors":null,"rawP":455000000},{"d":"106동","n":7,"na":7,"rawR":1.015,"adjR":1.018,"adjP":477785848,"minF":3,"maxF":20,"floors":null,"rawP":475000000},{"d":"101동","n":6,"na":6,"rawR":0.984,"adjR":0.99,"adjP":466497295,"minF":4,"maxF":22,"floors":null,"rawP":462000000}],"floors":[{"fb":"1~2층","key":"1_1_2","n":3,"rawR":0.947,"adjR":0.946,"adjP":443729833},{"fb":"3~5층","key":"2_3_5","n":21,"rawR":0.975,"adjR":0.977,"adjP":460108899},{"fb":"6~10층","key":"3_6_10","n":27,"rawR":0.996,"adjR":0.999,"adjP":468731684},{"fb":"11~15층","key":"4_11_15","n":40,"rawR":1.0,"adjR":1.002,"adjP":468747324},{"fb":"16층~","key":"5_16up","n":63,"rawR":1.011,"adjR":1.008,"adjP":473186109}],"axes":{"school":{"score":100.0,"conf":0.55,"raw":"최근접 학교 261m · 인천주안초통학구역"},"transit":{"score":60.3,"conf":0.55,"raw":"최근접 시민공원역 746m"},"infra":{"score":100.0,"conf":0.55,"raw":"마트 226m · 공원 37m · 병원 534m"},"liquidity":{"score":100.0,"conf":0.7,"raw":"12개월 회전율 5.7% (거래 168건 / 2958세대)","capped":true},"attr":{"score":0.0,"conf":0.85,"raw":"같은 구·같은 면적대 중위 대비 ×2.698 (비교 단지 236곳)","clipped":true},"trend":{"score":35.2,"conf":0.85,"raw":"최근 12개월 +3.5% (직전 12개월 대비 · 표본 118/36건)","clipped":false}},"total":65.6,"coverage":100.0,"nAxes":6},{"id":7160,"name":"e편한세상송도","sido":"인천광역시","sgg":"연수구","built":2018,"hh":2708,"gc":"address","nogeom":false,"sggCode":"28185","band":"2_60_85","nr":173,"np":181,"mr":7814431,"mp":7818395,"pmed":6825804,"ncx":126,"n12":173,"schoolM":252,"subwayM":934,"subwayName":"송도달빛축제공원","martM":266,"parkM":379,"hospM":2871,"sdZone":"인천송담초통학구역","schoolName":"인천송담초등학교","regionTrend":2.4,"regionRefComplete":true,"attrRaw":1.145,"attrAdj":1.144,"trendRaw":-0.1,"trendExcess":-0.8,"peerMed":6825804,"price":{"n":173,"area":70.56,"p10":530000000,"p25":550000000,"p50":568000000,"p75":627000000,"p90":674500000},"bfl":{"n":15,"minf":33,"maxf":39,"avgf":37.6},"refYm":"2026-06","adjCov":100.0,"dongs":[{"d":"(미상)","n":32,"na":32,"rawR":1.009,"adjR":0.994,"adjP":566787309,"minF":2,"maxF":37,"floors":null,"rawP":564500000},{"d":"102동","n":31,"na":31,"rawR":0.997,"adjR":0.998,"adjP":559208190,"minF":1,"maxF":36,"floors":null,"rawP":550000000},{"d":"114동","n":29,"na":29,"rawR":0.997,"adjR":0.996,"adjP":557443818,"minF":3,"maxF":37,"floors":null,"rawP":550000000},{"d":"115동","n":27,"na":27,"rawR":0.997,"adjR":0.998,"adjP":558450580,"minF":2,"maxF":39,"floors":null,"rawP":548000000},{"d":"101동","n":25,"na":25,"rawR":0.983,"adjR":0.991,"adjP":554801887,"minF":3,"maxF":39,"floors":null,"rawP":541000000},{"d":"113동","n":25,"na":25,"rawR":0.995,"adjR":0.999,"adjP":559917372,"minF":2,"maxF":37,"floors":null,"rawP":548000000},{"d":"104동","n":22,"na":22,"rawR":1.019,"adjR":1.016,"adjP":568884660,"minF":1,"maxF":36,"floors":null,"rawP":561250000},{"d":"106동","n":22,"na":22,"rawR":1.047,"adjR":1.052,"adjP":589690796,"minF":1,"maxF":33,"floors":null,"rawP":577500000},{"d":"103동","n":22,"na":22,"rawR":0.995,"adjR":1.005,"adjP":561801921,"minF":4,"maxF":37,"floors":null,"rawP":547500000},{"d":"105동","n":21,"na":21,"rawR":1.023,"adjR":1.02,"adjP":571633297,"minF":1,"maxF":33,"floors":null,"rawP":564000000},{"d":"107동","n":20,"na":20,"rawR":0.986,"adjR":0.984,"adjP":658940654,"minF":4,"maxF":39,"floors":null,"rawP":650000000},{"d":"108동","n":19,"na":19,"rawR":1.031,"adjR":1.031,"adjP":691227797,"minF":6,"maxF":30,"floors":null,"rawP":680000000},{"d":"111동","n":17,"na":17,"rawR":1.026,"adjR":1.041,"adjP":698167185,"minF":6,"maxF":36,"floors":null,"rawP":677000000},{"d":"112동","n":16,"na":16,"rawR":0.97,"adjR":0.978,"adjP":655623626,"minF":3,"maxF":38,"floors":null,"rawP":640000000},{"d":"109동","n":15,"na":15,"rawR":1.0,"adjR":1.0,"adjP":670897568,"minF":2,"maxF":35,"floors":null,"rawP":660000000},{"d":"110동","n":11,"na":11,"rawR":0.985,"adjR":0.987,"adjP":662102774,"minF":2,"maxF":26,"floors":null,"rawP":650000000}],"floors":[{"fb":"1~2층","key":"1_1_2","n":9,"rawR":0.955,"adjR":0.952,"adjP":534883901},{"fb":"3~5층","key":"2_3_5","n":31,"rawR":0.956,"adjR":0.962,"adjP":553430883},{"fb":"6~10층","key":"3_6_10","n":54,"rawR":0.977,"adjR":0.987,"adjP":565276046},{"fb":"11~15층","key":"4_11_15","n":53,"rawR":1.005,"adjR":1.008,"adjP":587747538},{"fb":"16층~","key":"5_16up","n":207,"rawR":1.014,"adjR":1.013,"adjP":576235547}],"axes":{"school":{"score":100.0,"conf":0.55,"raw":"최근접 학교 252m · 인천송담초통학구역"},"transit":{"score":45.3,"conf":0.55,"raw":"최근접 송도달빛축제공원역 934m"},"infra":{"score":73.8,"conf":0.55,"raw":"마트 266m · 공원 379m · 병원 2871m"},"liquidity":{"score":100.0,"conf":0.7,"raw":"12개월 회전율 6.4% (거래 173건 / 2708세대)","capped":true},"attr":{"score":46.1,"conf":0.85,"raw":"같은 구·같은 면적대 중위 대비 ×1.144 (비교 단지 126곳)","clipped":false},"trend":{"score":20.8,"conf":0.85,"raw":"최근 12개월 -0.1% (직전 12개월 대비 · 표본 173/181건)","clipped":false}},"total":66.4,"coverage":100.0,"nAxes":6},{"id":7356,"name":"구월힐스테이트1단지","sido":"인천광역시","sgg":"남동구","built":2007,"hh":5076,"gc":"address","nogeom":false,"sggCode":"28200","band":"2_60_85","nr":112,"np":108,"mr":5993963,"mp":5842194,"pmed":3742497,"ncx":131,"n12":182,"schoolM":291,"subwayM":259,"subwayName":"석천사거리","martM":362,"parkM":92,"hospM":448,"sdZone":"인천석천초통학구역","schoolName":"인천상아초등학교","regionTrend":0.1,"regionRefComplete":true,"attrRaw":1.602,"attrAdj":1.601,"trendRaw":2.6,"trendExcess":2.1,"peerMed":3742497,"price":{"n":112,"area":83.87,"p10":464100000,"p25":481500000,"p50":495000000,"p75":515000000,"p90":529700000},"bfl":{"n":60,"minf":17,"maxf":37,"avgf":24.1},"refYm":"2026-06","adjCov":100.0,"dongs":[{"d":"(미상)","n":35,"na":35,"rawR":1.022,"adjR":1.024,"adjP":495000000,"minF":1,"maxF":29,"floors":null,"rawP":495000000},{"d":"1212","n":18,"na":18,"rawR":0.964,"adjR":0.968,"adjP":479836990,"minF":1,"maxF":22,"floors":23,"rawP":477500000},{"d":"1116","n":10,"na":10,"rawR":0.954,"adjR":0.955,"adjP":473148539,"minF":5,"maxF":20,"floors":23,"rawP":472500000},{"d":"1207","n":10,"na":10,"rawR":0.969,"adjR":0.967,"adjP":479280532,"minF":1,"maxF":21,"floors":23,"rawP":480000000},{"d":"1506","n":9,"na":9,"rawR":1.011,"adjR":1.012,"adjP":500548034,"minF":8,"maxF":36,"floors":37,"rawP":500000000},{"d":"1502","n":9,"na":9,"rawR":1.007,"adjR":1.004,"adjP":496539262,"minF":4,"maxF":31,"floors":35,"rawP":498000000},{"d":"1401","n":8,"na":8,"rawR":0.957,"adjR":0.958,"adjP":474359536,"minF":2,"maxF":20,"floors":23,"rawP":474000000},{"d":"1503","n":8,"na":8,"rawR":1.01,"adjR":1.013,"adjP":501495412,"minF":1,"maxF":26,"floors":34,"rawP":500000000},{"d":"1504","n":7,"na":7,"rawR":0.989,"adjR":0.992,"adjP":490361598,"minF":13,"maxF":37,"floors":37,"rawP":489000000},{"d":"1201","n":7,"na":7,"rawR":1.069,"adjR":1.064,"adjP":532806867,"minF":1,"maxF":21,"floors":23,"rawP":535000000},{"d":"1101","n":6,"na":6,"rawR":0.97,"adjR":0.974,"adjP":482279889,"minF":3,"maxF":23,"floors":23,"rawP":480000000},{"d":"1302","n":6,"na":6,"rawR":1.075,"adjR":1.078,"adjP":479089049,"minF":1,"maxF":23,"floors":28,"rawP":477500000},{"d":"1505","n":6,"na":6,"rawR":0.996,"adjR":0.993,"adjP":490863590,"minF":6,"maxF":35,"floors":35,"rawP":492500000},{"d":"1305","n":6,"na":6,"rawR":1.063,"adjR":1.063,"adjP":472239491,"minF":3,"maxF":24,"floors":28,"rawP":472500000},{"d":"1510","n":5,"na":5,"rawR":1.02,"adjR":1.016,"adjP":502929847,"minF":6,"maxF":21,"floors":23,"rawP":505000000},{"d":"1106","n":5,"na":5,"rawR":0.989,"adjR":0.987,"adjP":488996272,"minF":5,"maxF":18,"floors":23,"rawP":490000000},{"d":"1110","n":5,"na":5,"rawR":0.96,"adjR":0.963,"adjP":476906177,"minF":8,"maxF":17,"floors":23,"rawP":475000000},{"d":"1114","n":5,"na":5,"rawR":0.948,"adjR":0.954,"adjP":472630069,"minF":1,"maxF":18,"floors":23,"rawP":470000000},{"d":"1209","n":5,"na":5,"rawR":1.008,"adjR":1.006,"adjP":447082306,"minF":1,"maxF":20,"floors":24,"rawP":448000000},{"d":"1213","n":5,"na":5,"rawR":0.999,"adjR":0.996,"adjP":498533396,"minF":6,"maxF":19,"floors":24,"rawP":500000000},{"d":"1308","n":5,"na":5,"rawR":1.092,"adjR":1.092,"adjP":485212112,"minF":9,"maxF":28,"floors":28,"rawP":485000000},{"d":"1406","n":5,"na":5,"rawR":0.999,"adjR":1.003,"adjP":501831297,"minF":1,"maxF":18,"floors":26,"rawP":500000000},{"d":"1102","n":5,"na":5,"rawR":0.995,"adjR":0.989,"adjP":494886676,"minF":3,"maxF":14,"floors":23,"rawP":498000000},{"d":"1309","n":4,"na":4,"rawR":1.108,"adjR":1.11,"adjP":493276774,"minF":4,"maxF":18,"floors":20,"rawP":492500000},{"d":"1210","n":4,"na":4,"rawR":1.039,"adjR":1.038,"adjP":519626570,"minF":6,"maxF":23,"floors":23,"rawP":520000000},{"d":"1310","n":4,"na":4,"rawR":1.071,"adjR":1.075,"adjP":477579187,"minF":5,"maxF":13,"floors":20,"rawP":476000000},{"d":"1509","n":4,"na":4,"rawR":0.966,"adjR":0.965,"adjP":478132733,"minF":1,"maxF":19,"floors":25,"rawP":478500000},{"d":"1202","n":3,"na":3,"rawR":0.999,"adjR":1.005,"adjP":502933614,"minF":5,"maxF":10,"floors":23,"rawP":500000000},{"d":"1214","n":2,"na":2,"rawR":0.999,"adjR":1.005,"adjP":446492930,"minF":23,"maxF":23,"floors":23,"rawP":444000000},{"d":"1205","n":2,"na":2,"rawR":1.104,"adjR":1.106,"adjP":553866898,"minF":14,"maxF":17,"floors":24,"rawP":552500000},{"d":"1113","n":2,"na":2,"rawR":1.051,"adjR":1.051,"adjP":526228781,"minF":2,"maxF":9,"floors":23,"rawP":526000000},{"d":"1208","n":2,"na":2,"rawR":1.094,"adjR":1.09,"adjP":484393401,"minF":5,"maxF":23,"floors":23,"rawP":486250000},{"d":"1307","n":1,"na":1,"rawR":1.119,"adjR":1.12,"adjP":560613798,"minF":12,"maxF":12,"floors":19,"rawP":560000000},{"d":"1111","n":1,"na":1,"rawR":0.977,"adjR":0.972,"adjP":486738740,"minF":15,"maxF":15,"floors":25,"rawP":489000000},{"d":"1103","n":1,"na":1,"rawR":1.024,"adjR":1.03,"adjP":515367894,"minF":4,"maxF":4,"floors":24,"rawP":512500000}],"floors":[{"fb":"1~2층","key":"1_1_2","n":14,"rawR":0.919,"adjR":0.922,"adjP":447120857},{"fb":"3~5층","key":"2_3_5","n":26,"rawR":0.985,"adjR":0.991,"adjP":471161428},{"fb":"6~10층","key":"3_6_10","n":39,"rawR":1.01,"adjR":1.015,"adjP":492339791},{"fb":"11~15층","key":"4_11_15","n":49,"rawR":1.009,"adjR":1.005,"adjP":490361598},{"fb":"16층~","key":"5_16up","n":92,"rawR":1.004,"adjR":1.003,"adjP":492726490}],"axes":{"school":{"score":100.0,"conf":0.55,"raw":"최근접 학교 291m · 인천석천초통학구역"},"transit":{"score":99.3,"conf":0.55,"raw":"최근접 석천사거리역 259m"},"infra":{"score":100.0,"conf":0.55,"raw":"마트 362m · 공원 92m · 병원 448m"},"liquidity":{"score":71.7,"conf":0.7,"raw":"12개월 회전율 3.6% (거래 182건 / 5076세대)","capped":false},"attr":{"score":0.0,"conf":0.85,"raw":"같은 구·같은 면적대 중위 대비 ×1.601 (비교 단지 131곳)","clipped":true},"trend":{"score":31.6,"conf":0.85,"raw":"최근 12개월 +2.6% (직전 12개월 대비 · 표본 112/108건)","clipped":false}},"total":68.8,"coverage":100.0,"nAxes":6},{"id":8090,"name":"학마을한진","sido":"인천광역시","sgg":"계양구","built":1998,"hh":1500,"gc":"address","nogeom":false,"sggCode":"28245","band":"1_lt60","nr":96,"np":82,"mr":4319654,"mp":4308524,"pmed":3267974,"ncx":145,"n12":96,"schoolM":305,"subwayM":1396,"subwayName":"계산","martM":149,"parkM":36,"hospM":1201,"sdZone":"인천길주초통학구역","schoolName":"인천길주초등학교","regionTrend":-0.3,"regionRefComplete":true,"attrRaw":1.322,"attrAdj":1.323,"trendRaw":0.3,"trendExcess":0.9,"peerMed":3267974,"price":{"n":96,"area":49.77,"p10":189000000,"p25":205000000,"p50":215000000,"p75":235500000,"p90":271250000},"bfl":{"n":14,"minf":15,"maxf":15,"avgf":15.0},"refYm":"2026-06","adjCov":100.0,"dongs":[{"d":"144","n":20,"na":20,"rawR":1.0,"adjR":1.006,"adjP":215435554,"minF":2,"maxF":15,"floors":15,"rawP":215000000},{"d":"145","n":15,"na":15,"rawR":0.977,"adjR":0.991,"adjP":212174738,"minF":2,"maxF":15,"floors":15,"rawP":210000000},{"d":"138","n":15,"na":15,"rawR":1.006,"adjR":1.011,"adjP":173349860,"minF":1,"maxF":15,"floors":15,"rawP":173000000},{"d":"141","n":15,"na":15,"rawR":1.008,"adjR":1.009,"adjP":259262924,"minF":1,"maxF":15,"floors":15,"rawP":260000000},{"d":"140","n":13,"na":13,"rawR":1.047,"adjR":1.053,"adjP":270494170,"minF":6,"maxF":15,"floors":15,"rawP":270000000},{"d":"136","n":13,"na":13,"rawR":1.0,"adjR":1.001,"adjP":214391675,"minF":2,"maxF":13,"floors":15,"rawP":215000000},{"d":"139","n":13,"na":13,"rawR":0.958,"adjR":0.953,"adjP":244995457,"minF":1,"maxF":15,"floors":15,"rawP":247000000},{"d":"134","n":13,"na":13,"rawR":0.972,"adjR":0.978,"adjP":209422663,"minF":1,"maxF":15,"floors":15,"rawP":209000000},{"d":"(미상)","n":12,"na":12,"rawR":0.989,"adjR":0.997,"adjP":213556884,"minF":1,"maxF":15,"floors":null,"rawP":212500000},{"d":"133","n":12,"na":12,"rawR":0.986,"adjR":0.985,"adjP":210982709,"minF":2,"maxF":15,"floors":15,"rawP":212000000},{"d":"142","n":12,"na":12,"rawR":0.977,"adjR":0.991,"adjP":212173422,"minF":1,"maxF":15,"floors":15,"rawP":210000000},{"d":"135","n":8,"na":8,"rawR":1.056,"adjR":1.058,"adjP":226574728,"minF":4,"maxF":14,"floors":15,"rawP":227000000},{"d":"132","n":8,"na":8,"rawR":0.997,"adjR":0.991,"adjP":212265343,"minF":2,"maxF":14,"floors":15,"rawP":214250000},{"d":"137","n":5,"na":5,"rawR":0.947,"adjR":0.952,"adjP":163189427,"minF":3,"maxF":13,"floors":15,"rawP":163000000},{"d":"143","n":4,"na":4,"rawR":0.995,"adjR":0.998,"adjP":213794032,"minF":2,"maxF":15,"floors":15,"rawP":213750000}],"floors":[{"fb":"1~2층","key":"1_1_2","n":17,"rawR":0.889,"adjR":0.892,"adjP":190319509},{"fb":"3~5층","key":"2_3_5","n":40,"rawR":0.972,"adjR":0.979,"adjP":209910413},{"fb":"6~10층","key":"3_6_10","n":54,"rawR":1.014,"adjR":1.025,"adjP":220205486},{"fb":"11~15층","key":"4_11_15","n":67,"rawR":1.006,"adjR":1.006,"adjP":220449157}],"axes":{"school":{"score":99.6,"conf":0.55,"raw":"최근접 학교 305m · 인천길주초통학구역"},"transit":{"score":8.3,"conf":0.55,"raw":"최근접 계산역 1.4km"},"infra":{"score":95.8,"conf":0.55,"raw":"마트 149m · 공원 36m · 병원 1201m"},"liquidity":{"score":100.0,"conf":0.7,"raw":"12개월 회전율 6.4% (거래 96건 / 1500세대)","capped":true},"attr":{"score":21.0,"conf":0.85,"raw":"같은 구·같은 면적대 중위 대비 ×1.323 (비교 단지 145곳)","clipped":false},"trend":{"score":22.4,"conf":0.85,"raw":"최근 12개월 +0.3% (직전 12개월 대비 · 표본 96/82건)","clipped":false}},"total":57.4,"coverage":100.0,"nAxes":6},{"id":8308,"name":"루원시티SKLeaders'VIEW","sido":"인천광역시","sgg":"서해구","built":null,"hh":null,"gc":null,"nogeom":true,"sggCode":"28275","band":"2_60_85","nr":116,"np":120,"mr":8528738,"mp":8628709,"pmed":3708069,"ncx":110,"n12":117,"regionTrend":0.2,"regionRefComplete":true,"attrRaw":2.3,"attrAdj":2.309,"trendRaw":-1.2,"trendExcess":-0.8,"peerMed":3708069,"price":{"n":116,"area":84.83,"p10":664000000,"p25":690000000,"p50":720000000,"p75":740000000,"p90":767500000},"refYm":"2026-06","adjCov":100.0,"dongs":[{"d":"102동","n":31,"na":31,"rawR":0.986,"adjR":0.989,"adjP":724586224,"minF":1,"maxF":45,"floors":null,"rawP":720000000},{"d":"104동","n":26,"na":26,"rawR":1.001,"adjR":1.002,"adjP":733378103,"minF":1,"maxF":40,"floors":null,"rawP":730000000},{"d":"111동","n":25,"na":25,"rawR":0.986,"adjR":0.983,"adjP":720421848,"minF":2,"maxF":43,"floors":null,"rawP":719000000},{"d":"109동","n":23,"na":23,"rawR":1.009,"adjR":1.011,"adjP":741994087,"minF":4,"maxF":38,"floors":null,"rawP":735000000},{"d":"105동","n":22,"na":22,"rawR":1.001,"adjR":1.007,"adjP":737007452,"minF":6,"maxF":40,"floors":null,"rawP":730000000},{"d":"103동","n":19,"na":19,"rawR":0.993,"adjR":0.997,"adjP":728611291,"minF":4,"maxF":41,"floors":null,"rawP":725000000},{"d":"101동","n":18,"na":18,"rawR":0.987,"adjR":0.989,"adjP":724992388,"minF":6,"maxF":38,"floors":null,"rawP":719500000},{"d":"106동","n":17,"na":17,"rawR":1.0,"adjR":1.002,"adjP":734493596,"minF":5,"maxF":37,"floors":null,"rawP":730000000},{"d":"107동","n":16,"na":16,"rawR":1.026,"adjR":1.024,"adjP":681469169,"minF":2,"maxF":45,"floors":null,"rawP":677500000},{"d":"(미상)","n":15,"na":15,"rawR":1.0,"adjR":0.997,"adjP":715585399,"minF":3,"maxF":43,"floors":null,"rawP":715000000},{"d":"110동","n":13,"na":13,"rawR":0.965,"adjR":0.966,"adjP":707664153,"minF":2,"maxF":45,"floors":null,"rawP":704500000},{"d":"108동","n":11,"na":11,"rawR":1.034,"adjR":1.04,"adjP":750504355,"minF":3,"maxF":43,"floors":null,"rawP":750000000}],"floors":[{"fb":"1~2층","key":"1_1_2","n":6,"rawR":0.956,"adjR":0.959,"adjP":694842627},{"fb":"3~5층","key":"2_3_5","n":13,"rawR":0.965,"adjR":0.966,"adjP":706661739},{"fb":"6~10층","key":"3_6_10","n":31,"rawR":0.979,"adjR":0.977,"adjP":716176863},{"fb":"11~15층","key":"4_11_15","n":29,"rawR":0.993,"adjR":0.994,"adjP":724586224},{"fb":"16층~","key":"5_16up","n":157,"rawR":1.007,"adjR":1.01,"adjP":734649922}],"axes":{"school":{"score":null,"conf":0,"miss":"단지 좌표가 없어 거리를 계산할 수 없습니다. '입지가 나쁘다'가 아니라 '측정 자체가 불가'입니다 — 주소 지오코딩 실패분입니다."},"transit":{"score":null,"conf":0,"miss":"단지 좌표가 없어 거리를 계산할 수 없습니다. '입지가 나쁘다'가 아니라 '측정 자체가 불가'입니다 — 주소 지오코딩 실패분입니다."},"infra":{"score":null,"conf":0,"miss":"단지 좌표가 없어 거리를 계산할 수 없습니다. '입지가 나쁘다'가 아니라 '측정 자체가 불가'입니다 — 주소 지오코딩 실패분입니다."},"liquidity":{"score":null,"conf":0,"miss":"단지 세대수를 알 수 없어 거래회전율을 계산할 수 없습니다(전 DB 2,666단지 16.2%가 동일)."},"attr":{"score":0.0,"conf":0.85,"raw":"같은 구·같은 면적대 중위 대비 ×2.309 (비교 단지 110곳)","clipped":true},"trend":{"score":16.4,"conf":0.85,"raw":"최근 12개월 -1.2% (직전 12개월 대비 · 표본 116/120건)","clipped":false}},"total":5.5,"coverage":30.0,"nAxes":2},{"id":8637,"name":"강화서희스타힐스1단지","sido":"인천광역시","sgg":"강화군","built":2024,"hh":1040,"gc":"address","nogeom":false,"sggCode":"28710","band":"2_60_85","nr":23,"np":36,"mr":4166956,"mp":4120095,"pmed":1971914,"ncx":12,"n12":48,"schoolM":1626,"subwayM":14937,"subwayName":"양촌","martM":197,"parkM":371,"hospM":792,"sdZone":"선원초공동(일방)통학구역","schoolName":"합일초등학교","regionTrend":null,"regionRefComplete":null,"attrRaw":2.113,"attrAdj":null,"trendRaw":1.1,"trendExcess":null,"peerMed":1971914,"price":{"n":23,"area":84.95,"p10":290000000,"p25":300000000,"p50":337000000,"p75":356500000,"p90":379600000},"refYm":null,"adjCov":0.0,"dongs":[{"d":"104동","n":15,"na":0,"rawR":0.992,"adjR":null,"adjP":null,"minF":3,"maxF":23,"floors":null,"rawP":330000000},{"d":"101동","n":9,"na":0,"rawR":0.992,"adjR":null,"adjP":null,"minF":5,"maxF":22,"floors":null,"rawP":340000000},{"d":"107동","n":8,"na":0,"rawR":0.993,"adjR":null,"adjP":null,"minF":2,"maxF":22,"floors":null,"rawP":350500000},{"d":"117동","n":7,"na":0,"rawR":1.036,"adjR":null,"adjP":null,"minF":4,"maxF":14,"floors":null,"rawP":341000000},{"d":"108동","n":6,"na":0,"rawR":0.997,"adjR":null,"adjP":null,"minF":4,"maxF":15,"floors":null,"rawP":298250000},{"d":"102동","n":5,"na":0,"rawR":0.986,"adjR":null,"adjP":null,"minF":3,"maxF":21,"floors":null,"rawP":295000000},{"d":"115동","n":4,"na":0,"rawR":1.019,"adjR":null,"adjP":null,"minF":4,"maxF":23,"floors":null,"rawP":305000000},{"d":"103동","n":2,"na":0,"rawR":0.964,"adjR":null,"adjP":null,"minF":3,"maxF":4,"floors":null,"rawP":288500000},{"d":"116동","n":2,"na":0,"rawR":1.086,"adjR":null,"adjP":null,"minF":9,"maxF":12,"floors":null,"rawP":325000000},{"d":"(미상)","n":1,"na":0,"rawR":1.048,"adjR":null,"adjP":null,"minF":22,"maxF":22,"floors":null,"rawP":370000000}],"floors":[{"fb":"1~2층","key":"1_1_2","n":1,"rawR":0.85,"adjR":null,"adjP":null},{"fb":"3~5층","key":"2_3_5","n":11,"rawR":0.966,"adjR":null,"adjP":null},{"fb":"6~10층","key":"3_6_10","n":17,"rawR":1.003,"adjR":null,"adjP":null},{"fb":"11~15층","key":"4_11_15","n":14,"rawR":1.002,"adjR":null,"adjP":null},{"fb":"16층~","key":"5_16up","n":16,"rawR":1.016,"adjR":null,"adjP":null}],"axes":{"school":{"score":0.0,"conf":0.55,"raw":"최근접 학교 1626m · 선원초공동(일방)통학구역"},"transit":{"score":0.0,"conf":0.55,"raw":"최근접 양촌역 14.9km"},"infra":{"score":95.6,"conf":0.55,"raw":"마트 197m · 공원 371m · 병원 792m"},"liquidity":{"score":92.3,"conf":0.7,"raw":"12개월 회전율 4.6% (거래 48건 / 1040세대)","capped":false},"attr":{"score":0.0,"conf":0.55,"raw":"같은 구·같은 면적대 중위 대비 ×2.113 (비교 단지 12곳)","clipped":true},"trend":{"score":25.6,"conf":0.85,"raw":"최근 12개월 +1.1% (직전 12개월 대비 · 표본 23/36건)","clipped":false}},"total":30.7,"coverage":100.0,"nAxes":6},{"id":9124,"name":"황골마을주공1","sido":"경기도","sgg":"수원시 영통구","built":1997,"hh":3129,"gc":"address","nogeom":false,"sggCode":"41117","band":"1_lt60","nr":274,"np":209,"mr":7617248,"mp":6951159,"pmed":7306279,"ncx":61,"n12":274,"schoolM":153,"subwayM":275,"subwayName":"청명","martM":276,"parkM":153,"hospM":225,"sdZone":"황곡초통학구역","schoolName":"청명중학교","regionTrend":13.0,"regionRefComplete":true,"attrRaw":1.043,"attrAdj":1.027,"trendRaw":9.6,"trendExcess":3.0,"peerMed":7306279,"price":{"n":274,"area":59.99,"p10":384000000,"p25":410000000,"p50":450000000,"p75":482750000,"p90":520000000},"bfl":{"n":39,"minf":15,"maxf":20,"avgf":18.8},"refYm":"2026-06","adjCov":100.0,"dongs":[{"d":"(미상)","n":61,"na":61,"rawR":1.157,"adjR":1.079,"adjP":522048271,"minF":1,"maxF":19,"floors":null,"rawP":500000000},{"d":"133","n":20,"na":20,"rawR":0.946,"adjR":0.963,"adjP":456640912,"minF":2,"maxF":20,"floors":20,"rawP":409500000},{"d":"140","n":19,"na":19,"rawR":0.985,"adjR":0.985,"adjP":479428998,"minF":3,"maxF":17,"floors":18,"rawP":430000000},{"d":"149","n":17,"na":17,"rawR":1.036,"adjR":1.028,"adjP":447469946,"minF":1,"maxF":20,"floors":20,"rawP":420000000},{"d":"130","n":17,"na":17,"rawR":0.959,"adjR":0.985,"adjP":479593003,"minF":2,"maxF":20,"floors":20,"rawP":415000000},{"d":"136","n":16,"na":16,"rawR":1.034,"adjR":1.015,"adjP":488759076,"minF":1,"maxF":20,"floors":20,"rawP":450000000},{"d":"152","n":15,"na":15,"rawR":1.02,"adjR":1.044,"adjP":426916827,"minF":2,"maxF":19,"floors":20,"rawP":390000000},{"d":"143","n":14,"na":14,"rawR":1.01,"adjR":0.99,"adjP":440159801,"minF":2,"maxF":19,"floors":20,"rawP":413000000},{"d":"155","n":14,"na":14,"rawR":1.037,"adjR":1.035,"adjP":481970187,"minF":3,"maxF":20,"floors":20,"rawP":427500000},{"d":"137","n":13,"na":13,"rawR":1.02,"adjR":1.03,"adjP":501594887,"minF":2,"maxF":20,"floors":20,"rawP":445000000},{"d":"125","n":13,"na":13,"rawR":0.974,"adjR":0.987,"adjP":480540864,"minF":1,"maxF":20,"floors":20,"rawP":425000000},{"d":"151","n":13,"na":13,"rawR":1.031,"adjR":1.031,"adjP":501728021,"minF":2,"maxF":20,"floors":20,"rawP":450000000},{"d":"131","n":12,"na":12,"rawR":0.957,"adjR":0.981,"adjP":477428824,"minF":3,"maxF":20,"floors":20,"rawP":417500000},{"d":"141","n":12,"na":12,"rawR":0.968,"adjR":0.957,"adjP":465738094,"minF":1,"maxF":18,"floors":18,"rawP":422500000},{"d":"123","n":11,"na":11,"rawR":0.962,"adjR":0.992,"adjP":482639079,"minF":1,"maxF":18,"floors":18,"rawP":420000000},{"d":"126","n":11,"na":11,"rawR":0.913,"adjR":0.936,"adjP":455462367,"minF":2,"maxF":16,"floors":18,"rawP":398000000},{"d":"146","n":11,"na":11,"rawR":0.931,"adjR":0.959,"adjP":428141245,"minF":2,"maxF":20,"floors":20,"rawP":384000000},{"d":"150","n":10,"na":10,"rawR":1.005,"adjR":1.003,"adjP":475842467,"minF":3,"maxF":16,"floors":18,"rawP":414250000},{"d":"132","n":10,"na":10,"rawR":0.924,"adjR":0.949,"adjP":462046069,"minF":2,"maxF":20,"floors":20,"rawP":403000000},{"d":"144","n":10,"na":10,"rawR":0.974,"adjR":1.001,"adjP":487113041,"minF":2,"maxF":19,"floors":20,"rawP":425000000},{"d":"138","n":10,"na":10,"rawR":0.965,"adjR":0.993,"adjP":436388622,"minF":2,"maxF":16,"floors":18,"rawP":400000000},{"d":"159","n":10,"na":10,"rawR":0.989,"adjR":1.011,"adjP":490393205,"minF":3,"maxF":15,"floors":15,"rawP":430000000},{"d":"129","n":10,"na":10,"rawR":0.952,"adjR":0.959,"adjP":466650814,"minF":3,"maxF":18,"floors":20,"rawP":415500000},{"d":"128","n":10,"na":10,"rawR":0.983,"adjR":1.005,"adjP":489326854,"minF":5,"maxF":19,"floors":20,"rawP":429000000},{"d":"122","n":10,"na":10,"rawR":0.977,"adjR":1.007,"adjP":490336254,"minF":2,"maxF":20,"floors":20,"rawP":426500000},{"d":"127","n":9,"na":9,"rawR":0.967,"adjR":0.976,"adjP":431312490,"minF":4,"maxF":18,"floors":18,"rawP":383000000},{"d":"156","n":9,"na":9,"rawR":1.077,"adjR":1.076,"adjP":464366247,"minF":1,"maxF":18,"floors":18,"rawP":427000000},{"d":"135","n":9,"na":9,"rawR":0.951,"adjR":0.999,"adjP":486029986,"minF":2,"maxF":20,"floors":20,"rawP":415000000},{"d":"157","n":9,"na":9,"rawR":0.977,"adjR":0.975,"adjP":449697020,"minF":4,"maxF":13,"floors":15,"rawP":390000000},{"d":"142","n":9,"na":9,"rawR":0.99,"adjR":1.016,"adjP":494760026,"minF":3,"maxF":17,"floors":18,"rawP":432000000},{"d":"147","n":9,"na":9,"rawR":0.953,"adjR":0.98,"adjP":468815489,"minF":3,"maxF":18,"floors":18,"rawP":415000000},{"d":"148","n":8,"na":8,"rawR":1.023,"adjR":1.047,"adjP":429768453,"minF":3,"maxF":18,"floors":18,"rawP":386000000},{"d":"139","n":8,"na":8,"rawR":0.937,"adjR":0.949,"adjP":462165849,"minF":1,"maxF":16,"floors":18,"rawP":409000000},{"d":"145","n":8,"na":8,"rawR":1.06,"adjR":1.081,"adjP":526023117,"minF":6,"maxF":19,"floors":20,"rawP":462500000},{"d":"154","n":8,"na":8,"rawR":1.031,"adjR":1.032,"adjP":502232005,"minF":2,"maxF":13,"floors":20,"rawP":450000000},{"d":"134","n":7,"na":7,"rawR":0.985,"adjR":0.998,"adjP":485760628,"minF":4,"maxF":15,"floors":20,"rawP":430000000},{"d":"158","n":7,"na":7,"rawR":0.92,"adjR":0.948,"adjP":460074644,"minF":1,"maxF":15,"floors":15,"rawP":400000000},{"d":"124","n":5,"na":5,"rawR":0.997,"adjR":0.99,"adjP":481649753,"minF":10,"maxF":16,"floors":18,"rawP":435000000},{"d":"121","n":5,"na":5,"rawR":1.105,"adjR":1.056,"adjP":494666722,"minF":4,"maxF":16,"floors":18,"rawP":429000000},{"d":"153","n":4,"na":4,"rawR":1.031,"adjR":1.017,"adjP":495273710,"minF":2,"maxF":14,"floors":18,"rawP":450000000}],"floors":[{"fb":"1~2층","key":"1_1_2","n":40,"rawR":0.934,"adjR":0.911,"adjP":436019705},{"fb":"3~5층","key":"2_3_5","n":80,"rawR":0.982,"adjR":0.974,"adjP":463077873},{"fb":"6~10층","key":"3_6_10","n":116,"rawR":0.997,"adjR":1.005,"adjP":483913674},{"fb":"11~15층","key":"4_11_15","n":138,"rawR":1.02,"adjR":1.027,"adjP":490103318},{"fb":"16층~","key":"5_16up","n":109,"rawR":1.014,"adjR":1.012,"adjP":470337535}],"axes":{"school":{"score":100.0,"conf":0.55,"raw":"최근접 학교 153m · 황곡초통학구역"},"transit":{"score":98.0,"conf":0.55,"raw":"최근접 청명역 275m"},"infra":{"score":100.0,"conf":0.55,"raw":"마트 276m · 공원 153m · 병원 225m"},"liquidity":{"score":100.0,"conf":0.7,"raw":"12개월 회전율 8.8% (거래 274건 / 3129세대)","capped":true},"attr":{"score":62.6,"conf":0.85,"raw":"같은 구·같은 면적대 중위 대비 ×1.027 (비교 단지 61곳)","clipped":false},"trend":{"score":59.6,"conf":0.85,"raw":"최근 12개월 +9.6% (직전 12개월 대비 · 표본 274/209건)","clipped":false}},"total":88.1,"coverage":100.0,"nAxes":6},{"id":9269,"name":"산성역포레스티아","sido":"경기도","sgg":"성남시 수정구","built":2020,"hh":4089,"gc":"address","nogeom":false,"sggCode":"41131","band":"2_60_85","nr":236,"np":171,"mr":17465166,"mp":15270739,"pmed":8422270,"ncx":66,"n12":291,"schoolM":417,"subwayM":495,"subwayName":"산성","martM":1096,"parkM":565,"hospM":1157,"sdZone":"성남신흥초통학구역","schoolName":"성남신흥초등학교","regionTrend":18.6,"regionRefComplete":false,"attrRaw":2.074,"attrAdj":2.146,"trendRaw":14.4,"trendExcess":7.0,"peerMed":8422270,"price":{"n":236,"area":74.98,"p10":1180000000,"p25":1250000000,"p50":1350000000,"p75":1457750000,"p90":1512500000},"bfl":{"n":39,"minf":3,"maxf":28,"avgf":22.9},"refYm":"2026-05","adjCov":95.6,"dongs":[{"d":"(미상)","n":58,"na":58,"rawR":1.193,"adjR":1.058,"adjP":1449000000,"minF":1,"maxF":27,"floors":null,"rawP":1472500000},{"d":"103","n":25,"na":24,"rawR":1.013,"adjR":1.009,"adjP":1362202976,"minF":3,"maxF":27,"floors":28,"rawP":1230000000},{"d":"104","n":17,"na":16,"rawR":0.971,"adjR":0.997,"adjP":1350768508,"minF":1,"maxF":23,"floors":27,"rawP":1185000000},{"d":"134","n":16,"na":16,"rawR":1.019,"adjR":1.017,"adjP":1416000717,"minF":5,"maxF":25,"floors":26,"rawP":1300000000},{"d":"113","n":15,"na":15,"rawR":0.966,"adjR":0.963,"adjP":1394334466,"minF":2,"maxF":26,"floors":28,"rawP":1250000000},{"d":"125","n":14,"na":14,"rawR":0.988,"adjR":0.98,"adjP":1481849912,"minF":3,"maxF":24,"floors":25,"rawP":1365000000},{"d":"133","n":14,"na":14,"rawR":0.977,"adjR":0.998,"adjP":1359985905,"minF":2,"maxF":26,"floors":27,"rawP":1197500000},{"d":"123","n":14,"na":14,"rawR":0.945,"adjR":0.968,"adjP":1441526487,"minF":2,"maxF":23,"floors":26,"rawP":1255000000},{"d":"122","n":13,"na":12,"rawR":0.984,"adjR":0.994,"adjP":1376238548,"minF":7,"maxF":24,"floors":25,"rawP":1250000000},{"d":"127","n":12,"na":10,"rawR":0.941,"adjR":0.968,"adjP":1311540687,"minF":1,"maxF":23,"floors":26,"rawP":1147500000},{"d":"110","n":12,"na":11,"rawR":0.943,"adjR":0.962,"adjP":1303324658,"minF":1,"maxF":25,"floors":28,"rawP":1150000000},{"d":"131","n":12,"na":12,"rawR":0.943,"adjR":0.99,"adjP":1341576411,"minF":3,"maxF":24,"floors":24,"rawP":1150000000},{"d":"114","n":12,"na":12,"rawR":1.038,"adjR":1.005,"adjP":1393350502,"minF":6,"maxF":21,"floors":25,"rawP":1242500000},{"d":"121","n":11,"na":10,"rawR":1.008,"adjR":0.986,"adjP":1325957411,"minF":1,"maxF":18,"floors":23,"rawP":1150000000},{"d":"105","n":11,"na":9,"rawR":0.934,"adjR":0.968,"adjP":1312470796,"minF":3,"maxF":26,"floors":28,"rawP":1140000000},{"d":"117","n":11,"na":11,"rawR":0.939,"adjR":0.973,"adjP":1401003191,"minF":3,"maxF":23,"floors":24,"rawP":1235000000},{"d":"124","n":11,"na":10,"rawR":0.959,"adjR":0.976,"adjP":1434661987,"minF":4,"maxF":25,"floors":26,"rawP":1250000000},{"d":"108","n":11,"na":11,"rawR":0.967,"adjR":0.984,"adjP":1333221080,"minF":2,"maxF":16,"floors":26,"rawP":1180000000},{"d":"109","n":11,"na":11,"rawR":0.992,"adjR":0.967,"adjP":1389713498,"minF":2,"maxF":24,"floors":24,"rawP":1217000000},{"d":"126","n":10,"na":9,"rawR":1.057,"adjR":1.046,"adjP":1443127167,"minF":7,"maxF":28,"floors":28,"rawP":1290000000},{"d":"115","n":10,"na":9,"rawR":0.981,"adjR":0.985,"adjP":1334621365,"minF":4,"maxF":20,"floors":24,"rawP":1192500000},{"d":"119","n":9,"na":8,"rawR":0.939,"adjR":0.98,"adjP":1335177597,"minF":3,"maxF":21,"floors":24,"rawP":1145000000},{"d":"118","n":9,"na":9,"rawR":0.958,"adjR":0.971,"adjP":1468237194,"minF":4,"maxF":24,"floors":24,"rawP":1319000000},{"d":"128","n":9,"na":9,"rawR":1.014,"adjR":1.051,"adjP":1288850701,"minF":2,"maxF":23,"floors":26,"rawP":1120000000},{"d":"112","n":9,"na":8,"rawR":1.01,"adjR":0.981,"adjP":1382398736,"minF":6,"maxF":27,"floors":28,"rawP":1250000000},{"d":"135","n":8,"na":8,"rawR":1.032,"adjR":1.048,"adjP":1284888455,"minF":4,"maxF":21,"floors":23,"rawP":1139000000},{"d":"130","n":8,"na":7,"rawR":0.963,"adjR":0.987,"adjP":1337636120,"minF":4,"maxF":25,"floors":25,"rawP":1175000000},{"d":"116","n":7,"na":6,"rawR":0.977,"adjR":0.985,"adjP":1378988825,"minF":3,"maxF":23,"floors":26,"rawP":1247000000},{"d":"136","n":6,"na":5,"rawR":0.963,"adjR":0.999,"adjP":1354931932,"minF":3,"maxF":25,"floors":28,"rawP":1174500000},{"d":"129","n":5,"na":5,"rawR":1.007,"adjR":1.028,"adjP":1261470079,"minF":3,"maxF":19,"floors":20,"rawP":1112000000},{"d":"107","n":5,"na":5,"rawR":0.959,"adjR":0.975,"adjP":1321922596,"minF":6,"maxF":19,"floors":23,"rawP":1170000000},{"d":"106","n":5,"na":5,"rawR":1.087,"adjR":1.062,"adjP":1302069624,"minF":2,"maxF":18,"floors":20,"rawP":1200000000},{"d":"111","n":3,"na":3,"rawR":1.025,"adjR":1.009,"adjP":1367173106,"minF":6,"maxF":22,"floors":28,"rawP":1250000000},{"d":"120","n":2,"na":2,"rawR":1.064,"adjR":1.039,"adjP":1274943174,"minF":1,"maxF":8,"floors":18,"rawP":1175000000},{"d":"137","n":1,"na":0,"rawR":1.015,"adjR":null,"adjP":null,"minF":1,"maxF":1,"floors":3,"rawP":1400000000},{"d":"139","n":1,"na":1,"rawR":1.073,"adjR":1.096,"adjP":1678934998,"minF":1,"maxF":1,"floors":3,"rawP":1480000000}],"floors":[{"fb":"1~2층","key":"1_1_2","n":21,"rawR":0.967,"adjR":0.949,"adjP":1283749021},{"fb":"3~5층","key":"2_3_5","n":51,"rawR":0.977,"adjR":0.974,"adjP":1334621365},{"fb":"6~10층","key":"3_6_10","n":89,"rawR":0.992,"adjR":1.001,"adjP":1375138437},{"fb":"11~15층","key":"4_11_15","n":82,"rawR":1.021,"adjR":1.008,"adjP":1418019424},{"fb":"16층~","key":"5_16up","n":164,"rawR":1.013,"adjR":1.005,"adjP":1386968510}],"axes":{"school":{"score":90.2,"conf":0.55,"raw":"최근접 학교 417m · 성남신흥초통학구역"},"transit":{"score":80.4,"conf":0.55,"raw":"최근접 산성역 495m"},"infra":{"score":72.4,"conf":0.55,"raw":"마트 1096m · 공원 565m · 병원 1157m"},"liquidity":{"score":100.0,"conf":0.7,"raw":"12개월 회전율 7.1% (거래 291건 / 4089세대)","capped":true},"attr":{"score":0.0,"conf":0.85,"raw":"같은 구·같은 면적대 중위 대비 ×2.146 (비교 단지 66곳)","clipped":true},"trend":{"score":78.8,"conf":0.85,"raw":"최근 12개월 +14.4% (직전 12개월 대비 · 표본 236/171건)","clipped":false}},"total":67.9,"coverage":100.0,"nAxes":6},{"id":10472,"name":"주공","sido":"경기도","sgg":"부천시 소사구","built":null,"hh":null,"gc":null,"nogeom":true,"sggCode":"41194","band":"1_lt60","nr":81,"np":95,"mr":5159959,"mp":5245958,"pmed":5182009,"ncx":109,"n12":81,"regionTrend":1.2,"regionRefComplete":true,"attrRaw":0.996,"attrAdj":1.003,"trendRaw":-1.6,"trendExcess":-0.2,"peerMed":5182009,"price":{"n":81,"area":58.14,"p10":219000000,"p25":268000000,"p50":295000000,"p75":310000000,"p90":420000000},"refYm":"2026-06","adjCov":100.0,"dongs":[{"d":"101","n":22,"na":22,"rawR":1.055,"adjR":1.047,"adjP":207310014,"minF":1,"maxF":14,"floors":null,"rawP":205000000},{"d":"106","n":15,"na":15,"rawR":0.967,"adjR":0.961,"adjP":293744975,"minF":2,"maxF":15,"floors":null,"rawP":290000000},{"d":"302","n":15,"na":15,"rawR":1.395,"adjR":1.389,"adjP":434138943,"minF":4,"maxF":19,"floors":null,"rawP":428000000},{"d":"(미상)","n":14,"na":14,"rawR":1.014,"adjR":1.0,"adjP":299614827,"minF":2,"maxF":20,"floors":null,"rawP":299000000},{"d":"104","n":12,"na":12,"rawR":0.988,"adjR":0.984,"adjP":300793657,"minF":2,"maxF":12,"floors":null,"rawP":296500000},{"d":"102","n":12,"na":12,"rawR":0.978,"adjR":0.975,"adjP":298040726,"minF":1,"maxF":15,"floors":null,"rawP":293500000},{"d":"303","n":11,"na":11,"rawR":1.359,"adjR":1.349,"adjP":421801374,"minF":1,"maxF":20,"floors":null,"rawP":417000000},{"d":"107","n":10,"na":10,"rawR":0.975,"adjR":0.972,"adjP":297189902,"minF":1,"maxF":14,"floors":null,"rawP":292500000},{"d":"113","n":10,"na":10,"rawR":0.967,"adjR":0.959,"adjP":293117890,"minF":3,"maxF":15,"floors":null,"rawP":290000000},{"d":"108","n":8,"na":8,"rawR":0.963,"adjR":0.956,"adjP":292154949,"minF":2,"maxF":12,"floors":null,"rawP":289000000},{"d":"103","n":8,"na":8,"rawR":1.008,"adjR":1.001,"adjP":306052261,"minF":1,"maxF":14,"floors":null,"rawP":302500000},{"d":"110","n":7,"na":7,"rawR":0.96,"adjR":0.952,"adjP":291081591,"minF":2,"maxF":13,"floors":null,"rawP":288000000},{"d":"105","n":7,"na":7,"rawR":0.94,"adjR":0.939,"adjP":286956156,"minF":5,"maxF":15,"floors":null,"rawP":282000000},{"d":"112","n":6,"na":6,"rawR":0.983,"adjR":0.974,"adjP":297849064,"minF":1,"maxF":10,"floors":null,"rawP":295000000},{"d":"109","n":6,"na":6,"rawR":0.933,"adjR":0.925,"adjP":282834510,"minF":1,"maxF":5,"floors":null,"rawP":280000000},{"d":"301","n":5,"na":5,"rawR":1.32,"adjR":1.296,"adjP":404977301,"minF":3,"maxF":15,"floors":null,"rawP":405000000},{"d":"304","n":3,"na":3,"rawR":1.353,"adjR":1.342,"adjP":419440488,"minF":1,"maxF":12,"floors":null,"rawP":415000000},{"d":"111","n":3,"na":3,"rawR":0.933,"adjR":0.926,"adjP":282995992,"minF":4,"maxF":7,"floors":null,"rawP":280000000},{"d":"114","n":2,"na":2,"rawR":1.008,"adjR":1.002,"adjP":306313593,"minF":5,"maxF":11,"floors":null,"rawP":302500000}],"floors":[{"fb":"1~2층","key":"1_1_2","n":23,"rawR":0.967,"adjR":0.956,"adjP":274745255},{"fb":"3~5층","key":"2_3_5","n":40,"rawR":1.0,"adjR":0.994,"adjP":294566741},{"fb":"6~10층","key":"3_6_10","n":59,"rawR":1.0,"adjR":0.998,"adjP":298149481},{"fb":"11~15층","key":"4_11_15","n":46,"rawR":1.023,"adjR":1.009,"adjP":304310954},{"fb":"16층~","key":"5_16up","n":8,"rawR":1.377,"adjR":1.352,"adjP":422488090}],"axes":{"school":{"score":null,"conf":0,"miss":"단지 좌표가 없어 거리를 계산할 수 없습니다. '입지가 나쁘다'가 아니라 '측정 자체가 불가'입니다 — 주소 지오코딩 실패분입니다."},"transit":{"score":null,"conf":0,"miss":"단지 좌표가 없어 거리를 계산할 수 없습니다. '입지가 나쁘다'가 아니라 '측정 자체가 불가'입니다 — 주소 지오코딩 실패분입니다."},"infra":{"score":null,"conf":0,"miss":"단지 좌표가 없어 거리를 계산할 수 없습니다. '입지가 나쁘다'가 아니라 '측정 자체가 불가'입니다 — 주소 지오코딩 실패분입니다."},"liquidity":{"score":null,"conf":0,"miss":"단지 세대수를 알 수 없어 거래회전율을 계산할 수 없습니다(전 DB 2,666단지 16.2%가 동일)."},"attr":{"score":66.0,"conf":0.85,"raw":"같은 구·같은 면적대 중위 대비 ×1.003 (비교 단지 109곳)","clipped":false},"trend":{"score":14.8,"conf":0.85,"raw":"최근 12개월 -1.6% (직전 12개월 대비 · 표본 81/95건)","clipped":false}},"total":48.9,"coverage":30.0,"nAxes":2},{"id":10900,"name":"주공1","sido":"경기도","sgg":"광명시","built":1989,"hh":1980,"gc":"address","nogeom":false,"sggCode":"41210","band":"1_lt60","nr":244,"np":79,"mr":11476770,"mp":8610332,"pmed":10010010,"ncx":71,"n12":244,"schoolM":211,"subwayM":1341,"subwayName":"철산","martM":584,"parkM":221,"hospM":334,"sdZone":"하일초통학구역","schoolName":"하안초등학교","regionTrend":22.7,"regionRefComplete":false,"attrRaw":1.147,"attrAdj":1.064,"trendRaw":33.3,"trendExcess":14.9,"peerMed":10010010,"price":{"n":244,"area":41.3,"p10":360000000,"p25":410000000,"p50":480000000,"p75":561250000,"p90":600000000},"bfl":{"n":13,"minf":15,"maxf":15,"avgf":15.0},"refYm":"2026-05","adjCov":100.0,"dongs":[{"d":"104","n":38,"na":38,"rawR":0.972,"adjR":0.98,"adjP":409427314,"minF":1,"maxF":15,"floors":15,"rawP":380000000},{"d":"105","n":33,"na":33,"rawR":0.972,"adjR":0.982,"adjP":410000000,"minF":1,"maxF":15,"floors":15,"rawP":380000000},{"d":"102","n":33,"na":33,"rawR":0.87,"adjR":0.941,"adjP":393000000,"minF":1,"maxF":15,"floors":15,"rawP":340000000},{"d":"109","n":30,"na":30,"rawR":1.004,"adjR":0.998,"adjP":527058338,"minF":1,"maxF":15,"floors":15,"rawP":486000000},{"d":"107","n":30,"na":30,"rawR":1.028,"adjR":0.996,"adjP":517553357,"minF":1,"maxF":15,"floors":15,"rawP":490000000},{"d":"110","n":28,"na":28,"rawR":1.013,"adjR":1.004,"adjP":510918623,"minF":1,"maxF":15,"floors":15,"rawP":475000000},{"d":"(미상)","n":27,"na":27,"rawR":1.185,"adjR":1.096,"adjP":595000000,"minF":2,"maxF":14,"floors":null,"rawP":595000000},{"d":"101","n":21,"na":21,"rawR":0.889,"adjR":0.959,"adjP":548082519,"minF":1,"maxF":15,"floors":15,"rawP":480000000},{"d":"106","n":18,"na":18,"rawR":0.989,"adjR":1.034,"adjP":538648993,"minF":1,"maxF":15,"floors":15,"rawP":495000000},{"d":"111","n":17,"na":17,"rawR":0.929,"adjR":0.99,"adjP":567684693,"minF":1,"maxF":15,"floors":15,"rawP":479000000},{"d":"108","n":15,"na":15,"rawR":0.896,"adjR":0.946,"adjP":470793967,"minF":2,"maxF":15,"floors":15,"rawP":415000000},{"d":"112","n":13,"na":13,"rawR":0.991,"adjR":1.021,"adjP":513750637,"minF":1,"maxF":15,"floors":15,"rawP":469000000},{"d":"113","n":12,"na":12,"rawR":1.109,"adjR":1.058,"adjP":601716018,"minF":2,"maxF":14,"floors":15,"rawP":568500000},{"d":"103","n":8,"na":8,"rawR":0.991,"adjR":1.02,"adjP":588213173,"minF":3,"maxF":14,"floors":15,"rawP":535000000}],"floors":[{"fb":"1~2층","key":"1_1_2","n":46,"rawR":0.86,"adjR":0.934,"adjP":433099475},{"fb":"3~5층","key":"2_3_5","n":78,"rawR":1.005,"adjR":1.016,"adjP":464216716},{"fb":"6~10층","key":"3_6_10","n":101,"rawR":1.046,"adjR":1.009,"adjP":500326253},{"fb":"11~15층","key":"4_11_15","n":98,"rawR":1.004,"adjR":1.002,"adjP":511940543}],"axes":{"school":{"score":100.0,"conf":0.55,"raw":"최근접 학교 211m · 하일초통학구역"},"transit":{"score":12.7,"conf":0.55,"raw":"최근접 철산역 1.3km"},"infra":{"score":95.6,"conf":0.55,"raw":"마트 584m · 공원 221m · 병원 334m"},"liquidity":{"score":100.0,"conf":0.7,"raw":"12개월 회전율 12.3% (거래 244건 / 1980세대)","capped":true},"attr":{"score":57.4,"conf":0.85,"raw":"같은 구·같은 면적대 중위 대비 ×1.064 (비교 단지 71곳)","clipped":false},"trend":{"score":100.0,"conf":0.85,"raw":"최근 12개월 +33.3% (직전 12개월 대비 · 표본 244/79건)","clipped":true}},"total":73.4,"coverage":100.0,"nAxes":6},{"id":14212,"name":"산내마을9단지힐스테이트운정","sido":"경기도","sgg":"파주시","built":2018,"hh":2998,"gc":"address","nogeom":false,"sggCode":"41480","band":"2_60_85","nr":171,"np":103,"mr":7835795,"mp":8242671,"pmed":3410263,"ncx":136,"n12":221,"schoolM":245,"subwayM":1012,"subwayName":"운정중앙","martM":661,"parkM":272,"hospM":1233,"sdZone":"산내초통학구역","schoolName":"산내초등학교","regionTrend":-1.7,"regionRefComplete":true,"attrRaw":2.298,"attrAdj":2.311,"trendRaw":-4.9,"trendExcess":-1.4,"peerMed":3410263,"price":{"n":171,"area":72.74,"p10":489000000,"p25":510000000,"p50":540000000,"p75":579000000,"p90":648000000},"bfl":{"n":25,"minf":20,"maxf":29,"avgf":28.0},"refYm":"2026-06","adjCov":100.0,"dongs":[{"d":"(미상)","n":45,"na":45,"rawR":0.987,"adjR":0.994,"adjP":564043447,"minF":1,"maxF":29,"floors":null,"rawP":558000000},{"d":"910동","n":20,"na":20,"rawR":1.023,"adjR":1.019,"adjP":573518138,"minF":5,"maxF":27,"floors":null,"rawP":574500000},{"d":"901동","n":18,"na":18,"rawR":0.995,"adjR":1.002,"adjP":562904385,"minF":1,"maxF":29,"floors":null,"rawP":564500000},{"d":"920동","n":14,"na":14,"rawR":1.027,"adjR":1.014,"adjP":551132207,"minF":1,"maxF":29,"floors":null,"rawP":562000000},{"d":"924동","n":13,"na":13,"rawR":0.989,"adjR":0.957,"adjP":531245235,"minF":2,"maxF":28,"floors":null,"rawP":525000000},{"d":"913동","n":13,"na":13,"rawR":1.03,"adjR":1.008,"adjP":515809703,"minF":4,"maxF":24,"floors":null,"rawP":520000000},{"d":"903동","n":11,"na":11,"rawR":1.015,"adjR":0.998,"adjP":637960432,"minF":5,"maxF":28,"floors":null,"rawP":640000000},{"d":"922동","n":11,"na":11,"rawR":0.976,"adjR":0.954,"adjP":538806819,"minF":4,"maxF":29,"floors":null,"rawP":540000000},{"d":"912동","n":11,"na":11,"rawR":1.03,"adjR":1.018,"adjP":560645784,"minF":2,"maxF":25,"floors":null,"rawP":560000000},{"d":"908동","n":10,"na":10,"rawR":1.034,"adjR":1.032,"adjP":512035166,"minF":5,"maxF":25,"floors":null,"rawP":510000000},{"d":"916동","n":9,"na":9,"rawR":0.993,"adjR":0.991,"adjP":664787437,"minF":8,"maxF":29,"floors":null,"rawP":670000000},{"d":"923동","n":9,"na":9,"rawR":1.018,"adjR":1.006,"adjP":556221752,"minF":4,"maxF":18,"floors":null,"rawP":558000000},{"d":"905동","n":9,"na":9,"rawR":0.986,"adjR":0.989,"adjP":494479227,"minF":1,"maxF":25,"floors":null,"rawP":510000000},{"d":"911동","n":8,"na":8,"rawR":1.001,"adjR":1.006,"adjP":522800563,"minF":3,"maxF":20,"floors":null,"rawP":533000000},{"d":"902동","n":8,"na":8,"rawR":0.986,"adjR":0.994,"adjP":545891797,"minF":4,"maxF":18,"floors":null,"rawP":542500000},{"d":"906동","n":8,"na":8,"rawR":0.972,"adjR":0.969,"adjP":531927079,"minF":4,"maxF":27,"floors":null,"rawP":537000000},{"d":"917동","n":7,"na":7,"rawR":0.986,"adjR":0.974,"adjP":653623279,"minF":5,"maxF":27,"floors":null,"rawP":665000000},{"d":"904동","n":7,"na":7,"rawR":1.07,"adjR":1.027,"adjP":518108116,"minF":7,"maxF":16,"floors":null,"rawP":529000000},{"d":"907동","n":7,"na":7,"rawR":1.043,"adjR":1.006,"adjP":520952845,"minF":3,"maxF":28,"floors":null,"rawP":534000000},{"d":"919동","n":7,"na":7,"rawR":1.007,"adjR":0.996,"adjP":549648330,"minF":2,"maxF":26,"floors":null,"rawP":550000000},{"d":"921동","n":7,"na":7,"rawR":0.989,"adjR":0.991,"adjP":543652167,"minF":2,"maxF":29,"floors":null,"rawP":544000000},{"d":"918동","n":6,"na":6,"rawR":0.962,"adjR":0.979,"adjP":656720301,"minF":4,"maxF":28,"floors":null,"rawP":649000000},{"d":"915동","n":6,"na":6,"rawR":1.095,"adjR":1.09,"adjP":516516165,"minF":8,"maxF":20,"floors":null,"rawP":522000000},{"d":"914동","n":4,"na":4,"rawR":1.069,"adjR":1.057,"adjP":500815776,"minF":12,"maxF":19,"floors":null,"rawP":509500000},{"d":"909동","n":4,"na":4,"rawR":1.013,"adjR":1.015,"adjP":520282058,"minF":10,"maxF":29,"floors":null,"rawP":537000000},{"d":"925동","n":2,"na":2,"rawR":0.944,"adjR":0.938,"adjP":538888025,"minF":7,"maxF":18,"floors":null,"rawP":545500000}],"floors":[{"fb":"1~2층","key":"1_1_2","n":11,"rawR":0.989,"adjR":0.978,"adjP":490517718},{"fb":"3~5층","key":"2_3_5","n":36,"rawR":0.983,"adjR":0.986,"adjP":564679075},{"fb":"6~10층","key":"3_6_10","n":53,"rawR":0.995,"adjR":0.998,"adjP":539559459},{"fb":"11~15층","key":"4_11_15","n":51,"rawR":0.996,"adjR":1.002,"adjP":524604269},{"fb":"16층~","key":"5_16up","n":123,"rawR":1.007,"adjR":1.006,"adjP":548453819}],"axes":{"school":{"score":100.0,"conf":0.55,"raw":"최근접 학교 245m · 산내초통학구역"},"transit":{"score":39.0,"conf":0.55,"raw":"최근접 운정중앙역 1.0km"},"infra":{"score":88.2,"conf":0.55,"raw":"마트 661m · 공원 272m · 병원 1233m"},"liquidity":{"score":100.0,"conf":0.7,"raw":"12개월 회전율 7.4% (거래 221건 / 2998세대)","capped":true},"attr":{"score":0.0,"conf":0.85,"raw":"같은 구·같은 면적대 중위 대비 ×2.311 (비교 단지 136곳)","clipped":true},"trend":{"score":1.6,"conf":0.85,"raw":"최근 12개월 -4.9% (직전 12개월 대비 · 표본 171/103건)","clipped":false}},"total":56.2,"coverage":100.0,"nAxes":6},{"id":14445,"name":"안흥주공","sido":"경기도","sgg":"이천시","built":1997,"hh":1200,"gc":"address","nogeom":false,"sggCode":"41500","band":"1_lt60","nr":42,"np":43,"mr":2687992,"mp":3174603,"pmed":2294693,"ncx":84,"n12":42,"schoolM":391,"subwayM":2447,"subwayName":"이천","martM":601,"parkM":457,"hospM":589,"sdZone":"안흥초통학구역","schoolName":"안흥초등학교","regionTrend":-9.5,"regionRefComplete":true,"attrRaw":1.171,"attrAdj":1.197,"trendRaw":-15.3,"trendExcess":-5.5,"peerMed":2294693,"price":{"n":42,"area":59.71,"p10":112300000,"p25":145000000,"p50":153500000,"p75":165000000,"p90":170000000},"bfl":{"n":17,"minf":15,"maxf":15,"avgf":15.0},"refYm":"2026-06","adjCov":100.0,"dongs":[{"d":"104","n":11,"na":11,"rawR":0.975,"adjR":0.975,"adjP":104031814,"minF":4,"maxF":15,"floors":15,"rawP":115000000},{"d":"112","n":10,"na":10,"rawR":1.014,"adjR":0.995,"adjP":133197269,"minF":1,"maxF":14,"floors":15,"rawP":150000000},{"d":"109","n":9,"na":9,"rawR":1.059,"adjR":1.036,"adjP":166275099,"minF":4,"maxF":15,"floors":15,"rawP":188000000},{"d":"117","n":8,"na":8,"rawR":1.054,"adjR":1.017,"adjP":136121193,"minF":1,"maxF":15,"floors":15,"rawP":156000000},{"d":"113","n":6,"na":6,"rawR":0.918,"adjR":0.963,"adjP":154571151,"minF":6,"maxF":14,"floors":15,"rawP":163000000},{"d":"(미상)","n":6,"na":6,"rawR":0.882,"adjR":0.975,"adjP":150000000,"minF":2,"maxF":15,"floors":null,"rawP":151500000},{"d":"116","n":5,"na":5,"rawR":1.042,"adjR":1.024,"adjP":164445794,"minF":1,"maxF":13,"floors":15,"rawP":185000000},{"d":"108","n":5,"na":5,"rawR":1.025,"adjR":0.999,"adjP":160455849,"minF":3,"maxF":10,"floors":15,"rawP":182000000},{"d":"110","n":4,"na":4,"rawR":0.96,"adjR":0.984,"adjP":158003862,"minF":1,"maxF":13,"floors":15,"rawP":170500000},{"d":"102","n":4,"na":4,"rawR":1.127,"adjR":1.074,"adjP":172444005,"minF":4,"maxF":12,"floors":15,"rawP":200000000},{"d":"111","n":3,"na":3,"rawR":0.941,"adjR":0.972,"adjP":155992739,"minF":7,"maxF":9,"floors":15,"rawP":167000000},{"d":"107","n":3,"na":3,"rawR":1.059,"adjR":1.071,"adjP":171966147,"minF":8,"maxF":15,"floors":15,"rawP":188000000},{"d":"101","n":3,"na":3,"rawR":0.958,"adjR":0.985,"adjP":158094257,"minF":6,"maxF":15,"floors":15,"rawP":170000000},{"d":"103","n":2,"na":2,"rawR":0.927,"adjR":0.96,"adjP":154143195,"minF":7,"maxF":8,"floors":15,"rawP":164500000},{"d":"114","n":2,"na":2,"rawR":1.051,"adjR":1.044,"adjP":167656320,"minF":9,"maxF":14,"floors":15,"rawP":186500000},{"d":"105","n":2,"na":2,"rawR":0.986,"adjR":0.996,"adjP":159949066,"minF":3,"maxF":15,"floors":15,"rawP":175000000},{"d":"115","n":1,"na":1,"rawR":0.845,"adjR":0.921,"adjP":147835573,"minF":12,"maxF":12,"floors":15,"rawP":150000000},{"d":"106","n":1,"na":1,"rawR":1.065,"adjR":1.038,"adjP":166627228,"minF":5,"maxF":5,"floors":15,"rawP":189000000}],"floors":[{"fb":"1~2층","key":"1_1_2","n":7,"rawR":0.901,"adjR":0.963,"adjP":133972399},{"fb":"3~5층","key":"2_3_5","n":14,"rawR":1.015,"adjR":1.014,"adjP":146832300},{"fb":"6~10층","key":"3_6_10","n":32,"rawR":1.014,"adjR":1.016,"adjP":156578044},{"fb":"11~15층","key":"4_11_15","n":32,"rawR":0.966,"adjR":1.003,"adjP":153635386}],"axes":{"school":{"score":92.4,"conf":0.55,"raw":"최근접 학교 391m · 안흥초통학구역"},"transit":{"score":0.0,"conf":0.55,"raw":"최근접 이천역 2.4km"},"infra":{"score":89.2,"conf":0.55,"raw":"마트 601m · 공원 457m · 병원 589m"},"liquidity":{"score":70.0,"conf":0.7,"raw":"12개월 회전율 3.5% (거래 42건 / 1200세대)","capped":false},"attr":{"score":38.7,"conf":0.85,"raw":"같은 구·같은 면적대 중위 대비 ×1.197 (비교 단지 84곳)","clipped":false},"trend":{"score":0.0,"conf":0.85,"raw":"최근 12개월 -15.3% (직전 12개월 대비 · 표본 42/43건)","clipped":true}},"total":50.1,"coverage":100.0,"nAxes":6},{"id":14559,"name":"주은풍림","sido":"경기도","sgg":"안성시","built":2002,"hh":2615,"gc":"address","nogeom":false,"sggCode":"41550","band":"1_lt60","nr":153,"np":205,"mr":2362805,"mp":2362805,"pmed":2180233,"ncx":49,"n12":153,"schoolM":330,"subwayM":6536,"subwayName":"평택","martM":1117,"parkM":636,"hospM":882,"sdZone":"용머리초통학구역","schoolName":"용머리초등학교","regionTrend":-1.5,"regionRefComplete":true,"attrRaw":1.084,"attrAdj":1.076,"trendRaw":0.0,"trendExcess":1.4,"peerMed":2180233,"price":{"n":153,"area":49.77,"p10":93000000,"p25":100000000,"p50":116000000,"p75":125000000,"p90":143800000},"bfl":{"n":12,"minf":18,"maxf":20,"avgf":19.8},"refYm":"2026-06","adjCov":100.0,"dongs":[{"d":"102","n":46,"na":46,"rawR":1.0,"adjR":1.003,"adjP":98929323,"minF":1,"maxF":20,"floors":20,"rawP":100000000},{"d":"104","n":44,"na":44,"rawR":0.984,"adjR":0.98,"adjP":114206973,"minF":1,"maxF":20,"floors":20,"rawP":115750000},{"d":"110","n":38,"na":38,"rawR":0.961,"adjR":0.953,"adjP":110975122,"minF":2,"maxF":20,"floors":20,"rawP":113000000},{"d":"107","n":32,"na":32,"rawR":1.006,"adjR":1.006,"adjP":140737877,"minF":1,"maxF":20,"floors":20,"rawP":142000000},{"d":"111","n":31,"na":31,"rawR":1.003,"adjR":1.005,"adjP":117067423,"minF":1,"maxF":19,"floors":19,"rawP":118000000},{"d":"103","n":29,"na":29,"rawR":1.0,"adjR":0.993,"adjP":99308989,"minF":1,"maxF":19,"floors":20,"rawP":100000000},{"d":"108","n":25,"na":25,"rawR":1.02,"adjR":1.013,"adjP":118059520,"minF":2,"maxF":20,"floors":20,"rawP":120000000},{"d":"112","n":24,"na":24,"rawR":1.02,"adjR":1.013,"adjP":118067345,"minF":1,"maxF":18,"floors":18,"rawP":120000000},{"d":"105","n":21,"na":21,"rawR":0.991,"adjR":0.991,"adjP":138644497,"minF":1,"maxF":18,"floors":20,"rawP":140000000},{"d":"101","n":21,"na":21,"rawR":1.011,"adjR":1.013,"adjP":93350450,"minF":1,"maxF":20,"floors":20,"rawP":94000000},{"d":"106","n":19,"na":19,"rawR":1.003,"adjR":1.018,"adjP":118574936,"minF":1,"maxF":20,"floors":20,"rawP":118000000},{"d":"109","n":18,"na":18,"rawR":1.018,"adjR":1.014,"adjP":118180917,"minF":2,"maxF":17,"floors":20,"rawP":119750000},{"d":"(미상)","n":10,"na":10,"rawR":0.997,"adjR":1.009,"adjP":123750000,"minF":2,"maxF":20,"floors":null,"rawP":123750000}],"floors":[{"fb":"1~2층","key":"1_1_2","n":34,"rawR":0.935,"adjR":0.931,"adjP":115096257},{"fb":"3~5층","key":"2_3_5","n":52,"rawR":0.978,"adjR":0.98,"adjP":111770112},{"fb":"6~10층","key":"3_6_10","n":100,"rawR":1.018,"adjR":1.013,"adjP":118942212},{"fb":"11~15층","key":"4_11_15","n":91,"rawR":1.012,"adjR":1.011,"adjP":118059520},{"fb":"16층~","key":"5_16up","n":81,"rawR":1.0,"adjR":1.002,"adjP":116077372}],"axes":{"school":{"score":97.5,"conf":0.55,"raw":"최근접 학교 330m · 용머리초통학구역"},"transit":{"score":0.0,"conf":0.55,"raw":"최근접 평택역 6.5km"},"infra":{"score":73.0,"conf":0.55,"raw":"마트 1117m · 공원 636m · 병원 882m"},"liquidity":{"score":100.0,"conf":0.7,"raw":"12개월 회전율 5.9% (거래 153건 / 2615세대)","capped":true},"attr":{"score":55.7,"conf":0.85,"raw":"같은 구·같은 면적대 중위 대비 ×1.076 (비교 단지 49곳)","clipped":false},"trend":{"score":21.2,"conf":0.85,"raw":"최근 12개월 +0.0% (직전 12개월 대비 · 표본 153/205건)","clipped":false}},"total":58.7,"coverage":100.0,"nAxes":6},{"id":15311,"name":"태봉마을","sido":"경기도","sgg":"포천시","built":2005,"hh":1803,"gc":"address","nogeom":false,"sggCode":"41650","band":"1_lt60","nr":60,"np":49,"mr":3096062,"mp":3032345,"pmed":1967979,"ncx":33,"n12":97,"schoolM":233,"subwayM":7127,"subwayName":"덕정","martM":616,"parkM":51,"hospM":320,"sdZone":"신봉초통학구역","schoolName":"신봉초등학교","regionTrend":2.9,"regionRefComplete":true,"attrRaw":1.573,"attrAdj":1.552,"trendRaw":2.1,"trendExcess":0.0,"peerMed":1967979,"price":{"n":60,"area":59.06,"p10":157700000,"p25":170000000,"p50":180000000,"p75":188625000,"p90":195000000},"bfl":{"n":19,"minf":12,"maxf":20,"avgf":17.6},"refYm":null,"adjCov":0.0,"dongs":[{"d":"312","n":13,"na":0,"rawR":1.041,"adjR":null,"adjP":null,"minF":3,"maxF":19,"floors":20,"rawP":188500000},{"d":"306","n":13,"na":0,"rawR":1.008,"adjR":null,"adjP":null,"minF":1,"maxF":20,"floors":20,"rawP":159000000},{"d":"314","n":12,"na":0,"rawR":0.972,"adjR":null,"adjP":null,"minF":2,"maxF":19,"floors":20,"rawP":176000000},{"d":"319","n":11,"na":0,"rawR":1.0,"adjR":null,"adjP":null,"minF":1,"maxF":12,"floors":12,"rawP":180000000},{"d":"305","n":10,"na":0,"rawR":1.002,"adjR":null,"adjP":null,"minF":3,"maxF":18,"floors":20,"rawP":158000000},{"d":"311","n":10,"na":0,"rawR":1.0,"adjR":null,"adjP":null,"minF":2,"maxF":15,"floors":15,"rawP":180000000},{"d":"301","n":9,"na":0,"rawR":1.0,"adjR":null,"adjP":null,"minF":2,"maxF":15,"floors":15,"rawP":180000000},{"d":"302","n":8,"na":0,"rawR":1.003,"adjR":null,"adjP":null,"minF":8,"maxF":20,"floors":20,"rawP":181500000},{"d":"310","n":8,"na":0,"rawR":0.969,"adjR":null,"adjP":null,"minF":2,"maxF":14,"floors":15,"rawP":174500000},{"d":"316","n":5,"na":0,"rawR":0.944,"adjR":null,"adjP":null,"minF":2,"maxF":13,"floors":14,"rawP":170000000},{"d":"318","n":5,"na":0,"rawR":0.966,"adjR":null,"adjP":null,"minF":2,"maxF":11,"floors":12,"rawP":174000000},{"d":"317","n":3,"na":0,"rawR":1.083,"adjR":null,"adjP":null,"minF":5,"maxF":6,"floors":12,"rawP":195000000},{"d":"(미상)","n":2,"na":0,"rawR":1.058,"adjR":null,"adjP":null,"minF":9,"maxF":9,"floors":null,"rawP":192500000}],"floors":[{"fb":"1~2층","key":"1_1_2","n":9,"rawR":0.916,"adjR":null,"adjP":null},{"fb":"3~5층","key":"2_3_5","n":20,"rawR":0.984,"adjR":null,"adjP":null},{"fb":"6~10층","key":"3_6_10","n":27,"rawR":1.022,"adjR":null,"adjP":null},{"fb":"11~15층","key":"4_11_15","n":39,"rawR":1.008,"adjR":null,"adjP":null},{"fb":"16층~","key":"5_16up","n":14,"rawR":1.002,"adjR":null,"adjP":null}],"axes":{"school":{"score":100.0,"conf":0.55,"raw":"최근접 학교 233m · 신봉초통학구역"},"transit":{"score":0.0,"conf":0.55,"raw":"최근접 덕정역 7.1km"},"infra":{"score":95.5,"conf":0.55,"raw":"마트 616m · 공원 51m · 병원 320m"},"liquidity":{"score":100.0,"conf":0.7,"raw":"12개월 회전율 5.4% (거래 97건 / 1803세대)","capped":true},"attr":{"score":0.0,"conf":0.85,"raw":"같은 구·같은 면적대 중위 대비 ×1.552 (비교 단지 33곳)","clipped":true},"trend":{"score":29.6,"conf":0.85,"raw":"최근 12개월 +2.1% (직전 12개월 대비 · 표본 60/49건)","clipped":false}},"total":52.3,"coverage":100.0,"nAxes":6},{"id":15486,"name":"디엘본가평설악아파트","sido":"경기도","sgg":"가평군","built":null,"hh":null,"gc":"exact","nogeom":false,"sggCode":"41820","band":"2_60_85","nr":22,"np":0,"mr":4125029,"mp":null,"pmed":2059076,"ncx":34,"n12":23,"schoolM":336,"subwayM":8657,"subwayName":"청평","martM":147,"parkM":3278,"hospM":172,"sdZone":"미원초통학구역","schoolName":"미원초등학교","regionTrend":null,"regionRefComplete":null,"attrRaw":2.003,"attrAdj":null,"trendRaw":null,"trendExcess":null,"peerMed":2059076,"price":{"n":22,"area":84.91,"p10":250000000,"p25":267082500,"p50":341500000,"p75":352950000,"p90":360000000},"refYm":null,"adjCov":0.0,"dongs":[{"d":"103동","n":8,"na":0,"rawR":1.007,"adjR":null,"adjP":null,"minF":1,"maxF":23,"floors":null,"rawP":352900000},{"d":"106동","n":4,"na":0,"rawR":0.976,"adjR":null,"adjP":null,"minF":3,"maxF":21,"floors":null,"rawP":252500000},{"d":"101동","n":4,"na":0,"rawR":0.992,"adjR":null,"adjP":null,"minF":3,"maxF":20,"floors":null,"rawP":347500000},{"d":"102동","n":2,"na":0,"rawR":0.946,"adjR":null,"adjP":null,"minF":2,"maxF":7,"floors":null,"rawP":331500000},{"d":"104동","n":2,"na":0,"rawR":0.998,"adjR":null,"adjP":null,"minF":1,"maxF":8,"floors":null,"rawP":258055000},{"d":"105동","n":1,"na":0,"rawR":1.044,"adjR":null,"adjP":null,"minF":3,"maxF":3,"floors":null,"rawP":270000000},{"d":"(미상)","n":1,"na":0,"rawR":1.028,"adjR":null,"adjP":null,"minF":18,"maxF":18,"floors":null,"rawP":360000000}],"floors":[{"fb":"1~2층","key":"1_1_2","n":3,"rawR":1.029,"adjR":null,"adjP":null},{"fb":"3~5층","key":"2_3_5","n":4,"rawR":0.925,"adjR":null,"adjP":null},{"fb":"6~10층","key":"3_6_10","n":5,"rawR":0.979,"adjR":null,"adjP":null},{"fb":"11~15층","key":"4_11_15","n":3,"rawR":1.028,"adjR":null,"adjP":null},{"fb":"16층~","key":"5_16up","n":7,"rawR":1.008,"adjR":null,"adjP":null}],"axes":{"school":{"score":97.0,"conf":0.85,"raw":"최근접 학교 336m · 미원초통학구역"},"transit":{"score":0.0,"conf":0.85,"raw":"최근접 청평역 8.7km"},"infra":{"score":66.7,"conf":0.85,"raw":"마트 147m · 공원 3278m · 병원 172m"},"liquidity":{"score":null,"conf":0,"miss":"단지 세대수를 알 수 없어 거래회전율을 계산할 수 없습니다(전 DB 2,666단지 16.2%가 동일)."},"attr":{"score":0.0,"conf":0.85,"raw":"같은 구·같은 면적대 중위 대비 ×2.003 (비교 단지 34곳)","clipped":true},"trend":{"score":null,"conf":0,"miss":"직전 12개월(2024-07~2025-06) 실거래가 0건뿐이라 변화율을 만들지 않았습니다. 전 DB에서 이 축이 계산되는 단지는 50.2%뿐입니다."}},"total":39.2,"coverage":75.0,"nAxes":4}],"scenarios":[{"cid":632,"dong":"229","floor":25,"area":84.9,"ask":3050000000,"facing":"남향","fbKey":"5_16up","fb":"16층~","refYm":"2026-05","trades":[{"dong":"229","floor":16,"area":84.9,"price":2100000000,"date":"2024-07-12","adj":2791137117},{"dong":"229","floor":20,"area":84.79,"price":2300000000,"date":"2024-08-08","adj":2973077143},{"dong":"229","floor":28,"area":84.9,"price":2200000000,"date":"2024-08-19","adj":2843812919},{"dong":"229","floor":19,"area":84.9,"price":2230000000,"date":"2024-09-26","adj":2854407911},{"dong":"229","floor":25,"area":84.9,"price":2250000000,"date":"2025-01-09","adj":2889468377},{"dong":"229","floor":34,"area":84.9,"price":2265000000,"date":"2025-02-17","adj":2826243949},{"dong":"229","floor":33,"area":84.9,"price":2410000000,"date":"2025-03-22","adj":2938823752},{"dong":"229","floor":18,"area":84.9,"price":2400000000,"date":"2025-03-23","adj":2926629462},{"dong":"229","floor":25,"area":84.79,"price":2500000000,"date":"2025-03-23","adj":3048572356},{"dong":"229","floor":35,"area":84.79,"price":2700000000,"date":"2025-06-05","adj":3155095334},{"dong":"229","floor":29,"area":84.79,"price":2920000000,"date":"2025-10-25","adj":3094617279}],"adjustable":true,"rawMed":2300000000,"adjMed":2926629462,"n":11},{"cid":15311,"dong":"312","floor":15,"area":59.06,"ask":205000000,"facing":"동향","fbKey":"4_11_15","fb":"11~15층","refYm":null,"trades":[],"adjustable":false,"rawMed":null,"adjMed":null,"n":0}]};
+const M = DB.meta;
+
+/* 축 순서는 **상수로 고정**한다. 정렬 UI 를 주지 않는다 —
+   순서를 바꾸면 다각형 넓이가 바뀌고, 넓이는 아무 의미도 없다(viz-research §3-①). */
+const AXES = ["school","transit","infra","liquidity","attr","trend"];
+const LABEL = { school:"학군", transit:"교통", infra:"생활인프라", liquidity:"환금성",
+                attr:"가격매력", trend:"가격추세" };
+const LABEL_LONG = { school:"학군(최근접 학교 거리)", transit:"교통(최근접 지하철역 거리)",
+  infra:"생활인프라(마트·공원·병원)", liquidity:"환금성(12개월 거래회전율)",
+  attr:"가격매력(같은 구·면적대 대비 ₩/㎡)", trend:"가격추세(12개월 상승률)" };
+const W = { school:.20, transit:.20, infra:.15, liquidity:.15, attr:.20, trend:.10 };
+
+/* 실측/추정 경계. backend/app/agents/base.py::ESTIMATE_CONFIDENCE_CAP 과 같은 값.
+   프론트에서 새 숫자를 만들면 같은 데이터에 두 개의 진실이 생긴다. */
+const ESTIMATE_CONFIDENCE_CAP = 0.6;
+const GRADE_LABEL = { measured:"실측", estimated:"추정", missing:"미확보" };
+function grade(a){
+  if (!a || a.score === null || a.score === undefined) return "missing";
+  return a.conf > ESTIMATE_CONFIDENCE_CAP ? "measured" : "estimated";
+}
+
+/* ── 소도구 ─────────────────────────────────────────────────────────────── */
+const NS = "http://www.w3.org/2000/svg";
+function el(tag, attrs, kids){
+  const n = document.createElementNS(NS, tag);
+  for (const k in (attrs||{})) if (attrs[k] !== null && attrs[k] !== undefined)
+    n.setAttribute(k, attrs[k]);
+  (kids||[]).forEach(c => c && n.appendChild(c));
+  return n;
+}
+function txt(tag, attrs, s){ const n = el(tag, attrs); n.textContent = s; return n; }
+/** DOM 헬퍼. **text 는 textContent** 로만 넣는다(XSS 방지).
+ *  html 은 이 파일 안의 고정 문자열에만 쓰고 사용자 입력은 절대 넣지 않는다. */
+function h(tag, attrs, kids){
+  const n = document.createElement(tag);
+  for (const k in (attrs||{})){
+    if (k === "html") n.innerHTML = attrs[k];
+    else if (k === "text") n.textContent = attrs[k];
+    else if (k.startsWith("on")) n.addEventListener(k.slice(2), attrs[k]);
+    else if (attrs[k] !== null && attrs[k] !== undefined) n.setAttribute(k, attrs[k]);
+  }
+  (kids||[]).forEach(c => c && n.appendChild(c));
+  return n;
+}
+function eok(v){
+  if (v === null || v === undefined) return "—";
+  const x = v / 1e8;
+  return (x >= 10 ? x.toFixed(1) : x.toFixed(2)) + "억";
+}
+function pc(x, d){ return (x >= 0 ? "+" : "") + x.toFixed(d === undefined ? 1 : d) + "%"; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   1. 육각 레이더 + 확신 링
+   ─────────────────────────────────────────────────────────────────────────
+   ① 넓이를 총점으로 쓰지 않는다 → 총점은 도형 **밖** 막대(§renderTotal)
+   ④ 미확보 축은 **0 으로 그리지 않는다** — 다각형이 그 축을 건너뛴다.
+      점선 스포크 + 끝의 ⌀ 마커로 "부재"가 아니라 "표식"이 되게 한다.
+   ═══════════════════════════════════════════════════════════════════════════ */
+function radar(c, opts){
+  opts = opts || {};
+  const SZ = opts.small ? 268 : 300, C = SZ/2, R = opts.small ? 78 : 92;
+  const RIN = R + 14, ROUT = R + 26;
+  const n = AXES.length;
+  const ang = i => (-Math.PI/2) + (i * 2 * Math.PI / n);
+  const pt = (i, r) => [C + Math.cos(ang(i))*r, C + Math.sin(ang(i))*r];
+  const use = k => !(opts.dropTrend && k === "trend");
+
+  const g = el("svg", { viewBox:"0 0 "+SZ+" "+SZ, width:SZ, height:SZ, role:"img",
+    "aria-label": aria(c) });
+  const uid = "h" + c.id;
+  const defs = el("defs");
+  const pat = el("pattern", { id:uid, width:6, height:6, patternUnits:"userSpaceOnUse",
+    patternTransform:"rotate(45)" });
+  pat.appendChild(el("line", { x1:0, y1:0, x2:0, y2:6, class:"s-hatch" }));
+  defs.appendChild(pat); g.appendChild(defs);
+
+  [25,50,75,100].forEach(v => {
+    const p = []; for (let i=0;i<n;i++) p.push(pt(i, R*v/100).join(","));
+    g.appendChild(el("polygon", { points:p.join(" "), class:"s-grid" }));
+  });
+  g.appendChild(txt("text", { x:C+3, y:C-R+10, class:"s-tick" }, "100"));
+
+  /* 확신 링 — 안쪽 다각형(점수)과 **다른 도형**이라 절대 섞이지 않는다 */
+  const seg = 2*Math.PI/n, pad = .045;
+  AXES.forEach((k,i) => {
+    const a = c.axes[k], a0 = ang(i)-seg/2+pad, a1 = ang(i)+seg/2-pad;
+    g.appendChild(el("path", { d:arcBand(C,C,RIN,ROUT,a0,a1), class:"s-ring-bed" }));
+    const gr = use(k) ? grade(a) : "missing";
+    if (gr === "missing"){
+      g.appendChild(el("path", { d:arcBand(C,C,RIN,ROUT,a0,a1), class:"s-ring-none" }));
+    } else {
+      const f = Math.max(.12, a.conf), am = a0 + (a1-a0)*f;
+      g.appendChild(el("path", { d:arcBand(C,C,RIN,ROUT,a0,am),
+        class: gr === "measured" ? "s-ring-full" : "s-ring-est",
+        style: gr === "estimated" ? "fill:url(#"+uid+");fill-opacity:1" : null }));
+    }
+  });
+
+  AXES.forEach((k,i) => {
+    const [x,y] = pt(i,R), miss = !use(k) || grade(c.axes[k]) === "missing";
+    g.appendChild(el("line", { x1:C, y1:C, x2:x, y2:y,
+      class: miss ? "s-spoke-miss" : "s-spoke" }));
+    if (miss) g.appendChild(el("circle", { cx:x, cy:y, r:4.5, class:"s-dot-miss" }));
+  });
+
+  /* 미확보 축은 좌표를 만들지 않고 **건너뛴다**(움푹 팬 자국이 생기지 않는다) */
+  const pres = [];
+  AXES.forEach((k,i) => {
+    if (use(k) && grade(c.axes[k]) !== "missing") pres.push(pt(i, R*c.axes[k].score/100));
+  });
+  if (pres.length >= 3)
+    g.appendChild(el("polygon", { points:pres.map(p=>p.join(",")).join(" "), class:"s-poly" }));
+  else if (pres.length === 2)
+    g.appendChild(el("line", { x1:pres[0][0], y1:pres[0][1], x2:pres[1][0], y2:pres[1][1],
+      class:"s-poly", fill:"none" }));
+
+  AXES.forEach((k,i) => {
+    const gr = use(k) ? grade(c.axes[k]) : "missing";
+    if (gr === "missing") return;
+    const [x,y] = pt(i, R*c.axes[k].score/100);
+    g.appendChild(el("circle", { cx:x, cy:y, r:4.5,
+      class: gr === "measured" ? "s-dot" : "s-dot-est" }));
+  });
+
+  AXES.forEach((k,i) => {
+    const a = c.axes[k];
+    const [x,y] = pt(i, ROUT+13), miss = !use(k) || grade(a) === "missing";
+    const anc = Math.abs(x-C) < 6 ? "middle" : (x > C ? "start" : "end");
+    g.appendChild(txt("text", { x, y:y+4, class: miss?"s-lab-dim":"s-lab", "text-anchor":anc },
+      LABEL[k]));
+    /* 눈금 밖에서 잘린 값에는 화살표를 붙인다 — 0점과 100점이 '실제로 얼마나 더'인지
+       숫자로는 알 수 없다는 사실을 그림에서 지우지 않기 위해서다(상·하단 정보 소실). */
+    const mark = miss ? "" : (a.clipped || a.capped
+      ? (a.score <= 0 ? " ↓" : (a.score >= 100 ? " ↑" : "")) : "");
+    g.appendChild(txt("text", { x, y:y+17, class:"s-lab-sm", "text-anchor":anc },
+      miss ? "미확보" : String(Math.round(a.score)) + mark));
+  });
+  return g;
+}
+function arcBand(cx,cy,r0,r1,a0,a1){
+  const p=(r,a)=>[cx+Math.cos(a)*r, cy+Math.sin(a)*r];
+  const lg=(a1-a0)>Math.PI?1:0;
+  const [x0,y0]=p(r1,a0),[x1,y1]=p(r1,a1),[x2,y2]=p(r0,a1),[x3,y3]=p(r0,a0);
+  return "M"+x0+","+y0+" A"+r1+","+r1+" 0 "+lg+" 1 "+x1+","+y1+" L"+x2+","+y2
+       +" A"+r0+","+r0+" 0 "+lg+" 0 "+x3+","+y3+" Z";
+}
+function aria(c){
+  const parts = AXES.map(k => LABEL[k]+" "+(c.axes[k].score === null ? "미확보"
+    : Math.round(c.axes[k].score)+"점 "+GRADE_LABEL[grade(c.axes[k])]));
+  return c.name+" 6축 프로필. "+parts.join(", ")+". 이 도형의 넓이는 총점이 아닙니다.";
+}
+
+/** 총점 막대 — **레이더 밖**에 둔다. 총점의 그림은 넓이가 아니라 이 막대다. */
+function totalBar(c, dropTrend){
+  const keys = AXES.filter(k => c.axes[k].score !== null && !(dropTrend && k === "trend"));
+  const wsum = keys.reduce((s,k)=>s+W[k],0);
+  const tot = wsum ? keys.reduce((s,k)=>s+c.axes[k].score*W[k],0)/wsum : null;
+  const WD = 300, H = 30;
+  const svg = el("svg", { viewBox:"0 0 "+WD+" "+H, width:WD, height:H, role:"img",
+    "aria-label": (tot===null?"총점 없음":"총점 "+tot.toFixed(1)+"점")
+      +", 요청 가중치 중 "+Math.round(wsum*100)+"% 반영" });
+  svg.appendChild(el("rect", { x:0, y:6, width:WD, height:14, rx:7, class:"s-bar-bed" }));
+  if (tot !== null)
+    svg.appendChild(el("rect", { x:0, y:6, width:WD*tot/100, height:14, rx:7, class:"s-bar" }));
+  [25,50,75].forEach(v => svg.appendChild(el("line", { x1:WD*v/100, y1:4, x2:WD*v/100, y2:22,
+    class:"s-axisline", opacity:.4 })));
+  return { svg, tot, cov:Math.round(wsum*100) };
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   2. 동/층 스트립 — **고정 절대 스케일 0.85~1.15**
+   단지마다 스케일을 다시 잡으면 5% 편차와 20% 편차가 같은 그림이 된다.
+   ═══════════════════════════════════════════════════════════════════════════ */
+const SC_MIN = .85, SC_MAX = 1.15;
+function strip(rows, opts){
+  const WD = 320, PADL = 10, PADR = 10, iw = WD-PADL-PADR, H = 92;
+  const xOf = r => PADL + (Math.min(SC_MAX,Math.max(SC_MIN,r))-SC_MIN)/(SC_MAX-SC_MIN)*iw;
+  const svg = el("svg", { viewBox:"0 0 "+WD+" "+H, width:WD, height:H, role:"img",
+    "aria-label":opts.aria });
+  svg.appendChild(el("rect", { x:PADL, y:44, width:iw, height:16, rx:8, class:"s-strip-bed" }));
+  [.85,.90,.95,1.00,1.05,1.10,1.15].forEach(t => {
+    const x = xOf(t);
+    svg.appendChild(el("line", { x1:x, y1:40, x2:x, y2:64, class:"s-axisline",
+      opacity: t===1 ? 0 : .45 }));
+    svg.appendChild(txt("text", { x, y:78, class:"s-tick", "text-anchor":"middle" },
+      t.toFixed(2)));
+  });
+  const xm = xOf(1);
+  svg.appendChild(el("line", { x1:xm, y1:30, x2:xm, y2:68, class:"s-mid" }));
+  svg.appendChild(txt("text", { x:xm, y:24, class:"s-tick", "text-anchor":"middle" }, "단지 중위"));
+  /* 미보정 대조군(붉은 점선 원) — 같은 데이터가 얼마나 달라 보이는지 */
+  if (opts.ghost) opts.ghost.forEach(r => {
+    if (r.ratio === null) return;
+    svg.appendChild(el("circle", { cx:xOf(r.ratio), cy:52, r:5.5, class:"s-dong-raw" }));
+  });
+  rows.forEach(r => {
+    if (r.ratio === null || r.ratio === undefined) return;
+    const x = xOf(r.ratio), rad = 4 + Math.min(6, Math.sqrt(r.n));
+    const clip = r.ratio < SC_MIN || r.ratio > SC_MAX;
+    svg.appendChild(el("circle", { cx:x, cy:52, r:rad,
+      class: opts.kind==="floor" ? "s-floor" : (r.ratio < 1 ? "s-dong-low" : "s-dong") }));
+    svg.appendChild(txt("text", { x, y:38, class:"s-lab-sm", "text-anchor":"middle" },
+      (clip ? (r.ratio < SC_MIN ? "\u2039" : "\u203A") : "") + r.label));
+  });
+  return svg;
+}
+
+/* 가격 분포 막대 — 호가 위치를 실거래 분포 위에 얹는다 */
+function bandBar(p, ask){
+  const WD = 320, H = 74, PADL = 8, PADR = 8, iw = WD-PADL-PADR;
+  const lo = Math.min(p.p10, ask||p.p10)*.985, hi = Math.max(p.p90, ask||p.p90)*1.015;
+  const xOf = v => PADL + (v-lo)/(hi-lo)*iw;
+  const svg = el("svg", { viewBox:"0 0 "+WD+" "+H, width:WD, height:H, role:"img",
+    "aria-label":"최근 12개월 실거래 분포 p10 "+eok(p.p10)+" 중위 "+eok(p.p50)
+      +" p90 "+eok(p.p90)+(ask?", 입력 호가 "+eok(ask):"") });
+  svg.appendChild(el("rect", { x:xOf(p.p10), y:26, width:xOf(p.p90)-xOf(p.p10), height:18,
+    rx:6, class:"s-band" }));
+  svg.appendChild(el("rect", { x:xOf(p.p25), y:26, width:xOf(p.p75)-xOf(p.p25), height:18,
+    rx:5, class:"s-ring-est" }));
+  svg.appendChild(el("line", { x1:xOf(p.p50), y1:22, x2:xOf(p.p50), y2:48, class:"s-mid" }));
+  [["p10",p.p10],["중위",p.p50],["p90",p.p90]].forEach(t => {
+    svg.appendChild(txt("text", { x:xOf(t[1]), y:60, class:"s-tick", "text-anchor":"middle" },
+      t[0]+" "+eok(t[1])));
+  });
+  if (ask){
+    svg.appendChild(el("line", { x1:xOf(ask), y1:14, x2:xOf(ask), y2:50, class:"s-ask" }));
+    svg.appendChild(txt("text", { x:xOf(ask), y:11, class:"s-lab", "text-anchor":"middle",
+      fill:"var(--danger-text)" }, "호가 "+eok(ask)));
+  }
+  return svg;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   3. 화면
+   ═══════════════════════════════════════════════════════════════════════════ */
+let S = { view:"list", cid:null, region:"전체", missOnly:false, dropTrend:false, adj:true,
+          ghost:false, dong:null, floor:null };
+/* 스크롤 복귀. jsdom 등 구현이 없는 환경에서 예외가 나지 않게 감싼다. */
+function toTop(){ try { window.scrollTo(0,0); } catch(e){} }
+
+document.getElementById("asof").textContent =
+  "실거래 최신 계약일 " + M.tradeMax + " · 신고기한 30일 → 현재 시세는 항상 추정치. "
+  + "단지 " + M.nComplex.toLocaleString() + "곳 중 30곳 · 호가(listing) 0행 · 향 데이터 없음.";
+
+function axisList(c, dropTrend){
+  const ul = h("ul", { class:"axis-list" });
+  AXES.forEach(k => {
+    const a = c.axes[k];
+    const dropped = dropTrend && k === "trend";
+    const gr = dropped ? "missing" : grade(a);
+    const badges = [ h("span", { class:"badge"+(gr==="measured"?"":" badge--est"),
+        text: dropped ? "제외됨" : GRADE_LABEL[gr] }) ];
+    if (a.capped) badges.push(h("span", { class:"badge badge--warn", text:"상한 도달 ↑" }));
+    if (a.clipped) badges.push(h("span", { class:"badge badge--warn", text:"눈금 밖(이상치)" }));
+    ul.appendChild(h("li", {}, [
+      h("div", { class:"axis-body" }, [
+        h("div", { class:"axis-name"+(gr==="missing"?" dim":"") },
+          [ h("span", { text:LABEL_LONG[k] }) ].concat(badges)),
+        a.raw ? h("p", { class:"axis-raw num", text:a.raw }) : null,
+        (gr === "missing" && a.miss) ? h("p", { class:"axis-miss", text:a.miss }) : null,
+        (dropped) ? h("p", { class:"axis-miss",
+          text:"관점 토글이 켜져 있어 총점에서 뺐습니다. 값 자체는 " + Math.round(a.score) + "점입니다." }) : null,
+        (k === "liquidity" && a.capped) ? h("p", { class:"axis-miss",
+          text:"회전율 5% 이상은 전부 100점으로 잘립니다 — 실제로 얼마나 더 높은지는 이 점수로 알 수 없습니다." }) : null,
+        (k === "trend" && a.score !== null && c.regionTrend !== null) ? h("p", { class:"axis-miss",
+          text:"같은 시군구 12개월 " + pc(c.regionTrend) + " · 지역 대비 초과분 "
+             + (c.trendExcess === null ? "계산 불가" : pc(c.trendExcess) + "p")
+             + (c.regionRefComplete === false ? " (지역 기준월 미완결 — 잠정치)" : "") }) : null
+      ]),
+      h("div", { class:"axis-score"+(gr==="missing"?" dim":""),
+        text: gr === "missing" ? "미확보" : String(Math.round(a.score)) })
+    ]));
+  });
+  return ul;
+}
+
+function altTable(c){
+  const t = h("table", { class:"alt" });
+  t.appendChild(h("thead", {}, [ h("tr", {}, [ h("th",{text:"축"}), h("th",{text:"점수"}),
+    h("th",{text:"확신"}), h("th",{text:"근거 / 사유"}) ]) ]));
+  const tb = h("tbody");
+  AXES.forEach(k => {
+    const a = c.axes[k], g = grade(a);
+    tb.appendChild(h("tr", {}, [ h("td",{text:LABEL[k]}),
+      h("td",{class:"n",text:a.score===null?"미확보":String(Math.round(a.score))}),
+      h("td",{text:GRADE_LABEL[g]}), h("td",{text:a.raw||a.miss||"—"}) ]));
+  });
+  t.appendChild(tb); return t;
+}
+
+/* ── 화면 1: 카드 목록 ───────────────────────────────────────────────────── */
+function viewList(){
+  const wrap = h("div");
+  wrap.appendChild(h("div", { class:"card" }, [
+    h("h2", { text:"6축 육각형 — 무엇을 보고 있는가" }),
+    h("p", { class:"sub", html:
+      "안쪽 다각형 = <b>점수</b> · 바깥 고리 = <b>확신</b>(우리가 얼마나 아는가) · "
+      + "총점은 도형 <b>밖</b> 막대. <b>도형의 넓이는 총점이 아닙니다</b> — "
+      + "축 순서에 따라 넓이가 달라지고, 축이 빠지면 넓이는 줄지만 총점은 오를 수 있습니다."
+      + "<br>미확보 축은 <b>0으로 그리지 않고 건너뜁니다</b>(점선 스포크 + \u2300 표식)." }),
+    h("div", { class:"note warn", html:
+      "운영 DB 실측: 6축을 <b>다 가진 단지는 26.2%</b>뿐입니다"
+      + "(≥4축 76.7%). 새 2축 커버리지는 <b>가격매력 51.7% · 가격추세 50.2%</b> — "
+      + "<b>절반은 비어 있는 것이 정상</b>입니다." }),
+    h("div", { class:"note", html:
+      "⚠️ <b>이 30곳은 무작위 표본이 아닙니다.</b> 각 시군구에서 <b>거래가 가장 많은</b> 단지를 "
+      + "골랐기 때문에 크고 새롭고 비싼 단지 쪽으로 치우쳐 있습니다. "
+      + "여기 30곳은 <b>6축 완비 23곳(76.7%)</b>이지만 전 DB는 <b>26.2%</b>이고, "
+      + "<b>가격매력이 눈금 밖(↓)으로 잘린 단지도 13곳(43%)</b>인데 전 DB는 정의상 10%입니다. "
+      + "<b>여기 보이는 분포로 시장을 판단하지 마세요</b> — 이 화면은 "
+      + "\"미확보가 어떻게 보이는가\"를 확인하려고 만든 것입니다." }),
+    h("div", { class:"note bad", html:
+      "⚠️ <b>가격추세는 단조 축이 아닙니다.</b> 바깥쪽은 <b>\"많이 올랐다\"는 사실</b>만 "
+      + "뜻하며, 매수자에게 좋다는 뜻이 아닙니다(같은 집을 더 비싸게 삽니다). "
+      + "아래 토글로 총점이 얼마나 흔들리는지 확인하세요." }),
+    h("button", { class:"toggle", "aria-pressed":String(S.dropTrend),
+      onclick:()=>{ S.dropTrend=!S.dropTrend; render(); } }, [
+      h("span", { class:"box", text:S.dropTrend?"\u2713":"" }),
+      h("span", { class:"t", html:"관점: 매수자 — <b>가격추세를 총점에서 제외</b>"
+        + "<small>축은 회색 처리되고 남은 축으로 재정규화합니다. "
+        + "레이더 모양이 아니라 총점 막대가 움직이는 것을 보세요.</small>" })
+    ])
+  ]));
+
+  const regions = ["전체","서울특별시","경기도","인천광역시"];
+  wrap.appendChild(h("div", { class:"chips", role:"group", "aria-label":"지역 필터" },
+    regions.map(r => h("button", { class:"chip", "aria-pressed":String(S.region===r),
+      text:(r==="전체"?"전체":r.replace("특별시","").replace("광역시","").replace("도","")),
+      onclick:()=>{ S.region=r; render(); } })).concat([
+      h("button", { class:"chip", "aria-pressed":String(S.missOnly),
+        text:"미확보 있는 단지만", onclick:()=>{ S.missOnly=!S.missOnly; render(); } })
+    ])));
+
+  const list = DB.complexes.filter(c =>
+    (S.region === "전체" || c.sido === S.region) &&
+    (!S.missOnly || AXES.some(k => c.axes[k].score === null)));
+
+  wrap.appendChild(h("p", { class:"sub", text:
+    list.length + "곳 표시 (6축 완비 "
+    + list.filter(c=>AXES.every(k=>c.axes[k].score!==null)).length + "곳 · 미확보 있는 곳 "
+    + list.filter(c=>AXES.some(k=>c.axes[k].score===null)).length + "곳)" }));
+
+  const grid = h("div", { class:"grid" });
+  list.forEach(c => {
+    const tb = totalBar(c, S.dropTrend);
+    const nMiss = AXES.filter(k=>c.axes[k].score===null).length;
+    const card = h("button", { class:"cx", type:"button",
+      "aria-label":c.name+" "+c.sgg+" 상세 열기. "+aria(c),
+      onclick:()=>{ S.view="detail"; S.cid=c.id; S.dong=null; S.floor=null;
+                    toTop(); render(); } }, [
+      h("div", { class:"nm", text:c.name }),
+      h("div", { class:"rg", text: c.sido.replace("특별시","").replace("광역시","")+" "+c.sgg
+        + (c.built ? " · "+c.built+"년" : " · 준공연도 미상")
+        + (c.hh ? " · "+c.hh.toLocaleString()+"세대" : " · 세대수 미상")
+        + (c.gc === "exact" ? "" : " · 좌표 " + (c.gc ? "추정" : "없음")) })
+    ]);
+    card.appendChild(radar(c, { small:true, dropTrend:S.dropTrend }));
+    card.appendChild(h("div", { class:"total" }, [
+      tb.tot === null ? h("span", { class:"none", text:"점수를 만들지 않았습니다 (0점이 아니라 '모름')" })
+        : h("span", { class:"v num", text:tb.tot.toFixed(1) }),
+      tb.tot === null ? null : h("span", { class:"u", text:"/ 100" }),
+      h("span", { class:"badge", text:"가중치 "+tb.cov+"% 반영" }),
+      nMiss ? h("span", { class:"badge badge--warn", text:"미확보 "+nMiss+"축" })
+            : h("span", { class:"badge", text:"6축 완비" })
+    ]));
+    card.appendChild(tb.svg);
+    card.appendChild(h("div", { class:"go", text:"동별 실거래 드릴다운 \u2192" }));
+    grid.appendChild(card);
+  });
+  wrap.appendChild(grid);
+  return wrap;
+}
+
+/* ── 화면 2: 동별 대시보드 ──────────────────────────────────────────────── */
+function viewDetail(){
+  const c = DB.complexes.find(x => x.id === S.cid);
+  const wrap = h("div");
+  wrap.appendChild(h("button", { class:"backbtn", type:"button", text:"\u2190 목록으로",
+    onclick:()=>{ S.view="list"; toTop(); render(); } }));
+
+  /* 6축 요약 */
+  const c1 = h("div", { class:"card" }, [
+    h("h2", { text:c.name }),
+    h("p", { class:"sub", text:
+      c.sido+" "+c.sgg+(c.built?" · "+c.built+"년":" · 준공연도 미상")
+      +(c.hh?" · "+c.hh.toLocaleString()+"세대":" · 세대수 미상")
+      +" · 대표 면적대 "+bandName(c.band)+"(중위 "+(c.price?c.price.area:"—")+"㎡)" }),
+    h("p", { class:"sub" }, [
+      h("span", { class:"badge badge--warn", text:"향: 미확보 (직접 입력)" }),
+      h("span", { text:" 방위 데이터가 DB에 0행이라 이 앱은 향을 모릅니다. "
+        + "추정도 하지 않습니다 — 동 배치 폴리곤(building.geom)도 0행입니다." })
+    ])
+  ]);
+  c1.appendChild(radar(c, { dropTrend:S.dropTrend }));
+  const tb = totalBar(c, S.dropTrend);
+  c1.appendChild(h("div", { class:"total" }, [
+    tb.tot === null ? h("span", { class:"none", text:"점수를 만들지 않았습니다" })
+      : h("span", { class:"v num", text:tb.tot.toFixed(1) }),
+    tb.tot === null ? null : h("span", { class:"u", text:"/ 100" }),
+    h("span", { class:"badge", text:"가중치 "+tb.cov+"% 반영" })
+  ]));
+  c1.appendChild(tb.svg);
+  const nPres = AXES.filter(k => c.axes[k].score !== null).length;
+  if (nPres < 3) c1.appendChild(h("div", { class:"note warn", html:
+    "측정된 축이 <b>"+nPres+"개</b>뿐이라 <b>면이 만들어지지 않습니다.</b> "
+    + "없는 축을 0으로 채워 모양을 완성하면 그건 \"모른다\"를 \"나쁘다\"로 바꾸는 것입니다." }));
+  c1.appendChild(axisList(c, S.dropTrend));
+  const tid = "alt"+c.id;
+  c1.appendChild(h("button", { class:"linkbtn", type:"button", "aria-expanded":"false",
+    "aria-controls":tid, text:"표로 보기 (스크린리더 대체본)",
+    onclick:(e)=>{ const t=document.getElementById(tid); const o=t.hasAttribute("hidden");
+      if(o) t.removeAttribute("hidden"); else t.setAttribute("hidden","");
+      e.currentTarget.setAttribute("aria-expanded", String(o)); } }));
+  const at = altTable(c); at.id = tid; at.setAttribute("hidden",""); c1.appendChild(at);
+  wrap.appendChild(c1);
+
+  /* ── 동별 ── */
+  const canAdj = !!c.refYm;
+  const useAdj = S.adj && canAdj;
+  const drawn = c.dongs.filter(d => d.n >= 3 && d.d !== "(미상)");
+  const skipped = c.dongs.filter(d => d.n < 3 && d.d !== "(미상)");
+  const unknown = c.dongs.find(d => d.d === "(미상)");
+  const single = drawn.length === 1 && drawn[0].d.indexOf("동") === -1 && isNaN(Number(drawn[0].d));
+
+  const c2 = h("div", { class:"card" }, [
+    h("h2", { text:"동(棟)별 실거래 — 같은 면적대 안에서만" }),
+    h("p", { class:"sub", html:
+      "가로축은 <b>단지 중위 ₩/㎡ 대비 배율</b>, 눈금은 <b>0.85~1.15 고정</b>입니다"
+      + "(단지마다 다시 잡으면 5% 편차와 20% 편차가 같은 그림이 됩니다). "
+      + "점 크기 = 표본 수. <b>호가가 아니라 체결가</b>입니다." })
+  ]);
+
+  if (single){
+    c2.appendChild(h("div", { class:"note warn", html:
+      "이 단지는 실거래의 동 정보가 <b>동 번호가 아니라 단지명</b>으로 들어와 있어"
+      + "(<span class=\"num\">"+drawn[0].n+"</span>건 전부 같은 값) <b>동별 비교를 제공하지 않습니다.</b> "
+      + "원천 데이터의 한계이며, 좌표나 순서를 지어내지 않습니다." }));
+  } else if (!drawn.length){
+    c2.appendChild(h("div", { class:"note warn", text:
+      "표본 3건 이상인 동이 없어 동별 비교를 그리지 않습니다." }));
+  } else {
+    if (!canAdj) c2.appendChild(h("div", { class:"note warn", html:
+      "<b>시점 보정 불가</b> — 이 시군구는 월 표본이 150건에 못 미쳐 완결 기준월이 없습니다"
+      + "(시장지수 표본 부족). <b>미보정 원값</b>으로 그립니다. "
+      + "보정률 0%로 표시하지 않습니다 — 0%는 \"시장이 안 움직였다\"는 주장이고 우리는 그걸 모릅니다." }));
+    else {
+      c2.appendChild(h("button", { class:"toggle", "aria-pressed":String(S.adj),
+        onclick:()=>{ S.adj=!S.adj; render(); } }, [
+        h("span", { class:"box", text:S.adj?"\u2713":"" }),
+        h("span", { class:"t", html:"시점 보정 적용 (기준월 <b>"+c.refYm+"</b>)"
+          + "<small>시군구 시장지수로 거래별 환산 후 중위. 끄면 미보정 원값입니다.</small>" }) ]));
+      c2.appendChild(h("button", { class:"toggle", "aria-pressed":String(S.ghost),
+        onclick:()=>{ S.ghost=!S.ghost; render(); } }, [
+        h("span", { class:"box", text:S.ghost?"\u2713":"" }),
+        h("span", { class:"t", html:"\u274C 대조군: 미보정 위치를 붉은 점선으로 겹쳐 보기"
+          + "<small>같은 데이터인데 동 순서와 폭이 달라집니다 — 그 차이가 곧 시장 이동입니다.</small>" }) ]));
+    }
+
+    const rows = drawn.map(d => ({ label:d.d, n:d.n,
+      ratio: useAdj ? d.adjR : d.rawR })).filter(r => r.ratio !== null);
+    const ghost = (S.ghost && useAdj) ? drawn.map(d=>({ ratio:d.rawR })) : null;
+    c2.appendChild(strip(rows, { kind:"dong", ghost,
+      aria: c.name+" 동별 배율: "+rows.map(r=>r.label+" "+r.ratio.toFixed(3)+"배 "+r.n+"건").join(", ") }));
+
+    const rr = rows.map(r=>r.ratio);
+    const sp = Math.max.apply(null,rr)/Math.min.apply(null,rr);
+    const spRaw = (function(){ const v = drawn.map(d=>d.rawR).filter(x=>x!==null);
+      return v.length ? Math.max.apply(null,v)/Math.min.apply(null,v) : null; })();
+    c2.appendChild(h("div", { class:"note", html:
+      (sp >= 1.10 ? "<b>동을 따져야 합니다 — 최대 \u00D7"+sp.toFixed(3)+"</b>."
+                  : "<b>동별 차이가 작습니다 — 최대 \u00D7"+sp.toFixed(3)+"</b>. 동보다 층을 보세요.")
+      + (useAdj && spRaw ? " 미보정으로 재면 \u00D7"+spRaw.toFixed(3)+" 였습니다 — "
+          + "<b>차이의 일부는 동이 아니라 계약 시점</b>이었습니다." : "") }));
+
+    /* 표 대체본 */
+    const t = h("table", { class:"alt" });
+    t.appendChild(h("thead",{},[h("tr",{},[h("th",{text:"동"}),h("th",{text:"배율"}),
+      h("th",{text:"미보정"}),h("th",{text:"표본"}),h("th",{text:"총 층수"})])]));
+    const tbb = h("tbody");
+    drawn.slice().sort((a,b)=>(useAdj?b.adjR-a.adjR:b.rawR-a.rawR)).forEach(d => {
+      tbb.appendChild(h("tr",{},[ h("td",{text:d.d}),
+        h("td",{class:"n",text:(useAdj?d.adjR:d.rawR)===null?"—":"\u00D7"+(useAdj?d.adjR:d.rawR).toFixed(3)}),
+        h("td",{class:"n",text:d.rawR===null?"—":"\u00D7"+d.rawR.toFixed(3)}),
+        h("td",{class:"n",text:d.n+"건"}),
+        h("td",{class:"n",text:d.floors?d.floors+"층":"—"}) ]));
+    });
+    t.appendChild(tbb); c2.appendChild(t);
+  }
+
+  /* 그리지 않되 숨기지 않는다 */
+  const notes = [];
+  if (skipped.length) notes.push("표본 3건 미만이라 <b>그리지 않은 동</b>: "
+    + skipped.map(d=>d.d+" "+d.n+"건").join(" · "));
+  if (unknown) notes.push("실거래에 동 정보가 없는 건: <b>"+unknown.n+"건</b>"
+    + " — 다른 동에 섞지 않고 따로 셉니다(전 DB 동 정보 보유율 84.2%).");
+  if (notes.length) c2.appendChild(h("div", { class:"note",
+    html: notes.join("<br>") + "<br>빼서 숨긴 것이 아니라 여기 적어 둡니다." }));
+  wrap.appendChild(c2);
+
+  /* ── 층대별 ── */
+  const c3 = h("div", { class:"card" }, [
+    h("h2", { text:"층대별 실거래 — 층 효과가 동 효과보다 크고, 더 안정적이다" }),
+    h("p", { class:"sub", html:
+      "운영 DB 실측에서 층 효과(중위 6.8%)가 동 효과(4.7%)보다 큽니다. "
+      + "게다가 층대는 표본이 크고 시점이 고르게 섞여 있어 <b>시점 보정 전후가 거의 같습니다</b> — "
+      + "동보다 <b>믿을 만한 신호</b>입니다." })
+  ]);
+  const frows = c.floors.map(f => ({ label:f.fb, n:f.n,
+    ratio: useAdj ? f.adjR : f.rawR })).filter(r => r.ratio !== null);
+  if (frows.length){
+    c3.appendChild(strip(frows, { kind:"floor",
+      aria:c.name+" 층대별 배율: "+frows.map(r=>r.label+" "+r.ratio.toFixed(3)+"배").join(", ") }));
+  }
+
+  /* 상대 층 위치 — building.floors 를 쓴다 */
+  if (c.bfl){
+    const withF = c.dongs.filter(d => d.floors && d.n >= 3 && d.d !== "(미상)");
+    if (withF.length){
+      if (S.dong === null) S.dong = withF[0].d;
+      const cur = withF.find(d => d.d === S.dong) || withF[0];
+      if (S.floor === null) S.floor = Math.max(1, Math.round(cur.floors * 0.5));
+      const fl = Math.min(cur.floors, Math.max(1, Math.round(Number(S.floor) || 1)));
+      /* 위에서 몇 번째인가. 최상층이 0% 가 되지 않도록 (floors-fl+1)/floors 로 센다. */
+      const pctTop = Math.max(1, Math.round((cur.floors - fl + 1) / cur.floors * 100));
+      const nameOf = p => p <= 20 ? "최상층권" : p <= 40 ? "상층" : p <= 60 ? "중간층"
+        : p <= 80 ? "중하층" : "저층";
+      const fb = fl <= 2 ? "1~2층" : fl <= 5 ? "3~5층" : fl <= 10 ? "6~10층"
+        : fl <= 15 ? "11~15층" : "16층~";
+      const fr = c.floors.find(f => f.fb === fb);
+      c3.appendChild(h("h3", { text:"내 물건의 상대 층 위치" }));
+      c3.appendChild(h("p", { class:"sub", html:
+        "같은 12층이라도 총 15층이면 <b>최상층권</b>, 총 36층이면 <b>중하층</b>입니다. "
+        + "<code>building.floors</code> 는 52,901동 <b>전부</b> 채워져 있어 실제로 아는 값입니다." }));
+      c3.appendChild(h("label", { class:"fld" }, [
+        h("span", { text:"동" }),
+        (function(){ const s = h("select", { "aria-label":"동 선택",
+            onchange:e=>{ S.dong = e.target.value; S.floor = null; render(); } },
+            withF.map(d => { const o = h("option", { value:d.d,
+              text:d.d + " (총 " + d.floors + "층 · " + d.n + "건)" });
+              if (d.d === cur.d) o.setAttribute("selected",""); return o; })); return s; })(),
+        h("span", { text:"층" }),
+        h("input", { type:"number", min:"1", max:String(cur.floors), value:String(fl),
+          "aria-label":"층 입력",
+          oninput:e=>{ const v = parseInt(e.target.value, 10);
+            S.floor = isNaN(v) ? 1 : Math.min(cur.floors, Math.max(1, v)); render(); } })
+      ]));
+      c3.appendChild(h("div", { class:"note", html:
+        "<b>"+cur.d+" "+fl+"층 / 총 "+cur.floors+"층 = 상위 "+pctTop+"% ("+nameOf(pctTop)+")</b>"
+        + (fr ? "<br>이 층대(" + fb + ") 실거래 배율 \u00D7"
+            + ((useAdj && fr.adjR !== null ? fr.adjR : fr.rawR)).toFixed(3)
+            + " · 표본 " + fr.n + "건" : "<br>이 층대는 표본이 없습니다.")
+        + "<br>이 동의 실거래 층 범위 " + cur.minF + "~" + cur.maxF + "층." }));
+    }
+  }
+  c3.appendChild(h("div", { class:"note", html:
+    "표기는 <b>인과가 아니라 사실</b>입니다 — \"이 동이 좋아서 비싸다\"가 아니라 "
+    + "<b>\"이 동의 실거래가 단지 중위보다 X% 높았다\"</b>. "
+    + "타입·향·리모델링은 통제하지 못했습니다. <b>향 데이터는 DB에 0행입니다.</b>" }));
+  wrap.appendChild(c3);
+
+  /* ── 호가 타당성 ── */
+  wrap.appendChild(askPanel(c, useAdj));
+  return wrap;
+}
+
+function bandName(b){
+  return ({"1_lt60":"60㎡ 미만","2_60_85":"60~85㎡","3_85_102":"85~102㎡",
+           "4_102_135":"102~135㎡","5_gt135":"135㎡ 초과"})[b] || b;
+}
+
+/* 호가 타당성 — 실거래(과거)와 호가(현재)를 **섞지 않는다** */
+function askPanel(c, useAdj){
+  const sc = DB.scenarios.find(s => s.cid === c.id);
+  const card = h("div", { class:"card" }, [
+    h("h2", { text:"호가 타당성 — 실거래(과거) vs 호가(현재)" }),
+    h("div", { class:"note bad", html:
+      "⚠️ <b>DB의 호가(<code>listing</code>) 테이블은 0행입니다.</b> 아래는 "
+      + "<b>사용자가 호가를 직접 입력했다고 가정한 시나리오</b>이며 실제 매물이 아닙니다.<br>"
+      + "실거래는 <b>과거에 체결된 값</b>, 호가는 <b>현재 부르는 값</b>입니다 — "
+      + "성격이 다른 숫자라 뺄셈 한 번으로 비교되지 않습니다. "
+      + "신고기한 30일 + 수집 최신일 <span class=\"num\">"+M.tradeMax+"</span>." })
+  ]);
+  if (!sc){
+    card.appendChild(h("div", { class:"note", html:
+      "이 단지에는 시나리오를 넣지 않았습니다. 호가 패널은 <b>같은 동·같은 층대 셀의 실거래를 "
+      + "직접 뽑아야</b> 정확합니다 — 단지 중위에 동 배율·층 배율을 곱한 <b>모델 추정치로 "
+      + "대체하지 않습니다.</b> 시나리오는 파크리오(보정 가능)와 태봉마을(보정 불가) 두 곳입니다." }));
+    return card;
+  }
+  const p = c.price;
+  const lad = h("ul", { class:"lad" });
+  lad.appendChild(h("li", { class:"top" }, [
+    h("span", { class:"k", text:"내가 입력한 호가 · "+sc.dong+" "+sc.floor+"층 "+sc.area+"㎡ · "
+      + sc.facing+" (입력값)" }),
+    h("span", { class:"v", text:eok(sc.ask) })
+  ]));
+  lad.appendChild(h("li", {}, [
+    h("span", { class:"k", text:"├ 같은 동·층대("+sc.dong+" "+sc.fb+") 실거래 중위 · 미보정 "
+      + (sc.n ? sc.n+"건 / 24개월" : "표본 없음") }),
+    h("span", { class:"v", text: sc.rawMed !== null ? eok(sc.rawMed) : "—" })
+  ]));
+  if (sc.adjustable && sc.adjMed !== null){
+    const shift = (sc.adjMed/sc.rawMed - 1) * 100;
+    lad.appendChild(h("li", {}, [
+      h("span", { class:"k", text:"├ 시점 보정 (시군구 시장지수 → 기준월 "+sc.refYm+")" }),
+      h("span", { class:"v", text:pc(shift) })
+    ]));
+    lad.appendChild(h("li", {}, [
+      h("span", { class:"k", text:"├ 보정 후 실질 (그 셀 거래를 "+sc.refYm+" 수준으로 환산)" }),
+      h("span", { class:"v", text:eok(sc.adjMed) })
+    ]));
+    lad.appendChild(h("li", {}, [
+      h("span", { class:"k", text:"├ 호가 − 보정 후 실질" }),
+      h("span", { class:"v", text:pc((sc.ask/sc.adjMed - 1) * 100) })
+    ]));
+  } else {
+    lad.appendChild(h("li", { class:"miss" }, [
+      h("span", { class:"k", text:"├ 시점 보정" }),
+      h("span", { class:"v", text:"보정 불가 — 지역 시장지수 표본 부족" })
+    ]));
+  }
+  const base = (sc.adjustable && sc.adjMed !== null) ? sc.adjMed : sc.rawMed;
+  const pos = sc.ask < p.p10 ? "p10 아래 — 같은 면적대에서 드물게 싼 구간"
+    : sc.ask <= p.p25 ? "p10~p25 구간"
+    : sc.ask <= p.p50 ? "p25~중위 구간"
+    : sc.ask <= p.p75 ? "중위~p75 구간"
+    : sc.ask <= p.p90 ? "p75~p90 구간 · 비싸지만 이상치는 아님"
+    : "p90 위 — 최근 12개월 실거래 상위 10% 밖";
+  lad.appendChild(h("li", {}, [
+    h("span", { class:"k", text:"└ 단지 "+p.area+"㎡ 최근 12개월 분포("+p.n+"건) 안의 위치" }),
+    h("span", { class:"v", text:pos })
+  ]));
+  card.appendChild(lad);
+  card.appendChild(bandBar(p, sc.ask));
+
+  if (sc.trades && sc.trades.length){
+    card.appendChild(h("h3", { text:"그 셀의 실거래 "+sc.trades.length+"건 (숨기지 않고 전부)" }));
+    const t = h("table", { class:"alt" });
+    t.appendChild(h("thead",{},[h("tr",{},[h("th",{text:"계약일"}),h("th",{text:"층"}),
+      h("th",{text:"면적"}),h("th",{text:"실거래가"}),h("th",{text:sc.refYm+" 환산"})])]));
+    const tb = h("tbody");
+    sc.trades.forEach(x => tb.appendChild(h("tr",{},[
+      h("td",{text:x.date}), h("td",{class:"n",text:x.floor+"층"}),
+      h("td",{class:"n",text:x.area+"㎡"}), h("td",{class:"n",text:eok(x.price)}),
+      h("td",{class:"n",text:x.adj?eok(x.adj):"—"}) ])));
+    t.appendChild(tb); card.appendChild(t);
+    const last = sc.trades[sc.trades.length-1];
+    card.appendChild(h("div", { class:"note warn", text:
+      "이 셀의 가장 최근 실거래는 "+last.date+" · "+eok(last.price)+" 입니다. "
+      + "그 뒤로 거래가 없었다는 뜻이지 가격이 그대로라는 뜻이 아닙니다." }));
+  }
+  card.appendChild(h("div", { class:"note bad", html:
+    "⚠️ <b>향(向)으로 가격을 보정하지 않았습니다.</b> <code>building.direction_deg</code> 0행 · "
+    + "<code>building.geom</code> 0행이라 배치도로 방위를 추정할 길도 없습니다. "
+    + "위의 \""+sc.facing+"\"은 <b>사용자가 적어 넣은 값</b>이며 검증되지 않았습니다." }));
+  return card;
+}
+
+function render(){
+  const m = document.getElementById("main");
+  m.innerHTML = "";
+  m.appendChild(S.view === "list" ? viewList() : viewDetail());
+}
+render();
+</script>
+</body>
+</html>

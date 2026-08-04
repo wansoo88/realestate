@@ -1,139 +1,86 @@
 {
  "code_review": {
   "status": "passed",
-  "id": "CR-048",
-  "date": "2026-08-04",
-  "at": "2026-08-04T17:20:00+09:00",
+  "id": "CR-051",
+  "date": "2026-08-05",
+  "at": "2026-08-05T09:40:00+09:00",
   "reviewer": "code-reviewer",
   "deploy_ready": false,
-  "previous": "CR-047 (failed · 차단 CR47-1 · CR47-2)",
-  "scope": "PM 지시로 **하루 발송 상한 하나**로 좁힘 — deploy/monitor-lib.sh(_send_quota_check/_send_quota_commit/send_telegram) + deploy/monitor-selftest.sh 의 (발송 상한) 7경로. CR-047 의 비차단 이월분(CR47-3~CR47-10)은 이번 판정 대상 아님 = 미검증 이월.",
-  "reviewed_sha256": {
-   "monitor.sh": "83bda3dd324b8509af840d58358d93166d15fc195ed4edd3a27a8e7f049ffad6",
-   "monitor-lib.sh": "7f8a35aa2db900b1a358e6aeda85cfa7811b13d1a0e8e70d93985d74edc58f6c",
-   "monitor-selftest.sh": "6c67f837d82b3374ecacbad8d58a06e575e6754a0992d683d4efe7e31aff6610",
-   "note": "PM 동결 해시와 시작·종료 모두 3/3 일치. 리뷰 중 트리 변경 0"
+  "previous": "CR-050 (passed)",
+  "scope": "CR-050 비차단 7건(CR50-1·2·3·6·7·8·9) 조치 재검증 + 감시 v6 편입(check_v6ssh) — backend/app/domain/backtest/collect.py(assert_rereadable·StreamAlreadyConsumed·_CLAIMED·peak_live_rows) · asof/engine · scripts/run_backtest.py(apply_session_guards·stream_results) · tests/test_backtest.py(+10검사) · docs/02-design/backtest.md 5-1·7-13-B·7-14-B · deploy/monitor.sh(7e·_v6_rule_is_drop·_v6_scan·check_v6ssh) · monitor-selftest.sh(T6e +51검사) · docs/05-monitoring/monitoring.md · ux/hexagon-report-data.md 0장 · api-spec.md 4.5. character/·frontend/ 무접촉",
+  "frozen_sha256_match": "2/2 (monitor.sh 27d75fae...c7c5 · monitor-selftest.sh a9e66170...5e8b2 — 시작·서버 격리사본·종료 3중 일치). 저장소 파일 무변경 — 변이는 서버 격리사본에만 넣고 원본 재전송으로 sha256 원복 확인. git status 시작=종료",
+  "baseline_reproduced": {
+   "selftest": "서버 격리 사본 /root/rev51/{deploy,docs} (트리 유지) — 통과 341 · 실패 0 · 건너뜀 1 · 하네스오류 0 · rc=0 (PM 기준값과 일치). 윈도우 실행 0회",
+   "pytest": "backend 전량 1,626 passed · 103 skipped · 0 failed · rc=0 (PM 기준값과 일치). ruff 통과",
+   "mut_markers": "저장소 전체 grep -rn 'MUT-' = 0건 (PM 기준값과 일치)"
   },
-  "baseline_selftest": "서버 격리 사본 /root/rev48/base — 통과 231 · 실패 0 · 건너뜀 1 · HARN 0 · rc=0 (55초). 판정 기준(실패 0·HARN 0·rc=0)은 PM 보고와 일치하나 숫자는 불일치(PM 226/0/3) → CR48-4",
-  "resolved_from_previous": {
-   "CR47-1": "해소. _send_quota_commit 호출 전수 2곳이 성공 경로(:277 DRY-RUN · :296 HTTP200)에 정확히 있고, 실패 경로 3곳(:268 억제 · :285 자격증명없음 · :304 curl 3연속실패)에 정확히 없다. send_capped=1 도 commit 안(:256)으로 옮겨져 상한 통보가 나간 뒤에만 잠긴다 — 통보 유실 시 재시도된다. fail-open 3중(비숫자→60 · 0→60 · send_count 손상→통과) 확인.",
-   "CR47-2": "해소. 지정 변이 3종이 전부 죽는다. CR-047 에서 생존했던 M13(=C) · M15(=B) 가 이번엔 죽는다. HARN 4회 실행 전부 0."
+  "independent_measurements": {
+   "peak_live_rows": "gc 전수 계수(as_of_trades 런타임 래핑 · 20,000행 · chunk 250 · 160회 표집): 운영 모양 살아있는 BacktestTrade 최대 501 vs collector.peak_live_rows 500 (일치 · +1은 제너레이터 프레임). apt_dong=None 은 실제 250 인데 500 으로 위로 잡는다 — 독스트링이 먼저 그렇게 밝혔다. BacktestTrade 를 새로 만드는 자리는 asof.py:153 replace 하나뿐 — 계수는 전수다",
+   "view_bytes": "tracemalloc 재측정: 운영 모양 181 B/행(문서 값과 정확히 일치) · apt_dong=None 57 B/행(문서 44 B/행 과 같은 자리)",
+   "rereadable_guard": "build_cells/build_outcomes — list·tuple·dict_values·set 전부 통과 / list_iterator·generator·map·chain·filter 전부 TypeError. 약한참조 못 거는 형까지 막힌다",
+   "db_census": "운영 DB 읽기 전용 SELECT: trade 총 1,076,262 · contract_date>=2024-01-01 이 611,518(= 백필 전 총계와 정확히 일치) · 그 이전 464,744 · 범위 2021-01-01~2026-07-25 → 2024+ 무변화. market_price_index 2,381행 · 2024-01~2026-07 (백필 구간으로 재생성 안 됨)",
+   "server_state": "ip6tables -S INPUT 실측이 ip6-ok.txt 픽스처와 완전 일치 · re-v6-ssh-drop.service 는 Type=oneshot+RemainAfterExit=yes 이고 ExecStart 가 --dport 22 -j DROP (담당자 실측 근거 1·2 확인). 서버 방화벽·유닛 변경 0"
   },
-  "mutations": {
-   "총계": "3종 지정 — 3 죽음 / 0 생존 (전부 서버 격리 사본 · 기준선 231/0/1 HARN0 rc=0 · monitor-lib.sh 한 파일만 치환)",
-   "A commit 을 check 직후로 이동 + 성공 2곳 제거(CR47-1 옛 결함 복원)": "230/1/1 rc=1 죽음 — '(발송 상한) 발송 실패도 상한으로 센다'",
-   "B SEND_MAX_DAY 기본값 60→0 + case 의 |0 제거(전 경보 영구 침묵)": "229/2/1 rc=1 죽음 — '(대조군) 평범한 실행에서 경보가 억제된다' + '평시에 상한 통보가 나간다'",
-   "C commit 안의 kv_set send_count 증가 삭제": "230/1/1 rc=1 죽음 — '(발송 상한) send_count 가 안 오른다'"
-  },
-  "blocking": [],
+  "mutations": "3종을 한 번에 넣고 서버 격리사본에서 1회 실행 — 합 10검사 사망 · rc=1 · 무리가 서로 겹치지 않는다. (1) _v6_scan 의 _f2b_rule_verdict → harmless : 5 (순서 3 · 순서 fail-open 2) (2) check_v6ssh 의 유닛부재 판정 제거 : 3 (유닛 삭제) (3) _v6_rule_is_drop 의 -s 거부 제거 : 2 (가짜 DROP · 판정표). 대조군 2무리는 무반응 → 오탐 축이 따로 선다",
   "findings": {
-   "CR48-1 (M)": "HTTP 200 성공 경로의 commit(monitor-lib.sh:296)은 관문이 한 번도 안 밟는다 — run_mon(:333)이 항상 DRY_RUN=1 이고, 유일한 DRY_RUN=0 인 (사)(:1543)는 빈 자격증명 파일로 curl 미도달, 내부 직접 호출(:1807)도 DRY_RUN=1. 그 한 줄만 지우는 변이는 생존한다(운영에서 상한 무력화). 차단 아님 — 지워져도 경보는 계속 나간다(소음 쪽). 수정: :1558 의 sshpw 900 검사와 같은 구조 검사 1줄(code=200 블록 안에 _send_quota_commit 이 있는가).",
-   "CR48-2 (M)": "일일 요약(monitor.sh:1512-1516)이 send_telegram 을 그대로 타서 상한에 막힌다. 그 본문이 '이 메시지가 아침에 오지 않으면 감시나 서버가 멈춘 것이다' 이고 monitor-lib.sh:283 도 같은 논리를 최후 안전장치로 쓴다 → 상한 소진일에는 소음 사고가 서버 사망처럼 보인다. 수정: 요약(과 :1456 채널시험)은 상한 밖으로(하루 1통이라 폭주 위험 없음).",
-   "CR48-3 (M)": "운영자 손검사 레시피(DEPLOY.md:1296 · :1348)에 RE_MON_STATE 가 없어 운영 상태 디렉터리(monitor-lib.sh:21)에 쓴다. ① 이번에 생긴 것: send_count 를 깎는다. ② 전부터 있고 더 큰 것: DRY-RUN 이 return 0 이라 raise_alert(:327)가 운영 alerts/<key>.sent 를 찍어 진짜 경보를 쿨다운만큼(대부분 6시간, cert·pgcrash·jsonlog·sshjournal·dbstruct_cfg 는 24시간) 억제한다. 자체검사는 결백 — :126 이 source 앞에서 RE_MON_STATE 를 격리하고, 실측으로 4회 실행 후 운영 kv 의 send_* 파일 0개 확인. 수정: 코드 아님, 문서에 RE_MON_STATE=$(mktemp -d) 한 줄.",
-   "CR48-4 (L)": "PM 보고 226/0/3 과 실측 231/0/1 불일치. DEPLOY.md:1292-1294 가 '숫자는 판정 기준이 아니다'를 못 박아 판정 영향은 없다. 실측의 유일한 SKIP 은 oomkill(cgroup/docker 필요)이고 서버엔 둘 다 있으므로 PM 쪽 SKIP 3 은 반출 사본의 파일 누락으로 보인다. 자체검사가 읽는 파일은 monitor.sh · monitor-lib.sh · market-index.sh · job-run.sh · ../docs/05-monitoring/monitoring.md 5개 전부 — DEPLOY.md 격리 실행 절차에 못 박을 것."
+   "high": [],
+   "medium": [
+    "CR51-1 상한(SampleLimitExceeded)에 걸려 멈춘 수집기가 그 뒤 cells()/outcomes() 로 부분 결과를 조용히 낸다 — feed 가 소비 전에 _fed=True 를 세우고 _require_fed 가 그 상태를 통과시킨다. 재현: 픽스처 75행 정상 5셀 → max_samples=40 이면 3셀(전부 measured) · 60 이면 5셀인데 outcomes 4/5. 예외·경고 0. 운영 실행기는 예외를 전파해 죽으므로 지금 도는 경로엔 없다(→M). 고칠 것: raise 앞에 _aborted=True + _require_fed 가 거부, 검사 1개"
+   ],
+   "low": [
+    "CR51-2 _f2b_order_scan 재사용을 버린 판단은 옳은데(직접 확인 — 체인이름 인자가 DROP 이면 INPUT 의 첫 DROP 줄에서 break) 그것을 지키는 픽스처가 없다. ip6-shadow.txt 에 우리 DROP 앞의 다른 DROP 이 없어, 재사용판으로 '정리'해도 T6e 51건이 전부 초록. 고칠 것: 픽스처 맨 앞에 '-A INPUT -p tcp -m tcp --dport 3306 -j DROP' 한 줄",
+    "CR51-3 check_v6ssh 의 재부팅 복구 판정은 유닛의 이름과 enabled 상태만 보고 ExecStart 내용은 안 본다. is-active 에는 '보호의 증거가 아니다'를 못박고 is-enabled 에는 '재부팅 복구를 보장한다'고 적어 같은 논법을 한쪽에만 적용했고, '못 잡는 것' 4줄 목록에도 없다. 서버 실측상 현재 유닛은 올바르다 → 목록 누락 문제. 고칠 것: 한 줄 추가(또는 systemctl cat 에서 --dport/DROP 확인)",
+    "CR51-4 _CLAIMED 약한참조 구멍 실재 — map·chain·list_iterator 를 수집기 둘에 넘기면 두 번째가 조용히 rows_seen=0. 주석이 한계를 먼저 밝혔고 공개 API 는 assert_rereadable 이 전부 막으며 운영 원천은 제너레이터라 걸린다",
+    "CR51-5 CR50-9 절반만 닫힘 — hexagon-report-data.md 구분표는 생겼으나(핵심 비대칭 해소) 낡은 611,518 이 표시 없이 5곳(agents/scoring.py:15 · valuation/timeadjust.py:7 · deploy/DEPLOY.md:342 · enhancement-research.md:33·153·219 · api-spec.md:1171). CR50-9 가 짚은 어긋남도 잔존 — api-spec.md:679(§4.5)의 실측 36.1% vs complex-typing.md:31 의 낡음 표시. §4.5 의 901개(5.5%)·2,775개(16.9%)도 같은 날 값",
+    "CR51-7 CR50-4·CR50-5 는 범위 밖이라 그대로 — 저장소 동치검사가 여전히 순환 · 스트리밍 창 경계와 _region/T창 수집 규칙에 전용 검사 없음",
+    "잔가지 — --max-samples -1 무검증 · --chunk-rows 0 은 ValueError 트레이스백 · run_backtest(trades: Sequence) 는 Iterable 이 맞다 · collect.py:76 '숫자로 적었다'는 7-13-B 가 [미측정] 추정임을 감안하면 살짝 세다 · character/ 미변경에 따른 CR49 잔존 2건"
+   ]
   },
-  "pm_questions": {
-   "Q1 DRY-RUN 을 '나간 것'으로 세는 결정의 부작용": "수용 가능 — 단 CR48-3 의 문서 1줄 조건. ① 관문은 상태를 격리하므로 운영 상한을 안 깎는다(실측 확인). ② 남은 노출인 운영자 손검사는 상한보다 훨씬 큰 부작용(쿨다운 .sent 오염, 최대 24시간 침묵)을 이미 갖고 있어, 고칠 지점은 상한이 아니라 손검사 격리다. ③ 상한만 DRY-RUN 예외로 빼면 commit 의 유일한 실행 커버리지가 0 이 된다(CR48-1) — 이 프로젝트가 두 라운드 싸운 '관문이 못 밟는 경로'를 다시 만드는 셈.",
-   "Q2 상한을 빼는 것이 더 안전한가": "두세요(유지 권고). ① 쿨다운은 대체재가 아니다 — clear_alert(:339)가 .active 와 .sent 를 함께 지워 해소 직후 재발화는 쿨다운을 안 거친다. 플래핑은 --fast 1분 주기에서 왕복 2통 x 1440 = 하루 2880통이 이론상 가능하고 sshpw 900 과 무관하다. ② 앵커는 원격 위조를 막는 것이지 우리 쪽 폭주를 막는 게 아니다. ③ 텔레그램 봇을 pjt12-adsense 와 공유해 읽으므로(:31-32) 폭주가 남의 채널까지 묻는다. ④ 상한이 낸 결함은 이번에 둘 다 닫혔고 fail-open 이 3중이라 최악 경로가 좁아졌다 — 지금 빼면 닫힌 결함 때문에 살아 있는 방어를 버리는 것. 단 다음 라운드 후보 둘: (ㄱ) CR48-2 일일 요약을 상한 밖으로 (ㄴ) clear_alert 에도 최소 지속시간을 둬 플래핑 근원을 막고 상한을 진짜 마지막 방어선으로 내릴 것."
-  },
-  "unresolved_carryover": [
-   "CR47-3~CR47-10 (이번 범위 밖 · 미검증 이월)",
-   "CR46-4 / CR46-8 / CR46-9 / CR46-10 (CR-047 이월분 그대로)",
-   "CR45-5 / CR46-6 kv fail-open",
-   "CR40-8 (전송 실패·억제여도 clear_alert 가 .active 를 지운다 — 이번 CR48-2/Q2 근거와 같은 뿌리)"
-  ],
-  "hygiene": "트리 동결 해시 3/3 시작·종료 일치 · 저장소 소스 수정 0 · git checkout -- 미사용 · 커밋 0 · frontend/** · docs/02-design/** 무접촉 · LF 유지 · /opt/realestate/scripts/** 무접촉(참조 명령 0건) · 격리 /root/rev48/ 사용 후 삭제 · 텔레그램 0통(자체검사 DRY_RUN=1 · DRY_RUN=0 실험은 빈 자격증명 파일로 curl 미도달) · 윈도우에서 selftest 미실행 · 변이는 python 문자열 치환으로만 생성 후 tar|ssh 반출 · 자체검사 실행 4회(기준 1 + 변이 3)",
-  "notes": "PASS · 차단 0 (M3 · L1). CR47-1 은 호출부 전수(성공 2 · 실패 3)로 해소 확인, CR47-2 는 지정 변이 A/B/C 가 전부 죽어 해소 확인(CR-047 생존분 M13·M15 포함). 기준선 231/0/1 HARN0 rc=0. 남은 지적은 셋 다 작다: HTTP200 커밋 지점이 관문 밖(CR48-1) · 일일 요약이 상한에 막혀 침묵 신호가 오염(CR48-2) · 운영자 DRY-RUN 손검사가 운영 상태를 오염(CR48-3, 상한보다 쿨다운 쪽 피해가 큼 · 문서 1줄로 해결). PM 질문 답: DRY-RUN 계수는 수용 가능(문서 조건부), 상한은 유지 권고 — clear_alert 가 쿨다운을 리셋해 플래핑 폭주를 쿨다운으로 막을 수 없기 때문.",
-  "log": "docs/03-build/code-review-log.md §CR-048",
-  "previous_round": {
-   "id": "CR-047",
-   "note": "failed · 차단 2건(CR47-1 · CR47-2). 둘 다 이번에 해소 확인"
-  }
+  "cr050_disagreement_closed": "CR50-9 의 '가격매력 51.7%·가격추세 50.2% 가 백필로 오른다'는 리뷰어(CR-050)가 틀렸고 담당자 읽기가 맞다. 운영 DB 직접 계수로 확인: 2024+ 부분합 611,518 = 백필 전 총계 → 2024+ 무변화, 두 축의 창(전부 2024-07 이후)은 영향 없음. hexagon-report-data.md 0장의 그 줄을 '확인 필요' → '유효' 로 옮기고 근거 한 줄을 적을 것. 다만 같은 표의 market_price_index 줄은 열려 있다 — 실측 2,381행·min 2024-01 이라 백필 구간으로 재생성되지 않았다",
+  "notes": "pass — High 0. CR50-1·2·3·6·7·8 해소(독립 계수·재측정으로 확인), CR50-9 절반. 감시 v6 편입은 변이 3종이 각각 자기 무리만 죽이고 clear 를 통보+.active 삭제로 본다. 새 Medium 1건(CR51-1 상한 정지 뒤 조용한 부분 결과)은 운영 경로 밖이라 비차단. 다음 커밋 전 권고: CR51-1(가드 1줄+검사 1개) · CR51-2(픽스처 1줄) · CR51-3(한 줄) · CR51-6(문서 2줄)",
+  "log": "docs/03-build/code-review-log.md CR-051"
  },
  "security_review": {
   "status": "passed",
-  "id": "SR-044",
-  "date": "2026-08-04",
-  "at": "2026-08-04T10:05:00+09:00",
+  "id": "SR-047",
+  "date": "2026-08-05",
+  "at": "2026-08-05T03:05:00+09:00",
   "reviewer": "security-reviewer",
-  "scope": "SR-043 PASS 이후 변경분만 — deploy/monitor.sh · deploy/monitor-lib.sh · deploy/monitor-selftest.sh. 동결 해시 3/3 시작·종료 모두 일치(83bda3dd… / 7f8a35aa… / 6c67f837…). 코드 읽기 + 짧은 읽기 전용 서버 실측. monitor-selftest.sh 미실행(윈도우 금지 지시 준수). /opt/realestate/scripts/** 수정·삭제 0 · 텔레그램 0통 · 격리 디렉터리 생성 0. frontend/** 와 docs/02-design/** 미열람.",
-  "previous": "SR-043 (passed · 차단 0 · SR43-1 Medium 이월)",
+  "previous": "SR-046 (failed)",
+  "scope": "SR46-1(IPv6 SSH 차단) 조치 재검증 + 신설 감시 check_v6ssh 검증 + SR46-2(문서 배포상태 허위) 정정 확인. 대상: deploy/monitor.sh(7e 구획 · _v6_rule_is_drop · _v6_scan · check_v6ssh) · deploy/monitor-selftest.sh(T6e) · docs/05-monitoring/{fail2ban.md,monitoring.md} + 서버 읽기전용 실측(ip6tables · systemd 유닛 · nft · sshd 리스너 · fail2ban actionstart · 크론 · 배포본 sha256). backend/** · frontend/** 무접촉 · /opt/realestate/scripts/** 무접촉.",
+  "frozen_sha256_match": "2/2 (monitor.sh 27d75fae…4c7c5 · monitor-selftest.sh a9e66170…5e8b2 — 시작·서버 격리사본·종료 3중 일치. 리뷰 중 트리 변경 0)",
+  "baseline_reproduced": {
+   "selftest": "서버 격리 사본 /root/sec47 (deploy+docs 트리 유지) — 통과 341 · 실패 0 · 건너뜀 1 · 하네스오류 0 · rc=0 (PM 기준값과 일치). 2회 실행(윈도우 실행 금지 준수) — 1회차는 job-run.sh · market-index.sh 미복사로 실패 14/HARN 5, 코드 결함 아님. T6e(IPv6) 구획 2 PASS · 0 FAIL",
+   "pytest": "backend 전량 1,626 passed · 103 skipped · 0 failed · rc=0 (PM 기준값과 일치)",
+   "mut_markers": "grep -rn \"MUT-\" deploy/ = 0건 (PM 기준값과 일치)"
+  },
+  "sr046_followup": {
+   "SR46-1": "해소 — 대조군을 둔 실측으로 확인. v6 [fe80::…%enp3s0]:22 = nc -w 6 을 꽉 채우고 6008ms 실패(DROP) · 같은 스택의 미개방 v6 포트 9999 = 1ms 즉시 거부(RST) · v4 127.0.0.1:22 = 7ms 연결 성공(IPv4 무사). ip6tables -S INPUT 1번 자리에 '-A INPUT -p tcp -m tcp --dport 22 -j DROP' 실재. 유닛 re-v6-ssh-drop.service is-enabled=enabled + multi-user.target.wants 심볼릭 링크 실재. 네이티브 nft 우회 규칙 없음(nft list tables = 호환 테이블 5개뿐)",
+   "SR46-2": "해소 — monitoring.md:193-200 · fail2ban.md:45-59 가 '저장소에만 있고 아직 서버에서 돌지 않는다'를 실측 근거(배포본 sha256 83bda3dd… · grep -c check_fail2ban=0)와 함께 명시. 예전 서술이 거짓이었다는 것도 적혀 있다",
+   "담당자_설계변경_2건": "둘 다 옳다. ① is-enabled 를 재부팅 복구 기준으로 삼은 것 — Type=oneshot+RemainAfterExit=yes 는 규칙을 지워도 영원히 active 라 is-active 를 근거로 썼으면 방화벽이 뚫린 채 초록이었다. enabled-runtime 을 notenabled 로 떨어뜨린 것까지 맞다. ② 빈 is-enabled 를 is-active 로 가른 것 — 유닛 파일 삭제(경보)와 systemd 불가(감시불능)를 구분한다. ③ 점프가 아니라 DROP 을 본 것 — ip6tables -S f2b-sshd 가 '-A f2b-sshd -j RETURN' 한 줄뿐인 것을 실측 확인(점프로 판정했으면 활짝 열린 채 초록)"
+  },
+  "false_positive_check": "monitor.sh 에서 _f2b_redact_addr · _f2b_rule_verdict · _f2b_port_covered · _v6_rule_is_drop · _v6_scan 을 함수째 뽑아 자체검사와 무관하게 독립 실행(17 케이스). 이 서버 현재 ip6tables 출력 -> ok(오탐 0) · -P INPUT DROP -> policy(경보 없음) · ip6tables 없음/실행실패 -> blind_add(감시불능, clear 금지) · DROP 앞 포괄 ACCEPT -> shadow · 하위 체인 -> unsure · -s 붙은 DROP/-i lo/다른 포트/f2b 점프만 -> missing(경보). 우회 탐지·무해 판정 모두 의도대로.",
+  "new_attack_surface": "없음. check_v6ssh 는 5분마다 root 로 ip6tables -S INPUT · systemctl is-enabled/is-active 를 부르지만 eval 0회 · 모든 확장이 따옴표 안 · printf 형식문자열이 상수 · _f2b_bin 이 절대경로 우선(PATH 는 마지막). 알림에 실리는 규칙은 _f2b_redact_addr 로 주소가 <ip> 로 가려지고 전송 직전 scrub() 이 한 번 더 돈다. 텔레그램 토큰은 curl -K - 로 stdin(ps 노출 없음) · 본문은 --data-urlencode 로 따옴표 안. 경보 키 v6ssh_rule · v6ssh_unit 이 f2b_rule 과 분리되어 상호 덮어씀 없음.",
   "blocking": [],
-  "deploy_approved": false,
-  "deploy_approved_note": "보안 게이트는 PASS(Critical/High 0). 배포 승인은 별개 — 운영본이 3라운드째 앵커 없는 옛 SSHPW_RE(:567 · sha256 b0001419… 불변)이고 kv/send_day·send_count·send_capped 가 전부 비어 있어 상한 기능은 아직 운영에 없다. ⚠️ 선결조건: 상한 코드를 옛 정규식 위에 먼저 얹지 말 것 — 앵커 없는 판에서는 미인증 원격 공격자가 SSH 사용자명 주입으로 sshpw 경보를 만들어 60통 상한을 임의 소진, 다른 모든 경보를 침묵시킬 수 있다(SR44-1 을 High 로 격상시키는 조합). 앵커 판과 상한을 같은 배포에 함께 올릴 것.",
-  "resolved_from_previous": {
-   "SR43-1(무발화 소진)": "부분 해소. _send_quota_commit 이 HTTP 200 이후에만 카운터를 올리고(monitor-lib.sh:296), 상한 통보도 나간 뒤에야 send_capped=1 을 찍는다(:256). 한 통도 도달 없이 채널이 죽는 은밀한 무력화 경로 제거 — 이제 소진에는 사람이 실제 60통을 받는다. 잔존분은 SR44-1 로 재기재.",
-   "CR47-1(상한값 위생)": "해소. RE_MON_SEND_MAX_DAY 가 비숫자·0 이면 기본 60 복귀(:221-223). 방향 승인(안전한 실패=더 시끄러운 쪽). 주입 경로 실측 0건 — RE_MON_* 를 세팅하는 crontab/cron.d/systemd 유닛 없음, monitor.sh 0750 root:root 라 비-root 교체 불가 = 이미 root 여야 함.",
-   "CR47-1(fail-open)": "타당 판정. send_count 손상 시 fail-open 은 비-root 로 악용 불가 — 실측 /var/lib/realestate-monitor 0700 root · kv 0700 root · kv/* 0600 root · /var/lib 0755 root. 동거계정 ubuntu(1000)·autobtc(1001) 접근 전무. 손상 가능 주체는 root 뿐이고 root 는 이미 monitor.sh 자체를 고칠 수 있어 신뢰경계를 넘지 않는다.",
-   "억제 로그 분리": "해소. ALERT-SUPPRESSED-CAP 낱말 분리(:268)로 쿨다운 억제(ALERT-SUPPRESSED)와 관문이 엉키지 않는다.",
-   "sshpw 쿨다운 900": "확인. raise_alert sshpw 900 2곳. 첫 통은 .sent 부재라 즉시 발화(트립와이어 즉시성 유지)."
-  },
-  "findings": [
-   {
-    "id": "SR44-1",
-    "severity": "medium",
-    "cwe": "CWE-703 · CWE-400 · OWASP A09",
-    "title": "발송 상한에 보안 트립와이어 예약 쿼터가 없다 — 공격자 유발 폭주로 당일 로그 전용화(요란한 무력화, 은밀 무력화는 아님)",
-    "where": "deploy/monitor-lib.sh:266 (_send_quota_check 를 키 구분 없이 전 발송에 적용) · deploy/monitor.sh:303 (raise_alert \"oom_$name\" 0 — 유일한 쿨다운 0)",
-    "evidence": "서버 실측 crontab: --fast 가 */5 = 288회/일. 쿨다운 전수 확인 결과 0 인 경보는 oom 단 1종(나머지 900~604800). 컨테이너당 최대 288통/일 → 상한 60을 약 5시간에 소진. 소진 후 sshpw·authedit·authfake·authshrink·logperm·logleak 이 텔레그램에서 사라지고 로그 전용. api5xx 는 쿨다운 3600(24통/일)이라 단독 소진 불가.",
-    "why_not_high": "사람이 먼저 60통을 실제로 받으므로 은밀하지 않다. 원문은 억제 이전에 monitor-lib.sh:326 log \"ALERT $key :: $msg\" 로 항상 로그에 남고, 상한은 자정(send_day 교체)에 자동 해제된다.",
-    "fix": "보안 키(sshpw·sshjournal·authedit·authfake·authshrink·logperm·logleak)를 상한에서 면제. 이들은 쿨다운 900~86400 으로 이미 자체 상한(최대 96통/일)이 있어 폭주 위험이 없다. send_telegram 은 키를 모르므로 raise_alert 에서 플래그(예: RE_MON_SEND_EXEMPT=1)를 넘겨 _send_quota_check 를 건너뛰게 하면 수 줄로 닫힌다. 대안으로 oom 쿨다운을 0→3600 으로."
-   },
-   {
-    "id": "SR44-2",
-    "severity": "low",
-    "cwe": "CWE-703",
-    "title": "send_count fail-open 이 '이번 한 통 통과'가 아니라 카운터 리셋이다",
-    "where": "deploy/monitor-lib.sh:244",
-    "evidence": "비숫자 감지 시 kv_set send_count 0 후 return 0 — 그날 누적분이 통째로 사라진다. kv 가 0600 root 라 공격자 악용 경로는 없으나, 디스크 부분기록이 반복되면 상한이 사실상 무한이 된다.",
-    "fix": "리셋 대신 이번 호출만 통과시키고 blind_add/log 로 손상 사실을 남길 것(monitor.sh:666 의 sshpw_off 처리와 동일 패턴)."
-   },
-   {
-    "id": "SR44-3",
-    "severity": "low",
-    "cwe": "CWE-1188",
-    "title": "SEND_MAX_DAY 에 하한이 없다 — 0 은 막지만 1 은 허용(침묵 효과 유사)",
-    "where": "deploy/monitor-lib.sh:221-223",
-    "evidence": "case 문이 ''|*[!0-9]*|0 만 60 으로 되돌린다. 1~9 같은 유효 소수값은 그대로 수용되어 사실상 전면 침묵에 가깝다. 다만 환경변수 주입 경로 실측 0건(root 한정)이라 잔여 위험은 낮다.",
-    "fix": "하한 도입 — 10 미만이면 10(또는 60)으로 올림."
-   },
-   {
-    "id": "SR44-4",
-    "severity": "medium",
-    "carryover_of": "SR42-5",
-    "cwe": "CWE-116 · OWASP A09",
-    "title": "운영본이 3라운드째 앵커 없는 취약 정규식 — 배포로만 닫힌다",
-    "where": "서버 /opt/realestate/scripts/monitor.sh:567",
-    "evidence": "읽기 전용 실측: SSHPW_RE='Accepted (password|keyboard-interactive)' (줄머리 앵커 없음). sha256 b00014192b5d8576e8d88806e2113c634e61e68d92964b09612cac1e231a7a80 — SR-043 때와 동일 = 그사이 배포 0. monitor-lib.sh a392fef0… 구판. kv/send_day·send_count·send_capped 전부 빈 값 = 상한 기능 운영 미적용. kv/fast_runs_today=275 로 감시 자체는 정상 가동.",
-    "not_blocking_reason": "게이트 통과 전 배포 금지 원칙(CR45-6①)으로 생긴 상태 — SR-043 과 동일 논리로 이번 판정을 차단하지 않는다.",
-    "fix": "게이트 통과 후 앵커 판과 상한을 같은 배포로 동시에 올릴 것(순서 역전 금지)."
-   }
+  "non_blocking": [
+   "SR47-1 (Medium · CWE-693/1284) — _v6_rule_is_drop(monitor.sh:1508-1532)이 -m recent · -m limit · -m hashlimit · -m iprange --src-range · -m set · -m mac 으로 좁혀진 DROP 을 '22번 완전 차단'으로 인정한다. 고전 SSH rate-limit 관용구(-m recent --hitcount 4 --seconds 60 -j DROP, 분당 3회 통과)를 넣어도 _v6_scan -> ok, 요약 '22번 DROP 걸려 있음' 초록. 문서는 '이름만 맞는 규칙에 안 속는다'고 적었으나 실제로 거르는 것은 -s/-i lo/프로토콜/--ctstate/포트 다섯뿐이다(--src-range 는 패턴이 공백을 요구해 -s 검사에 안 걸린다). 수정: 조건부 매치 모듈 거절 목록 추가 + fail2ban.md 문구 정정 + T6e 에 -m recent 픽스처 1개.",
+   "SR47-2 (Medium · CWE-778/390) — fail2ban 의 actionstart 가 '<iptables> -I <chain> …'(=-I INPUT, 1번 자리)라, fail2ban 을 한 번만 재시작하면 v6 f2b-sshd 점프가 우리 DROP 위로 올라간다(현재 아래에 있는 것은 PM 이 나중에 -I INPUT 1 을 한 우연 — 실측: fail2ban 08-04 20:44:34 · v6 유닛 08-05 01:54:49). 차단력 자체는 안 뚫린다(f2b-sshd v6 체인이 RETURN 한 줄뿐인 것을 실측). 문제는 _v6_scan 이 매번 unsure 를 돌려 blind_add 가 5분마다 영구히 쌓이고, check_logblind(monitor.sh:1712-1714)가 단일 키 logblind 로 6시간마다 영구 발송 + clear_alert logblind 가 다시는 안 불린다는 것. logblind 는 로그권한·로그유출·5xx·SSH·인증서·DB 사유를 전부 모으는 키라 진짜 감시불능이 이 상시 소음에 묻힌다. 수정(택1): ① _v6_scan 이 우리 DROP 을 찾은 뒤 앞선 -j <F2B_CHAIN> 은 unsure 로 세지 않고 그 체인을 ip6tables -S 로 한 번 더 실측 ② 유닛이 항상 1번 자리를 보장(-D 후 -I INPUT 1) + After=fail2ban.service ③ 최소한 v6ssh 전용 blind 키로 분리해 logblind 오염 차단. ⚠️ ②는 서버 유닛 변경이라 이번 리뷰에서 하지 않았다(PM 판단 필요).",
+   "SR47-3 (Low · CWE-696) — 유닛이 After=/Wants=network-online.target 인데 sshd 는 After=network.target basic.target 이다(실측). 즉 매 재부팅마다 sshd 가 [::]:22 를 연 뒤 DROP 이 걸린다. 이 서버에서 그 틈은 wait-online 81ms 수준으로 짧지만, wait-online 이 타임아웃하면(기본 120초) 그만큼 v6 22번이 열린 채다. 방화벽 규칙은 네트워크 준비가 필요 없다. 수정: DefaultDependencies=no + Before=network-pre.target ssh.service (최소한 Before=ssh.service 한 줄). ⚠️ 서버 유닛 변경이라 이번 리뷰에서 하지 않았다.",
+   "SR47-4 (Low) — v6 를 안 듣는 호스트에서는 missing 경보가 오탐이다(-P INPUT ACCEPT + 규칙 0개). 코드 주석·fail2ban.md 가 이미 정확히 인정하고 있고 이 서버는 [::]:22 를 실제로 들으므로 지금은 오탐이 아니다. 선택 수정: ss -H -ltn 'sport = :22' 로 [::] 리스너를 한 번 읽어 안 들으면 요약 문구로 낮춤(못 읽으면 지금처럼 보수적으로 경보).",
+   "SR47-5 (Info) — _f2b_redact_addr(monitor.sh:1206-1208)가 ::ffff:1.2.3.4 를 <ip><ip> 로 두 번 치환한다. 주소는 완전히 가려지므로 유출 없음. 표기만 어색. 조치 불요."
   ],
-  "cap_feature_recommendation": {
-   "verdict": "두라(조건부 존치) — 결정은 PM",
-   "rationale": [
-    "폭주 방어가 실제로 필요하다: oom 쿨다운 0 이 살아 있고 --fast 는 288회/일. 상한을 빼면 컨테이너 1개당 288통, 2개면 576통/일이 가능하며 이는 가정이 아니라 현재 코드에서 직접 도출되는 값이다.",
-    "2라운드 차단의 원인은 기능이 아니라 배치였다 — '판정과 소진을 묶어 보내지도 못한 통을 셌다'는 결함이며 check/commit 분리로 정확히 해소됐다.",
-    "남은 결함(SR44-1)의 해법은 제거가 아니라 예약 쿼터 수 줄이다. 빼면 SR44-1 은 사라지지만 폭주 방어가 0 이 되어 순 손실이다.",
-    "sshpw 쿨다운 900 과 앵커는 위조 유입을 막는 장치이지 볼륨을 막는 장치가 아니다 — oom(쿨다운 0)에는 효과가 없으므로 '이미 막혀 있다'는 근거로 부족하다."
-   ],
-   "conditions": [
-    "(a) 보안 키 상한 면제(SR44-1 해소) 후 배포",
-    "(b) 앵커 판(SR42-1 조치)과 같은 배포로 동시 반영 — 순서 역전 시 미인증 원격 소진이 열린다"
-   ],
-   "if_removed": "상한을 정 뺀다면 최소한 oom 쿨다운을 0→3600 으로 올려 폭주 상한을 대체할 것. 그냥 빼기만 하는 선택지는 권하지 않는다."
+  "limits_honesty_audit": "fail2ban.md §IPv6 의 '못 하는 것' 8개 중 7개는 실측으로 정직함을 확인했다 — v6 대입 미집계(grep -c fe80 /var/log/fail2ban.log=0) · 필터 미수정 · 하위 체인 미관측 · sshd v6 리스너 미확인(코드에 ss 호출 0) · 재부팅 미실행(부팅 2026-04-23 vs 유닛 첫 실행 2026-08-05 01:54:49 수동) · 다른 v6 포트 미관측 · 네이티브 nft 미관측(그리고 '오늘 이 서버에 없다'도 nft list tables 로 사실 확인). 과대 1건: 'DROP 앞 f2b 점프면 blind_add 가 남는다'는 결과를 과소 서술(SR47-2). 누락 1건: 매치 모듈로 좁힌 DROP 을 완전 차단으로 센다는 사실이 목록에 없다(SR47-1).",
+  "server_side_effect": "없음. 서버는 읽기 전용으로만 만졌다 — ip6tables/systemctl/nft/ss/grep/sha256sum/crontab -l 조회와 자기 자신에 대한 nc 연결 시도 3회(상태 변경 없음)뿐. 방화벽 규칙·systemd 유닛·sshd 설정 무변경 · 재부팅 안 함 · /opt/realestate/scripts/** 무접촉(sha256 읽기만) · 텔레그램 발화 0통 · 격리 /root/sec47/ 사용 후 삭제 · git checkout -- 미사용 · 커밋 없음.",
+  "deploy_approved": false,
+  "deploy_approved_note": "리뷰 게이트는 pass 이지만 배포 승인은 아니다. 서버에서 도는 판은 여전히 83bda3dd(check_fail2ban · check_v6ssh 없음)이고 v6 방어를 지켜보는 것은 아직 아무것도 없다 — 그 사실 자체는 문서에 정확히 적혀 있다(SR46-2 해소). 배포(G5) 전에 SR47-2 를 먼저 정리할 것을 권고한다: fail2ban 을 한 번만 재시작하면 logblind 경보가 상시 ON 이 되어 배포 직후부터 경보 채널이 죽는다.",
+  "counts": {
+   "critical": 0,
+   "high": 0,
+   "medium": 2,
+   "low": 2,
+   "info": 1
   },
-  "server_measurements": {
-   "state_perms": "/var/lib/realestate-monitor 0700 root:root · kv 0700 · alerts 0700 · kv/* 0600 root · /var/lib 0755 root",
-   "cohabiting_users": "ubuntu(1000) · autobtc(1001) — 둘 다 kv 접근 불가",
-   "cron": "*/5 * * * * monitor.sh --fast (288회/일) · 5 9 * * * monitor.sh --daily",
-   "env_injection": "RE_MON_* 설정 crontab/cron.d/systemd 0건",
-   "script_perms": "/opt/realestate/scripts/monitor.sh · monitor-lib.sh · monitor-selftest.sh 모두 0750 root:root · 상위 디렉터리 0755 root(비-root 교체 불가)",
-   "deployed_hashes": "monitor.sh b00014192b5d8576e8d88806e2113c634e61e68d92964b09612cac1e231a7a80 · monitor-lib.sh a392fef0ac7775bac0946143433f3f3b0709c516aac0c3816a54f4227fbbff64",
-   "quota_state": "kv/send_day · send_count · send_capped 전부 빈 값(상한 미배포) · kv/fast_runs_today=275",
-   "safety": "읽기 전용만. /opt/realestate/scripts/** 수정·삭제 0 · 텔레그램 0통 · monitor-selftest.sh 미실행 · 격리 디렉터리 생성 0(불필요)"
-  },
-  "note": "fail2ban 은 사용자 지시에 따라 이번 결론에 포함하지 않았다."
+  "notes": "pass — Critical 0 · High 0 · Medium 2 · Low 2 · Info 1. SR-046 의 차단 사유 SR46-1(IPv6 SSH)은 대조군을 둔 실측으로 닫힌 것을 확인했다: v6 22번 = 6008ms 타임아웃(DROP) · 같은 스택 미개방 v6 포트 = 1ms 거부 · v4 22번 = 7ms 성공(IPv4 무사). 유닛 enabled + 심링크 실재 · 네이티브 nft 우회 없음. SR46-2(문서가 미배포를 '돈다'고 서술)도 실측 근거와 함께 정정됐다. 신설 check_v6ssh 는 현재 서버 실제 ip6tables 출력에서 오탐 0 이고, -P INPUT DROP 호스트에서 policy 로 조용하며, ip6tables 부재/실패는 감시불능(fail-open)으로 간다. 새 공격면 없음(주입 없음 · 절대경로 · 주소 redact + scrub · 토큰 stdin). 담당자가 실측으로 바꾼 설계 2건(is-enabled 기준 · 빈 출력 두 갈래)과 '점프가 아니라 DROP 을 본다'는 판단 모두 옳다. 남은 Medium 2건은 접근 통제 구멍이 아니라 감시 정확도 문제다 — SR47-1(매치 모듈로 좁힌 DROP 을 완전 차단으로 인정) · SR47-2(fail2ban 재시작 한 번이면 logblind 경보가 영구 ON 이 되어 다른 감시불능 사유를 전부 덮는다). 재부팅 복구는 유닛 정의로만 판단했다 — 실제 부팅 경로는 한 번도 밟히지 않았고 나도 재부팅하지 않았다(담당자 서술과 동일)."
  },
  "open_findings": [
   {

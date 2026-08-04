@@ -9747,3 +9747,944 @@ SKIP (상태손상 oomkill) cgroup·docker 가 있어야 도달 — 행동으로
 이번은 **PASS** 이므로 조치 의무는 없다. 다만 CR48-1(관문 1줄) · CR48-2(요약 예외) ·
 CR48-3(문서 1줄)은 셋 다 **작고 근거가 확정된 것**이라, 다음 변경에 묶어 넣는 것을 권한다.
 셋을 넣으면 발송 상한 주제는 닫힌다.
+
+---
+
+## CR-049 · 2026-08-04 · fail2ban 감시 편입(A) + 백테스트 골격(B) + 단지 유형(C) — 커밋 전
+
+**범위(3덩어리 · 전부 미커밋)**
+
+| | 대상 |
+|---|---|
+| A | `deploy/monitor.sh`(+223) · `deploy/monitor-selftest.sh`(+299) · `docs/05-monitoring/monitoring.md`(+20) · `docs/05-monitoring/fail2ban.md`(신규) |
+| B | `backend/app/domain/backtest/**`(7파일 1,530줄) · `backend/tests/test_backtest.py`(1,088줄 86검사) · `backend/scripts/run_backtest.py`(352줄) · `docs/02-design/backtest.md` |
+| C | `backend/app/domain/character/**`(4파일 671줄) · `backend/tests/test_character.py`(448줄 47검사) · `docs/02-design/ux/complex-typing.md` · `docs/02-design/api-spec.md`(+60) |
+
+**동결 해시 — 시작·종료 모두 일치(2/2)**
+```
+43169225702438ab3dc9769e032233c100adaba64df7550aa554fd55134a29d4  deploy/monitor.sh
+ccc8590b50b7ebe853adf3cbe88bd9c8dcbcf623169cc2ce574f0e959807a052  deploy/monitor-selftest.sh
+```
+리뷰 중 트리 변경 0(`git status` 시작=종료). `backend/app/domain/backtest/asof.py` 는 변이 시험으로
+잠시 고쳤다가 원복 — 종료 시 `1933fd89b99240f876bc580f9d2090042b5f4a5680cca36c1e922762ee253e1a`(원본).
+`/opt/realestate/scripts/**` 무접촉 · 텔레그램 발화 0 · 격리 `/root/rev49/`(종료 시 삭제) · `frontend/**` 무접촉.
+
+### 기준값 재현 (전부 내가 직접 실행)
+
+| 항목 | 담당자/PM 보고 | 내 실측 | |
+|---|---|---|---|
+| 서버 격리 자체검사 | 271 / 0 / 1 / HARN 0 / rc=0 | **271 / 0 / 1 / HARN 0 / rc=0** | 일치 |
+| `test_backtest.py` + `test_character.py` | 86 + 47 | **133 passed** | 일치 |
+
+---
+
+## 변이 시험 4종 — **4/4 죽었다**
+
+관문이 공허하지 않은지 직접 확인했다. 변이는 python 문자열 치환으로 만들고 `tar`/`stdin` 으로만 옮겼다.
+
+| # | 변이 | 결과 |
+|---|---|---|
+| ① | A — 규칙 존재 검사 제거 (`monitor.sh:1203` `if [ -z "$jump" ]` → `if false`) | **rc=1 · 실패 3** — `(규칙) 규칙이 통째로 빠졌는데 …조용하다` · `(규칙) 요약이 규칙 소실을 말하지 않는다` · `(규칙 해소) 규칙을 다시 걸어도 경보가 안 꺼진다` |
+| ② | A — clear 경로 1개 제거 (`clear_alert f2b_stale` 줄 삭제) | **rc=1 · 실패 2** — `(필터 해소) 필터가 되살아나도 경보가 안 꺼진다` · `(필터 해소) …`.active` 가 남는다` |
+| ③ | B — as-of 누출 가드 제거 (`asof.py:121` `if trade.contract_date > cutoff: continue` 무력화) | **rc=1 · 실패 15** — `TestLookAhead` 5건 전부 + `test_universe_is_built_from_the_as_of_view_only` + 손계산 검사들 |
+| ④ | B — `apt_dong` 마스킹 제거 (`asof.py:142` → `apt_dong = trade.apt_dong`) | **rc=1 · 실패 1** — `test_apt_dong_is_masked_before_registration` (→ CR49-6) |
+
+변이 ①이 포트 검사를 안 죽인 것은 정상이다(점프 grep 자체는 남겨 두고 "없음" 판정만 없앤 변이라
+`--dports 2222` 픽스처는 여전히 `badport` 로 잡힌다). 즉 변이가 **의도한 검사 하나만** 정확히 겨눴다.
+
+---
+
+## A — fail2ban 감시. 담당자가 서버 실측으로 바꿨다는 4건을 내가 다시 쟀다
+
+| # | 담당자 주장 | 내 실측(같은 서버·`fail2ban 0.11.2`) | |
+|---|---|---|---|
+| 1 | `fail2ban-client status <없는jail>` 은 **rc=0** | `Sorry but the jail 'x' does not exist`(stdout) + stderr `ERROR NOK` + **rc=255** | ❌ **틀렸다** → CR49-1 |
+| 2 | 크론 PATH `/usr/bin:/bin` 인데 `iptables` 는 `/usr/sbin` 에만 | `ls /usr/bin/iptables` → `No such file` · `which iptables` → `/usr/sbin/iptables` · root crontab·`/etc/crontab` 에 `PATH` 지정 없음 | ✅ 맞다 |
+| 3 | `is-active` 는 inactive 일 때 **rc=3 + stdout 낱말** | `systemctl is-active nosuchunit-xyz` → stdout `inactive` · **rc=3** | ✅ 맞다 |
+| 4 | 하루 235~517건이 차단 조건에 닿는다 | 재계산 안 함(auth.log 전수 재생 비용). 현재 jail 실측은 `Total banned 24 / Total failed 220 / Currently banned 4` 로 **자릿수는 모순되지 않는다** | 미검증(수용) |
+
+`iptables -S INPUT` 실측도 픽스처와 글자까지 같다: `-A INPUT -p tcp -m multiport --dports 22 -j f2b-sshd`.
+
+### 좋은 점 — 이 저장소가 다섯 번 놓친 형태(CR-040·42-3·43-1·44-2·47-2)가 이번엔 안 났다
+
+새 경보 키 3개의 clear 경로를 **행동으로** 밟는지 하나씩 확인했다.
+
+| 키 | clear 조건 | 감시불능일 때 | 자체검사가 행동으로 보는가 |
+|---|---|---|---|
+| `f2b_dead` | `svc = active` (**낱말을 읽어서**) | `svc` 빈 문자열 → `:` — raise 도 clear 도 안 함 | (다) `ALERT-CLEARED` + `.active` 삭제까지 |
+| `f2b_rule` | `rule=ok` (iptables 읽힘 ∧ 점프 존재 ∧ 포트 덮음) | `rule=unknown` → clear 금지 | (마) 해소 2검사 + (사) fail-open 4검사 |
+| `f2b_stale` | `total > prev` **만** | `total` 빈 문자열 → clear 금지 · 카운터 **감소(재시작 리셋)도 clear 금지** | (자) 해소 2검사 + (차) 리셋 2검사 + (카) rc 오답 3검사 |
+
+변이 ②가 (자)를 정확히 죽였다 = **문구 검사가 아니라 행동 검사**다.
+"진짜 정지를 감시불능으로 덮는" 반대 방향도 막혀 있다 — `is-active` 를 **rc 가 아니라 stdout 낱말**로
+읽으므로 rc=3(실측)이 와도 `inactive` 로 정확히 판정한다. 빈 출력만 감시불능이다.
+
+### CR49-1 (M) — "없는 jail 에 rc=0" 은 **거짓 실측**이다. 세 파일이 그 거짓을 근거로 삼는다
+
+**재현**
+```
+$ ssh root@<host> "fail2ban-client status nosuchjail-xyz >/dev/null 2>&1; echo \$?"
+255
+$ ssh root@<host> 'fail2ban-client status nosuchjail-xyz 2>/dev/null; echo RC=$?'
+Sorry but the jail 'nosuchjail-xyz' does not exist
+RC=255
+```
+`fail2ban-client status sshd` 는 rc=0 이다. 즉 **rc 로 가를 수 있다.** 그런데
+
+* `deploy/monitor.sh` 머리주석(`⛔ fail2ban-client status <없는jail> → **rc=0** … 실측`)과
+  본문 주석(`⛔ 여기가 rc 를 안 믿는 이유다 — 없는 jail 에도 rc=0 이 온다(실측)`)
+* `deploy/monitor-selftest.sh` 머리주석 + 가짜 `fail2ban-client`(없는 jail에 `exit 0`) +
+  하네스 전제 `PATH=… fail2ban-client status nosuchjail >/dev/null 2>&1`(= **rc=0 을 요구**)
+* `docs/05-monitoring/monitoring.md` T6d 줄(`**없는 jail 에도 rc=0** 이라는 실측을 못 박음`)
+
+**세 곳이 같은 틀린 사실을 정본처럼 적었다.**
+
+**동작 결함은 아니다.** 코드는 rc 를 아예 안 보고 `Total banned:` 추출 성공 여부로만 판정하므로,
+실제 rc=255 든 가정된 rc=0 이든 결과가 같다(`total` 빈 문자열 → `blind_add`). 오히려 rc 무시가 더 안전하다.
+**문제는 픽스처가 현실과 다르게 군다는 것**이고, 그건 이 파일이 스스로 못 박은 규칙이다 —
+*"픽스처가 현실과 다르게 굴면 검사가 공허해진다"*(monitor-selftest.sh 머리주석). 결과로:
+실제 모양(**rc≠0 + stdout 에 `Sorry but…`**)은 자체검사에서 **한 번도 밟히지 않는다**.
+그리고 하네스 전제 검사가 거짓 사실을 **요구**하므로, 누가 픽스처를 사실대로 고치면 하네스오류로 붉어진다.
+
+**고칠 것**
+1. 세 곳의 "실측 rc=0" 문구를 실측(rc=255 · stdout 에 `Sorry but…`)으로 정정.
+2. 가짜 `fail2ban-client` 가 없는 jail 에 `exit 255` + 같은 stdout 을 내게 바꾸고, 하네스 전제도 그에 맞출 것
+   (`! fail2ban-client status nosuchjail >/dev/null 2>&1`).
+3. **코드는 그대로 둔다.** rc 를 안 믿는 판정이 옳다 — 근거만 "rc 가 버전·경로마다 다를 수 있어
+   `Total banned:` 추출로 판정한다"로 바꾸면 된다.
+
+### CR49-2 (L) — `monitoring.md` 신규 4행 오타 4개
+
+설계 정본 문서라 낱말이 뜻을 바꾼다.
+
+| 위치 | 지금 | 맞는 말 |
+|---|---|---|
+| 7d-① | 진짜 정지가 '감시불능'으로 **덤인다** | 덮인다 |
+| 7d-③ | 진짜 증가가 **곰** 꺼 준다 | 곧 |
+| 7d-④ | 알림·요약에 **IP 는 싫지 않는다** | 싣지 |
+| 제외표 | 요약에 사실로만 **싰고** | 싣고 |
+
+---
+
+## B — 백테스트. **누출 차단은 진짜다.** 단, 실행기에 문제가 있다
+
+### 누출 차단 — 내가 직접 확인한 결론
+
+`asof.py` 를 읽고 변이 ③·④ 로 밟은 결과, **T 이후 데이터가 점수에 닿는 경로는 문서에 적힌 하나
+(`is_cancelled`)뿐이고 그 밖의 미기재 누출은 찾지 못했다.** 확인한 경로:
+
+| 경로 | 판정 |
+|---|---|
+| 계약일 경계 `cutoff = T − 30일` | ✅ 가드 있음. **변이 ③으로 15검사가 죽는다** — 담당자가 단언한 "가드를 끄면 상위 2가 뒤집힌다"는 `test_the_poison_is_actually_potent` 에 손계산과 함께 박혀 있고(`(c5,c3)` → `(c3,c1)`), 그 단언이 실제로 하중을 받는다 |
+| `apt_dong` (등기 후 채워짐) | ✅ 가드 있음(`registered_at > T` 또는 `None` 이면 마스킹). 단 CR49-6 참조 |
+| `registered_at`·`cancelled_on` 미래값 | ✅ 지운다 |
+| 시장지수(`market_price_index`) | ✅ **읽지 않는다.** 양 끝을 같은 `price_point()` 로 재서 비만 쓴다(창 폭이 같아 시점 중심 오프셋도 같다) |
+| 세대수(현재 스냅샷) | ✅ 시불변이 맞다. T 이후 준공 단지는 T 창에 거래가 없어 유니버스에 못 든다 |
+| 피어 중위 | ✅ T 시점 셀들로만 만든다 |
+| `outcomes`(미래 뷰) → 점수 | ✅ 구조적으로 차단. `run_fold` 가 `scorer(cells)` 로 점수를 **먼저 확정**하고, `Scorer` 는 `AsOfCell` 만 받는다(`AsOfCell` 에는 원본 거래도 미래 칸도 없다) |
+| `is_cancelled`(기본 `EXCLUDE_FINAL`) | ⚠️ **누출이 맞고, 문서·주석·테스트가 그렇게 적고 있다.** 상·하한 두 정책으로 범위를 말하는 완화책도 있다 → 다만 CR49-4·CR49-5 |
+
+즉 **B 의 핵심 주장은 성립한다.** 아래는 그 주변의 결함이다.
+
+### CR49-3 (M·상 — 첫 실행 전 반드시) — 실행기가 전 구간 거래를 **한 번에 메모리에 올린다**
+
+`backend/scripts/run_backtest.py:261`
+```python
+trades = list(repo.trades_for_backtest(start=start, end=end))
+```
+리포지토리는 제너레이터로 시군구 단위 스트리밍을 하는데(설계대로), **유일한 소비자가 그걸 통째로
+리스트로 접는다.** `start/end` 는 폴드 **전체의 합집합**(`min`/`max`)이라 폴드가 늘수록 더 커진다.
+
+**실측**
+
+| 항목 | 값 | 근거 |
+|---|---|---|
+| `BacktestTrade` 1행 | **383 B** | `tracemalloc` 로 20만 행 생성 측정(실제 RSS 는 이보다 큼) |
+| `backtest.md §8` 첫 실행 예시 `--as-of 2025-01-31` 의 필요 범위 | 2023-01-01 ~ 2026-01-01 | `FoldSpec.required_contract_range`(2W+H) |
+| 그 범위의 행 수 | **613,228행** | 운영 DB 실측 SELECT |
+| 예상 힙 | **≈235 MB**(tracemalloc 기준) | 613,228 × 383 B |
+| 서버 메모리 | **총 957 MB · available 225 MB · 스왑 2 GB 중 이미 818 MB 사용 중** | `free -m` · `swapon --show` |
+
+`repository.py` 머리주석과 `backtest.md §8` 이 **"운영 DB 는 `mem_limit 192MB` 다 — 시군구 단위로
+나눠 읽고 스트리밍으로 넘긴다"** 를 규칙으로 못 박았는데, 실행기가 그 규칙의 목적을 무효로 만든다
+(DB 쪽 결과집합은 실제로 잘려 있으니 **DB 는 안전하고, 위험한 쪽은 클라이언트다**).
+`§7 한계` 12줄 어디에도 이 제약이 없다.
+
+**왜 H 가 아니라 M(상) 인가** — 스왑이 1.2 GB 남아 있어 하드 OOM 보다는 **스래싱**으로 끝날 가능성이
+높고, 오프라인·수동 실행 스크립트이며 데이터를 깨지 않는다(읽기 전용 SELECT). 다만 그 대가는
+**API 컨테이너(mem_limit 192m)와 postgres 가 같은 상자에 산다**는 것이고, 문서의 **첫 실행 명령**이
+바로 이 경로다. **첫 실행 전 필수 수정**으로 둔다. (PM 이 "서버 증설 불가·최소구성" 을 못 박은 프로젝트다.)
+
+**고칠 것(택1 이상)**
+1. 폴드별로 그 폴드 범위만 읽고, 시군구 묶음 단위로 **셀 집계까지 접은 뒤** 원본 행을 버린다
+   (`build_cells`/`build_outcomes` 가 셀 단위 누적을 받게).
+2. 최소한: 실행 전 `count(*)` 를 먼저 재서 **예상 행수·예상 메모리를 로그로 찍고 임계 초과면 멈춘다**
+   (`--force` 로만 통과). `build_market_index.py` 가 이미 하는 방식과 맞춘다.
+3. `§7 한계` 에 이 제약과 실측 숫자를 한 줄로 적는다.
+
+### CR49-4 (M) — 산출 JSON 이 **해제 정책을 안 적는다** → "상·하한 두 번 돌려 범위로" 가 파일에서 사라진다
+
+`--cancellation` 의 도움말이 직접 **"상·하한 두 번 돌려 범위로 보고하세요(§2-D)"** 라고 지시한다.
+그런데 `run()` 의 payload(`run_backtest.py:299-309`)에도 `fold_row()`(`engine.py:482-506`)에도
+`cancellation` 이 없다. `unmeasured_policy` 는 실린다.
+
+결과: `--cancellation exclude_final` 로 만든 JSON 과 `include_all` 로 만든 JSON 이
+**내용만으로는 구별되지 않는다.** 범위 보고의 두 끝을 나중에 아무도 증명할 수 없다.
+같은 이유로 `min_trades` · `min_peer_cells` · `report_lag_days` · `seed` 도 payload 에 없어 **재현이 안 된다**
+(`top_n` · `unmeasured_policy` 만 `fold_row` 에 있다).
+
+**고칠 것**: payload 에 `params` 블록(`cancellation` · `min_trades` · `min_peer_cells` ·
+`report_lag_days` · `seed` · `null_draws`)을 넣고, 두 정책 산출물이 서로 다른 파일임을 파일 내용이 말하게 할 것.
+
+### CR49-5 (M) — 독스트링이 **무조건으로** "T 이후에 의존하지 않는다"고 단언한다. 기본 정책에서 거짓이다
+
+`asof.py:102` / `engine.py:111`
+> `"이 함수의 출력은 T 이후 데이터에 의존하지 않는다."`
+
+기본값 `CancellationPolicy.EXCLUDE_FINAL` 에서는 **거짓**이다. `is_cancelled` 는 *사후에 확정된*
+값이고, T 이후에 해제된 거래를 T 시점 표본에서 지운다. 같은 파일이 45줄 위에서
+`#: ⚠️ **누출이다** — 사후에 확정된 해제여부로 T 시점 표본을 청소한다` 라고 적어 두었으므로
+**두 문장이 서로 모순**이다.
+
+누출 테스트도 이 축을 못 짚는다 — `test_future_trades_do_not_change_the_as_of_view` 의 독
+(`LAG_WINDOW_POISON` · 미래 거래)에는 **해제 거래가 없어서** 이 차원은 자동으로 통과한다.
+(대신 `TestCancellationPolicy.test_exclude_final_matches_production` 이 사실 자체는 못 박고 있다 — 그래서 M 이다.)
+
+**고칠 것**: 두 독스트링을 조건부로. 예) *"해제 여부(`is_cancelled`)를 제외하면 출력은 T 이후 데이터에
+의존하지 않는다. 해제 축은 §2-D 의 상·하한으로만 말한다."* 문장 하나면 된다 —
+**이 패키지의 근거가 되는 문장이라 무조건으로 두면 다음 사람이 그대로 믿는다.**
+
+### CR49-6 (L) — `apt_dong` 가드는 지금 **아무 계산에도 닿지 않는다**(변이 ④가 1검사만 죽였다)
+
+`AsOfCell` 에 동 칸이 없고 어떤 스코어러도 동을 보지 않는다. 그래서 마스킹을 통째로 없앤 변이 ④에서
+죽은 검사는 **전용 단위 검사 1개**뿐이고, `build_cells` 파이프라인 검사는 **하나도 안 죽었다**.
+`assert_as_of` 의 동 그물(`asof.py:174-180`)도 파이프라인 경로에서 한 번도 밟히지 않는다는 뜻이다
+(픽스처가 `apt_dong` 을 안 심는다).
+
+방어 자체는 옳다(문서 §2-B 가 "놓치기 쉬운 실제 누출 경로"라 부르는 자리다). 다만 **"동을 쓰는 축이
+생기면 막힌다"는 보장이 파이프라인 테스트에는 없다.**
+**고칠 것**: `universe_trades()` 픽스처 일부에 `apt_dong` + `registered_at`(T 이후)를 심어,
+`build_cells` 경로에서도 마스킹 제거가 `LookAheadError` 로 붉어지게 할 것.
+
+### B 잔가지 (L · 비차단)
+
+* `engine.py:359` `rng.sample(list(pool), top_n)` — 기본 `null_draws=1000` 이라 `list(pool)` 을 1,000번 새로 만든다. 루프 밖으로.
+* `FoldResult.universe_size` 는 **전체 셀 수**인데 `universe_measured_rate_pct` 는 **점수가 매겨진 풀** 기준이다(`bench.universe_size`). 같은 표에 나란히 실려 있어 분모가 같다고 읽힌다 — 이름이나 주석으로 구분할 것.
+* `summarize` 는 `verdict == measured` 이면서 `quotable_folds == 0` 인 조합을 허용한다(그때 표제 중위는 `None`). `may_calibrate_weights` 가 `>= 2` 를 요구해 결과적으로는 막히지만, 판정 문자열만 읽는 사람에게는 오해 소지.
+
+---
+
+## C — 단지 유형. 사다리 재측정 판단(요청 4번)
+
+### CR49-7 (M) — 사다리는 **재측정 불필요**. 그러나 **같이 실린 실측치는 이미 낡았다**
+
+**결론: `LADDER_AS_OF=2026-08-04` 사다리는 오늘 백필(61만 → 108만 행)로 무효가 되지 않는다.**
+
+| 축 | 백필 영향 | 근거 |
+|---|---|---|
+| 학군·교통·생활 | **없음** | `complex.geom` + POI 만 본다. 거래를 안 읽는다 |
+| 환금 | **없음** | `stats.py:66-70` — `eligible_trades(months=12, as_of=today)` 즉 **오늘 기준 후행 12개월**. 백필이 넣은 것은 2021~2023 로 **창 밖**이다 |
+
+운영 DB 실측: `trade` 최소 계약일 **2021-01-01** · 최대 **2026-07-25** · 총 **1,076,262행**.
+후행 12개월 창(2025-08~2026-08)에 들어가는 행은 백필로 늘지 않았다. → **재측정 사유 없음.**
+`ladders.py` 머리주석이 이미 이 위험을 정확히 지목해 두었다(*"환금 축은 실거래가 쌓일 때마다 움직인다"*) —
+맞는 경계지만 **이번 백필은 그 경계를 건드리지 않는다.**
+
+**⚠️ 다만 같은 날짜로 함께 적힌 아래 값들은 백필 전 데이터이고 이미 틀렸다:**
+
+| 위치 | 적힌 값 | 지금 |
+|---|---|---|
+| `complex-typing.md §0` | `trade` **611,518행**(취소 제외 578,733) | **1,076,262행** |
+| `complex-typing.md §4` | 단지 배율 중위 0.969 · **표본 5건 미만 36.1%** · 홀/짝 잡음 sd 표(25,799셀) | 전부 재측정 필요 |
+
+가격 배율은 **시점 보정 후 전 구간 거래**로 만들므로(§4) 백필에 직접 영향을 받는다. 셀당 표본이 늘면
+`PRICE_MIN_SAMPLE=5` 로 걸리는 36.1% 가 줄고, 잡음 sd 가 작아져 `0.85/1.15`(n=5 에서 3σ)는
+**필요보다 보수적**이 된다 — 방향이 안전한 쪽이라 지금 당장 위험하진 않다.
+
+**고칠 것**: 배선(`api-spec.md §4.5` 가 🔴 미배선이라 적어 둔 그 작업) **전에 §4 를 재측정**하고
+문서의 행 수·36.1%·sd 표를 갱신할 것. 사다리(`ladders.py`)는 손대지 말 것 — 근거 없이 재측정하면
+`LADDER_AS_OF` 만 새 날짜가 되고 값은 같아져 이력이 거짓이 된다.
+**지금은 응답에 안 실리므로 차단 사유는 아니다.**
+
+### 자기충족 테스트 점검(요청 5번) — B 86 · C 47 표본 확인 결과 **문제 없음**
+
+| 표본 | 기대값의 출처 |
+|---|---|
+| `test_fold_metrics_match_hand_calculation` | 독스트링에 손계산 전부(`B1=median(+10,+5,0,+10,−5)=+5.0` → 백분위 → 상위 2 → `−7.5`). 구현을 돌려 붙인 값이 아니다 |
+| `test_the_poison_is_actually_potent` | `(c5,c3)` → `(c3,c1)` 이 되는 과정을 주석에 산식으로 적고 **튜플을 하드코딩** |
+| `test_school_type` / `test_transit_type_…` / `test_two_axes_…` | `LINEAR_LADDER`(10칸) 주입으로 **백분위 = 원점수 + 5** 가 성립 → 전 판정을 암산 검산 가능. 파일 머리에 그 유도가 적혀 있다 |
+| 운영 사다리 검사 | 값 자체를 고정하지 않고 **구조·문서화된 한계**만 본다(`101개` · 오름차순 · `환금은 최상위권 문구에 구조적으로 도달 못 함` · `생활 최대 89.6`) — 문서 §8 과 같은 값을 코드로 못 박는 형태라 스냅샷이 아니다 |
+
+문서화된 원칙(*"검산할 수 없는 기대값은 테스트가 아니라 스냅샷이다"*)이 실제로 지켜졌다.
+
+### C 잔가지 (L · 비차단)
+
+* `analysis.py:255` 주석이 `RARE_COMBO_PCT` 를 가리키는데 실제 상수는 `BOTH_TOP_TIER_PCT`(126행). **없는 이름**이다.
+* `test_ladder_population_recorded_for_every_axis` 가 `v > 0` 만 본다. 문서가 `15,561`·`13,796` 을 인용하므로 값을 고정할 것 — 사다리를 갈아끼우며 `LADDER_POPULATION` 만 안 고치는 사고를 지금은 못 잡는다.
+
+---
+
+## 판정 — **pass** (High 0)
+
+| ID | 심각도 | 요지 |
+|---|---|---|
+| CR49-1 | **M** | "없는 jail 에 rc=0" 은 거짓 실측(실제 rc=255). monitor.sh·selftest·monitoring.md 3곳이 인용. 동작 결함 아님 · 픽스처가 현실과 다름 |
+| CR49-2 | L | `monitoring.md` 신규 4행 오타 4개 |
+| CR49-3 | **M(상)** | 실행기가 613,228행을 한 번에 메모리에 적재(≈235MB) — 서버 available 225MB. **첫 실행 전 필수** |
+| CR49-4 | **M** | 산출 JSON 에 해제 정책·실행 파라미터 없음 → 상·하한 두 산출물이 구별 불가 |
+| CR49-5 | **M** | 핵심 독스트링이 무조건으로 "T 이후에 의존하지 않는다" — 기본 정책에서 거짓(같은 파일이 스스로 반박) |
+| CR49-6 | L | `apt_dong` 가드가 파이프라인 테스트로는 안 밟힌다(변이 ④가 1검사만 죽임) |
+| CR49-7 | **M** | 사다리는 재측정 불필요(근거 실측). 단 `complex-typing.md §0·§4` 실측치는 이미 낡음 — 배선 전 재측정 |
+| — | L | B 잔가지 3 · C 잔가지 2 |
+
+**pass 근거**: 정확성 결함 없음 · 보안 냄새 없음(알림·요약·JSON 에 IP·자산 정보 없음 · SQL 은 전부
+파라미터 바인딩 · 읽기 전용) · 핵심 로직 테스트 있음(변이 4/4 사망으로 공허하지 않음을 증명) ·
+레이어 위반 없음(`repository.py` 금지 목록 준수 · 도메인에 SQL 없음, `test_backtest_domain_contains_no_sql_or_engine` 이 지킴).
+
+**다음 커밋 전 처리 권고**: CR49-1(문구·픽스처 정정) · CR49-5(문장 1줄) · CR49-2 — 전부 저비용.
+**첫 백테스트 실행 전 필수**: CR49-3. **배선 전 필수**: CR49-7.
+
+---
+
+## CR-050 · 2026-08-05 · `CR-049` Medium 조치 재검증 (CR49-1~7) + `SR-045` 감시 변경 — 커밋 전
+
+**범위**
+
+| | 대상 |
+|---|---|
+| B′ | **신규 `backend/app/domain/backtest/collect.py`(381줄)** · `asof.py` · `engine.py` · `outcome.py` · `__init__.py` · `scripts/run_backtest.py` · `tests/test_backtest.py`(신규 15검사) · `docs/02-design/backtest.md` §5-1·§7-13·§7-14 |
+| C′ | `docs/02-design/ux/complex-typing.md` §0 (낡음/유효 구분표). **`app/domain/character/**` 는 이 라운드에 손대지 않았다**(mtime 확인 — 사다리 재측정 불필요 판정 존중) |
+| A′ | `deploy/monitor.sh` · `deploy/monitor-selftest.sh`(`_f2b_bin` 재작성 · `_f2b_order_scan` 신설 · IP 가림 · 하네스 관문) · `docs/05-monitoring/{monitoring.md,fail2ban.md}` |
+
+**동결 해시 — 시작·종료 일치(2/2), 서버 사본까지 3중 확인**
+```
+ea9c7f8e4266dc56a5a27c8d14f43cbc1d01ab0923da5e67d44df9eb41f72ff1  deploy/monitor.sh
+b9164bfb853550f42fe1734b8d1392a4c6b81e017086e9fb78eff00c08c8b29c  deploy/monitor-selftest.sh
+```
+`git status` 시작=종료(동일). 변이 시험으로 잠시 고친 `collect.py`·`asof.py`·`engine.py` 는
+**바이트 단위 원복 확인**(sha256 백업본과 IDENTICAL). `/opt/realestate/scripts/**` 무접촉 ·
+텔레그램 발화 0 · 격리 `/root/rev50/`(종료 시 삭제 확인) · `frontend/**` 무접촉 ·
+**백테스트 미실행**(`--dry-run` 까지만).
+
+### 기준값 재현 — 전부 내가 직접 실행
+
+| 항목 | PM 기준값 | 내 실측 | |
+|---|---|---|---|
+| 서버 격리 자체검사(문서 포함 트리 `/root/rev50/{deploy,docs}`) | 290 / 0 / 1 / HARN 0 / rc=0 | **290 / 0 / 1 / HARN 0 / rc=0** (1분 26초) | 일치 |
+| 백엔드 `pytest` 전량 | 1,616 passed · 103 skipped | **1,616 passed · 103 skipped · 0 failed** | 일치 |
+| `test_backtest.py` + `test_character.py` | — | **148 passed**(101+47) | — |
+| `ruff check` (backtest · runner · tests) | — | All checks passed | — |
+
+건너뜀 1건 = `(상태손상 oomkill) cgroup·docker 가 있어야 도달`.
+
+---
+
+## ★ 요청 1 — `FoldCollector` 가 상한을 지키는가 · **결과가 옛 경로와 같은가**
+
+### (가) 동치성 — **독립 참조 구현으로 960회 비교, 불일치 0**
+
+저장소의 동치 검사(`test_one_pass_over_many_folds_matches_the_per_fold_path`)는 **순환**이다 —
+`build_cells`/`build_outcomes` 가 이제 `FoldCollector` 에 위임하므로(`engine.py:129`·`158`)
+같은 구현끼리 비교한다. 그래서 `collect.py` 를 **전혀 쓰지 않는** 참조 구현을 따로 만들어
+옛 경로(`asof.as_of_trades` 로 전량 뷰 → 셀별로 묶어 `outcome.price_point` 로 두 시점)를 재현하고 붙였다.
+
+* 무작위 거래 **40시드 × 300~2,500행**(면적대 7종 · 해제 12% · 등기일 70% · `apt_dong` 80% · 지역 3종)
+* × 해제정책 2종(`EXCLUDE_FINAL` · `INCLUDE_ALL`) × 청크 4종(**1 · 3 · 97 · 5,000**) × 폴드 3종
+* = **960 비교에서 `AsOfCell`·`CellOutcome` 전량 일치. 불일치 0.**
+
+→ **리팩터가 값을 바꾸지 않았다.** (한 가지 의도적 차이는 CR50-5 에 적었다.)
+
+### (나) 변이 시험 6종
+
+| # | 변이 | 죽은 검사 |
+|---|---|---|
+| ① | `feed` 의 `list(islice(source, chunk_rows))` → `list(source)` (청크 상한 제거) | **3** — `…never_holds_more_than_one_chunk…` · `…many_folds_do_not_increase…` · `…refuses_to_swallow_more_samples…` |
+| ② | `_feed_chunk` 의 `SampleLimitExceeded` raise 제거 | **1** |
+| ③ | `apt_dong` 마스킹 제거(`asof.py:148`) | **2** — 전용 단위 + **`build_cells` 파이프라인**(CR49-6 조치 확인. 전엔 1) |
+| ④ | 창 하한 `<` → `<=` (`collect.py:275`) | **1** — 그런데 그게 메모리 검사다(아래 CR50-5) |
+| ⑤ | `if window.kind == KIND_START` → `if True` (`collect.py:282`) | **0** (아래 CR50-5) |
+| ⑥ | 감시 — `_f2b_order_scan` 의 `_f2b_rule_verdict` 호출을 `harmless` 로 고정 | **5** · rc=1 (SR45-7 순서 탐지 3 + 하위체인 감시불능 2) |
+
+①②③⑥ 은 관문이 살아 있다. ④⑤ 가 이번 라운드의 빈 자리다.
+
+---
+
+## 발견
+
+### CR50-1 (M) — 문서·검사가 단언하는 **"순간 보유 행 ≤ `chunk_rows`" 가 운영 데이터 모양에서는 2배**다
+
+`collect.py:43-44` / `backtest.md §5-1` 표(`순간 보유 행 수 | chunk_rows = 5,000 (≈1.9MB)`) /
+`test_backtest.py:1196` `assert counter.peak <= self.CHUNK + 8`.
+
+**픽스처가 마스킹 경로를 한 번도 안 지난다.** `tracked_stream`(`:1166-1173`)이 `apt_dong` ·
+`registered_at` 을 안 심으므로 `as_of_trades:150-154` 의 `dataclasses.replace()` 사본이 안 생긴다.
+게다가 `LiveTradeCounter` 는 **스트림이 만든 원본에만** `weakref.finalize` 를 걸기 때문에,
+사본이 생겨도 **셀 수가 없다**.
+
+내가 잰 값(`gc` 로 살아 있는 `BacktestTrade` 전수 · `chunk_rows=250` · 20,000행):
+
+| 입력 | 살아 있는 행 최대 |
+|---|---|
+| `apt_dong=None` (지금 픽스처) | **250** = 1× |
+| `apt_dong='101'` + `registered_at`=T 이후 (**운영 모양**) | **500** = **2×** |
+
+운영 `apt_dong` 보유율은 **77~93%**(`erd §0` 정정 · `asof.py:118` 이 스스로 인용)이므로
+운영 경로가 정확히 후자다. 5,000행 기준 1.9MB → **3.8MB**. 사고는 아니다. 문제는 둘이다:
+① 문서의 상한 숫자가 틀렸고, ② **그 상한을 "실측한다"는 검사가 마스킹 축에서 공허**하다 —
+CR49-6 이 `apt_dong` 가드에 대해 지적한 사각지대가 **메모리 검사에서 그대로 재발**했다.
+
+**고칠 것**: `tracked_stream` 에 `apt_dong` + `registered_at`(T 이후)를 심고 단언을
+`2*CHUNK + 8` 로. 문서 두 곳(`collect.py` 머리주석 · `backtest.md §5-1` 표)을 "마스킹 사본 포함 2×" 로.
+
+### CR50-2 (M) — `chunk_rows` 는 **도메인 객체**의 상한일 뿐이다. DB 드라이버가 시군구 하나치를 통째로 버퍼한다
+
+`run_backtest.py:180-198` 의 `conn.execute(text(_TRADES_SQL), …)` 에 `stream_results` /
+`yield_per` 가 없다(저장소 전체 검색 결과 **0건**). SQLAlchemy **2.0.51** + psycopg **3.2.3** 의
+기본은 클라이언트 커서라 `execute()` 가 반환되는 시점에 **그 질의의 결과 전체가 클라이언트 메모리**에 있다.
+질의는 시군구 단위(`left(c.region_code,:plen)=:region`)이므로 실제 상한은 *"가장 큰 시군구의 행 수"* 이고
+**아무도 재지 않았다**.
+
+그런데 `run_backtest.py:344-346` 은 `순간 보유 행 최대 N(상한 M)` 만 찍고, `backtest.md §7-13` 은
+*"실행기가 쓸 수 있는 메모리에 상한이 있다 — 순간 보유 행 5,000"* 이라 적는다.
+**CR49-3 이 문제 삼은 축(프로세스가 실제로 쥐는 메모리)에는 아직 상한이 없다.**
+
+크기 추정(내 계산 · 미측정): 613,228행 / 거래 있는 시군구 82개 → 평균 ≈7.5천행. 편중을 5%로 잡아도
+≈3만행 ≈ **11MB**(383B/행 환산). 235MB 는 확실히 죽었다 — **그래서 차단 사유가 아니다.**
+다만 "상한"이라는 말이 아직 참이 아니다.
+
+**고칠 것(한 줄)**: `conn.execution_options(stream_results=True, max_row_buffer=chunk_rows)`.
+서버측 커서로 바뀌어도 `statement_timeout=120s` 는 FETCH 마다 따로 걸리므로 가드가 유지된다.
+안 고칠 거면 §7-13 에 *"드라이버가 시군구 1개치를 버퍼한다 [미측정]"* 을 한계로 적을 것.
+
+### CR50-3 (M) — **"두 번째 순회에서 조용히 0행" 함정은 아직 가능하다.** 공개 API 짝이 정확히 그 모양이다
+
+`collect.py:36-39` 는 *"그래서 소비자를 '여러 번 훑는 코드'에서 '한 번 훑고 접는 코드'로 바꾸는 것이
+수정의 본체다"* 라고 적어 함정이 닫힌 것처럼 읽힌다. 실제로 닫힌 것은 **실행기와 `run_backtest` 뿐**이고,
+`build_cells` + `build_outcomes` 는 여전히 같은 `trades` 를 **두 번** 소비한다.
+
+재현(직접 실행):
+```python
+gen   = iter(trades)
+cells = build_cells(gen, spec=SPEC, households=…, min_peer_cells=3)   # 5셀 정상
+outs  = build_outcomes(gen, cells, spec=SPEC)                          # ← 소진된 이터레이터
+# → measured 0/5 · market_median_pct=None
+#   warnings=(no_market_benchmark, no_peer_benchmark, low_coverage, no_null_control)
+```
+예외 없음. 경고 4개가 뜨긴 하지만 **리포트는 나온다**. 두 함수 모두 `Iterable` 을 받고,
+`feed` 독스트링(`collect.py:244`)은 *"⛔ 여기에 `list(trades)` 를 쓰지 마라"* 로 **제너레이터를 권한다**. 검사는 0개다.
+
+같은 계약이 코드로 강제되지 않는 자리 둘 더 (직접 실행):
+* `feed` 를 두 번 부르면 **조용히 두 배로 센다** — `rows_seen` 75→150, `price.sample_size` 5→10.
+  `window_trade_count` 는 **환금성 축의 분자**다.
+* 같은 `FoldSpec` 을 두 번 넘기면 `_window_index` 의 `self._specs.index(spec)`(`collect.py:347`)이
+  늘 첫 번째를 돌려줘 뒤쪽 창 3개는 **채워지되 안 읽힌다**(표본만 두 배로 쌓여 `max_samples` 를 먹는다).
+
+운영 두 경로는 안전하다 — **그래서 M 이다.**
+**고칠 것(저비용)**: ① `feed` 재진입 가드(두 번째 호출은 예외) ② `build_cells`/`build_outcomes` 타입을
+`Sequence` 로 좁히거나 `collector.rows_seen == 0` 이면 멈추기(실행기는 이미 그렇게 한다 — `run_backtest.py:347-349`)
+③ 중복 spec 거부. 검사 3개면 셋 다 잡힌다.
+
+### CR50-4 (L) — 저장소의 동치 검사가 **순환**이다
+
+`test_one_pass_over_many_folds_matches_the_per_fold_path`(`:1263`)의 독스트링은
+*"…`build_cells`/`build_outcomes` 와 같은 답인가. 같지 않으면 우리가 채점하는 대상이 두 개가 된다"* 인데,
+위임 이후 **구현이 하나뿐**이라 그 문장이 성립하지 않는다. 실제로 잡는 것은 창 색인 격리다(그건 가치 있다).
+**고칠 것**: 20줄짜리 참조 구현(`as_of_trades` + `price_point`)을 테스트에 오라클로 두면 그 문장이 참이 된다
+— 내가 이번에 쓴 것과 같은 형태이고, 그게 있었다면 나는 이 항목을 안 적었다.
+
+### CR50-5 (L) — 변이 ④·⑤: **스트리밍 창 경계**와 `_region` 수집 규칙에 전용 검사가 없다
+
+* **변이 ④**(창 하한 `<` → `<=`)로 죽는 검사는 `test_collector_never_holds_more_than_one_chunk_of_rows`
+  **하나**이고, 그것도 `assert collector.samples == self.ROWS` 가 **우연히** 잡은 것이다.
+  실패 문구가 *"순간 보유 행이 …"* 라 다음 사람이 엉뚱한 곳을 판다.
+  T창과 직전창은 인접하므로(`(start, end]`) 경계를 포함으로 바꾸면 **경계일이 양쪽에서 세어진다** —
+  그 실수를 잡는 검사가 없다. (`test_price_point_ignores_trades_outside_the_window`(`:450`)는
+  이제 **운영 경로가 쓰지 않는** `price_point` 를 본다.)
+* **변이 ⑤**(`if window.kind == KIND_START` → `if True`)로 죽는 검사 **0개**.
+  `_region`/`_complex_ids` 를 T창에서만 모으는 규칙(`collect.py:282-285`)은 주석에 근거가 적혀 있는데
+  검사가 없다. 옛 경로는 as-of 뷰 **전체**에서 `region_code` 를 골랐다(내 참조 구현 1차판이 그렇게 갈렸다) —
+  운영에서는 `complex` JOIN 이라 단지당 하나뿐이어서 차이가 안 나지만, **그 전제가 코드에만 있다.**
+
+### CR50-6 (L) — `…forces_read_only_at_the_database_not_just_in_a_lint` 는 **이름과 달리 여전히 린트**다
+
+`:1317` 은 `SESSION_GUARDS` 상수 튜플의 순서만 본다. DB 도 커넥션도 안 본다.
+
+> **SR45-6 담당자 주장 검증 — 맞다.** PostgreSQL 은 트랜잭션의 읽기전용 여부를 **트랜잭션 시작 시점의**
+> `default_transaction_read_only` 로 정한다. 트랜잭션 도중의 `SET default_transaction_read_only = on` 은
+> 세션 기본값만 바꾸고 **지금 트랜잭션에는 안 걸린다** → `SET TRANSACTION READ ONLY` 가 첫 줄이어야 한다는
+> 지적은 옳고, `run_backtest.py:99-101` 이 그렇게 돼 있다.
+> 표현도 확인했다 — `backtest.md §7-14` 가 *"이 항목은 '우발적 쓰기를 막는다'이지 **'차단한다'가 아니다**"* 로 바뀌었다. ✅
+
+⚠️ **그 순서가 통하는 전제가 검사에 없다.** `SET TRANSACTION` 은 트랜잭션 블록 **밖**에서 부르면
+경고만 내고 아무 효과가 없다. 지금은 `_common.make_engine`(`:115-118`)이 `isolation_level` 을 안 건드려
+psycopg 가 비자동커밋(첫 문장 앞에 BEGIN) 이라 성립한다. 누군가 `AUTOCOMMIT` 으로 바꾸면 가드는
+**조용히 무효**가 되고 이 검사는 그대로 초록이다. 한 줄(엔진 `isolation_level` 이 AUTOCOMMIT 이 아님을 단언) 권장.
+
+### CR50-7 (L) — 표본 상한 검사의 단언이 헐겁다
+
+`:1236-1237` `assert collector.samples <= 350` · `rows_seen <= 400`. 손계산 실제값은 **정확히 300 / 300**
+(chunk 100 · cap 250 → 3번째 청크에서 멈춘다). 지금 단언은 "청크 두 개마다 검사"로 바꿔도 통과한다.
+이 파일의 규칙(*"기대값은 손으로 적는다"*)대로 정확히 박을 것.
+
+### CR50-8 (L) — 감시 문서의 자체검사 실측 줄이 낡았다
+
+`monitoring.md:812` 가 `통과 271 · 실패 0 · 건너뜀 1 · 하네스오류 0`(2026-08-04) 그대로다.
+같은 문서 `:719` 의 T6d 표제는 *"(2026-08-04 · **2026-08-05 보강**)"* 이라 적혀 있는데 실측 줄만 안 갱신됐다.
+**지금 실측은 290**(내가 서버 격리 사본에서 확인). 한 줄.
+
+### CR50-9 (L) — 낡은 `611,518` — 담당자가 밝힌 것보다 **많고**, `hexagon-report-data.md` 에는 **낡음 표시가 없다**
+
+담당자가 밝힌 2곳 외에 실재하는 곳: `app/agents/scoring.py:15` · `app/domain/valuation/timeadjust.py:7` ·
+`docs/02-design/api-spec.md:1171` · `docs/01-discovery/enhancement-research.md:33·153·219` ·
+`docs/02-design/ux/hexagon-report-data.md:32·39`.
+
+핵심은 개수가 아니라 **비대칭**이다. `complex-typing.md` 는 CR49-7 조치로 §0 에 낡음/유효 구분표를 얻었는데,
+**같은 날 같은 DB 로 잰 형제 문서**인 `hexagon-report-data.md` 는 헤더가 `측정 2026-08-04` 뿐이고
+백필 언급이 **한 줄도 없다**. 낡은 값: `trade 611,518`(`:32`) · `apt_dong 84.2%`(`:39`) ·
+§0 의 **가격매력 51.7% / 가격추세 50.2%** 커버리지(창 안 표본 수에 직접 걸린다 → 백필로 오른다).
+`backtest.md §1` 이 면적대 결정 근거로 이 문서 §2-A 를 인용한다.
+
+그리고 `api-spec.md §4.5` 가 `price_status=="unknown"` 규칙의 근거로 **실측 36.1%** 를 인용하는데,
+`complex-typing.md §0` 은 바로 그 값을 ❌**낡음(재측정 필요)** 으로 표시했다 — **두 문서가 어긋난다.**
+
+### 잔가지 (L · 비차단)
+
+* `run_backtest(trades: Sequence[BacktestTrade])`(`engine.py:406`) — 이제 한 번만 순회하므로 `Iterable` 이 맞다.
+* `--max-samples -1` → 첫 청크에서 `누적 표본 1개가 상한 -1개를 넘었습니다` 로 죽는다(검증 없음).
+  `--chunk-rows 0` 은 `SystemExit` 이 아니라 `ValueError` 트레이스백.
+* `summarize` 의 `verdict==measured` & `quotable_folds==0` 조합 허용(CR49 잔가지) — 그대로.
+* `analysis.py:255` 의 없는 상수 이름 · `LADDER_POPULATION` 값 미고정(CR49 C 잔가지) — 그대로.
+  `character/` 를 이 라운드에 안 건드린 결과라 예상된 것이다.
+
+---
+
+## CR-049 조치 확인표
+
+| CR49 | 조치 | 확인 |
+|---|---|---|
+| **1** (M) | 없는 jail `rc=0` 거짓 정정 | ✅ `monitor.sh` 주석 2곳 · 픽스처 `exit 255` · `monitoring.md` T6d · `fail2ban.md`. **경보 본문의 거짓도 제거** → *"종료코드는 안 믿는다 — 'Total banned:' 를 실제로 뽑았는지로 판정한다"* |
+| **2** (L) | `monitoring.md` 오타 4+1 | ✅ (diff 확인) |
+| **3** (M상) | 실행기 일괄 적재 | ✅ **구조로 해결**. 다만 CR50-1·2·3 |
+| **4** (M) | payload 에 `params` | ✅ `run_params`(`:249-276`) — `cancellation`·`min_trades`·`min_peer_cells`·`report_lag_days`·`seed`·`null_draws`·`chunk_rows`·`max_samples`. 검사 `:1330` 이 `low != high` 로 두 산출물 구별을 단언. `--dry-run` 로그에도 찍히는 것 확인 |
+| **5** (M) | 독스트링 조건부화 | ✅ `asof.py:104-111` · `engine.py:116-120` 둘 다. "해제 축은 §2-D 상·하한으로만 말한다"까지 |
+| **6** (L) | `apt_dong` 파이프라인 검사 | ✅ 변이 ③이 **2건**을 죽인다(전엔 1) |
+| **7** (M) | `complex-typing.md §0` 구분표 · 사다리 미변경 | ✅ 둘 다. `character/` mtime 이 이 라운드 이전 |
+| B 잔가지 | `list(pool)` 루프 밖 · 분모 주석 | ✅ `engine.py:309` · `:194-196` |
+
+## 자기충족 테스트 점검 (요청 4) — 신규 15건
+
+| 표본 | 판정 |
+|---|---|
+| `test_chunk_size_does_not_change_the_result`(×4) | **건전.** 기대값 `{1000,1200,900,1100,800}` · `picked=(c5,c3)` · `−7.5` 가 `test_fold_metrics_match_hand_calculation` 의 손계산과 같은 값 |
+| `test_collector_never_holds_more_than_one_chunk_of_rows` 등 3건 | 절반 건전 — `peak_chunk_rows == CHUNK` 는 정확. `counter.peak <= CHUNK+8` 은 **마스킹 축에서 공허**(CR50-1) |
+| `test_collector_refuses_to_swallow_more_samples_than_the_cap` | 건전하나 단언이 헐겁다(CR50-7) |
+| `test_default_bounds_are_…` | 의도적 변경감지기(문서 §5-1 계산이 근거) — 정당 |
+| `test_one_pass_over_many_folds_matches_the_per_fold_path` | **순환**(CR50-4) |
+| `test_runner_never_materialises_the_trade_stream` | 건전 — AST 로 `list(...trades_for_backtest...)` 를 잡는다 |
+| `…forces_read_only_at_the_database_not_just_in_a_lint` | 이름 과장(CR50-6) |
+| `test_report_payload_says_which_cancellation_policy_made_it` | 건전 — `low != high` 를 직접 단언 |
+| `test_apt_dong_masking_is_load_bearing_in_the_build_cells_path` | 건전 — 변이 ③이 실제로 죽인다 |
+
+## 감시(SR-045 조치) 확인 (요청 3)
+
+* **`monitoring.md` 를 두 담당자가 동시에 만졌으나 덮어쓴 흔적·모순 없음** — diff 는 **추가 27줄, 삭제 0**.
+  T6d 4칸 · 안 보는 것 2줄 · T6d 자체검사 항목 · 실측 블록. CR49-1 정정이 같은 문단 안에 들어 있어 서로 어긋나지 않는다.
+  유일한 낡음은 실측 줄 하나(CR50-8).
+* **PM 실수 ①**(픽스처 `exit 255` 후 자체검사 미실행 → T6d 40여 건 HARN) — 해소 확인.
+  하네스 관문이 rc 를 막는다(`monitor-selftest.sh:2768` `[ "$FAIL" -eq 0 ] && [ "$HARN" -eq 0 ] && exit 0`),
+  그리고 T6d 픽스처 관문(`:1875-1884`)이 **없는 jail rc≠0** 과 **`Banned IP list:` 에 실제 IP 가 나오는지**까지
+  확인해서 SR45-4 유출 가드가 공허해지지 않게 했다. 실측 HARN **0**.
+* **PM 실수 ②**(`blind_add` 가 거짓 `rc=0` 을 경보 본문으로 실어 보냄) — 해소 확인(위 표 CR49-1).
+* `_f2b_bin`(`monitor.sh:91-105`) — `RE_MON_BIN_DIR` → **절대경로 목록** → 마지막에 PATH.
+  SR45-5(시험 편의가 root 탐색 순서를 정하던 것) 해소. 자체검사가 *"PATH 앞의 가짜가 이기면 실패"* 로 뒤집혀 있다.
+* `_f2b_order_scan` — 변이 ⑥으로 **5검사 사망**. 공허하지 않다.
+* IP 가림 — 세 번째 자체검사에서 변이 적용에 실패해 **정적 확인만** 했다:
+  검사(`:2075-2082`)가 `203.0.113.7` **부재**와 `<ip>` **존재**를 둘 다 보므로 "가린 척"이 통과할 수 없다.
+  (변이 ⑥에서 `(순서) 규칙을 통째로 안 싣는다` 가 죽은 것으로 그 분기에 도달한다는 것까지는 확인됐다.)
+
+## 담당자가 "못 했다"고 밝힌 것 (요청 5) — 전부 실재
+
+* **사전 count 미도입** ✅ `run_backtest.py` 에 `COUNT` 없음. `--dry-run` 은 DB 에 안 닿는다(`:328-331`).
+  운영자가 실행 전 규모를 알 방법이 없고 `max_samples` 로만 막는다. `backtest.md §5-1` 안 ④ *"부분 채택"* 과 일치 → **기록만**.
+* **`max_samples` 200만은 계산값** ✅ `collect.py:48-52`. 문서가 계산임을 밝히므로 지적 아님.
+  단 "약 55MB" 는 **값 통만**의 숫자다(CR50-1·2 를 감안하면 프로세스 총량이 아니다).
+* **낡은 `611,518`** ✅ → CR50-9.
+
+---
+
+## 판정 — **pass** (High 0)
+
+| ID | 심각도 | 요지 |
+|---|---|---|
+| CR50-1 | **M** | "순간 보유 행 ≤ chunk_rows" 가 운영 모양(동 마스킹)에서 **2배**. 그걸 재는 검사가 그 축에서 공허(픽스처가 `apt_dong` 을 안 심고, 카운터가 `replace()` 사본을 못 센다) |
+| CR50-2 | **M** | `chunk_rows` 는 도메인 객체 상한일 뿐 — psycopg 클라이언트 커서가 **시군구 1개치를 통째로 버퍼**한다(`stream_results` 0건 · 미측정). 235MB 는 죽었으므로 비차단 |
+| CR50-3 | **M** | "두 번째 순회에 조용히 0행" 함정이 `build_cells`+`build_outcomes` 짝에 **그대로 살아 있다**(재현함 · 예외 없음). `feed` 재호출·중복 spec 도 조용히 두 배 |
+| CR50-4 | L | 저장소의 동치 검사가 순환(위임 이후 구현이 하나) |
+| CR50-5 | L | 스트리밍 **창 경계**·`_region` 수집 규칙에 전용 검사 없음(변이 ④가 1건을 우연히, ⑤가 0건) |
+| CR50-6 | L | 읽기전용 검사가 이름과 달리 린트. **SR45-6 주장 자체는 옳다(검증함)** · 표현도 "우발적 쓰기를 막는다"로 바뀜 |
+| CR50-7 | L | 표본 상한 단언이 헐겁다(실제 300/300인데 350/400) |
+| CR50-8 | L | `monitoring.md:812` 자체검사 실측 271 → 지금 **290** |
+| CR50-9 | L | 낡은 `611,518` 8곳. `hexagon-report-data.md` 에는 낡음 표시가 **없다**(형제 문서와 비대칭) · `api-spec §4.5` 의 36.1% 와 `complex-typing §0` 이 어긋남 |
+| — | L | 잔가지 4 |
+
+**pass 근거**
+* **정확성 결함 없음** — 리팩터 동치성을 독립 참조 구현으로 **960회 비교, 불일치 0** 으로 직접 확인했다.
+  CR50-3 의 함정은 **운영 두 경로(실행기·`run_backtest`)에 존재하지 않는다**(코드 확인 + 실행기 가드 `:347-349`).
+* **보안 냄새 없음** — 산출 JSON·로그·요약에 개인 정보 없음(검사가 단언) · SQL 전부 파라미터 바인딩 ·
+  세션이 읽기 전용(`SET TRANSACTION READ ONLY` 가 첫 줄인 것을 확인) · 감시 알림에 IP 없음(가드 존재).
+* **핵심 로직 테스트 있음** — 변이 6종 중 4종이 죽는다. 죽지 않은 2종(④⑤)은 **CR50-5 로 명시**했고,
+  ④는 우연히라도 잡히며 ⑤는 운영에서 값을 바꾸지 않는다.
+* **레이어 위반 없음** — `test_backtest_domain_contains_no_sql_or_engine` 이 `*.py` 글롭이라 신규 `collect.py` 도
+  자동 포함(8파일). 도메인에 SQL·엔진 import 0. `ruff` 통과.
+
+**다음 커밋 전 처리 권고(전부 저비용)**: CR50-1(픽스처 2줄 + 문서 2곳) · CR50-8(한 줄) · CR50-9(헤더 한 줄).
+**첫 백테스트 실행 전 권고**: CR50-2(한 줄) — 안 고칠 거면 §7-13 에 한계로 적을 것.
+**배선 전 필수(CR-049 유지)**: `complex-typing.md §4` 재측정.
+CR50-3 은 다음 라운드에 검사 3개로 닫으면 된다 — 지금 도는 경로에는 없다.
+
+---
+
+## CR-051 · 2026-08-05 · `CR-050` 비차단 7건(CR50-1·2·3·6·7·8·9) 조치 재검증 + 감시 v6 편입(`check_v6ssh`) — 커밋 전
+
+**범위**
+
+| | 대상 |
+|---|---|
+| A | `backend/app/domain/backtest/collect.py`(381→**525줄** · `assert_rereadable` · `StreamAlreadyConsumed` · `_CLAIMED` · `peak_live_rows` 신설) · `asof.py` · `engine.py` · `scripts/run_backtest.py`(`apply_session_guards` · `stream_results`) · `tests/test_backtest.py`(**+10검사** · `_TrackedTrade` · `TestSecondPassTrap`) · `docs/02-design/backtest.md` §5-1·§7-13-B·§7-14-B |
+| B | `deploy/monitor.sh`(7e 구획 · `_v6_rule_is_drop` · `_v6_scan` · `check_v6ssh`) · `deploy/monitor-selftest.sh`(T6e **+51검사**) · `docs/05-monitoring/monitoring.md` |
+| C | `docs/02-design/ux/hexagon-report-data.md`(§0 낡음/유효 구분표 신설) · `api-spec.md` §4.5 |
+| — | `app/domain/character/**` 는 이 라운드 **미변경**(mtime 08-04 13:46 — 이전 라운드). `frontend/**` 무접촉 |
+
+**동결 해시 — 시작·종료·서버 격리사본 3중 일치(2/2)**
+```
+27d75faed4b8a08f43e2a9a7b6e2a199fa6ccdd2880abf6d433123d0fd94c7c5  deploy/monitor.sh
+a9e661702993088747df63ab4125e297b225b9ec377f98679d1a9407e795e8b2  deploy/monitor-selftest.sh
+```
+`git status` 시작=종료(동일). **저장소 파일은 한 글자도 안 고쳤다** — 변이는 서버 격리 사본에만
+넣고(scp 로 덮어쓴 뒤 원본을 다시 scp) sha256 으로 원복 확인. `/opt/realestate/scripts/**` 무접촉 ·
+텔레그램 발화 0(`RE_MON_DRY_RUN=1`) · 서버 방화벽·유닛 **변경 0**(읽기만) · 격리 `/root/rev51/`
+(종료 시 삭제) · **백테스트 미실행** · 윈도우에서 `monitor-selftest.sh` 실행 0회.
+
+### 기준값 재현 — 전부 내가 직접 실행
+
+| 항목 | PM 기준값 | 내 실측 | |
+|---|---|---|---|
+| 서버 격리 자체검사(`/root/rev51/{deploy,docs}` — 트리 유지) | 341 / 0 / 1 / HARN 0 / rc=0 | **341 / 0 / 1 / HARN 0 / rc=0** | 일치 |
+| 백엔드 `pytest` 전량 | 1,626 passed · 103 skipped | **1,626 passed · 103 skipped · 0 failed · rc=0** | 일치 |
+| `MUT-` 잔여 | 0건 | **0건**(저장소 전체 `grep -rn "MUT-"` — `*.sh`·`*.py`·`*.md`) | 일치 |
+| `ruff check`(backtest · runner · tests) | — | All checks passed | — |
+
+---
+
+## ★ 요청 1 — CR50-1 의 계수가 **이제 정말 전수인가**
+
+**결론: 그렇다.** 저장소 코드에 손대지 않고 `gc` 로 독립 계수했다
+(`collect.as_of_trades` 를 런타임에 감싸 뷰 생성 직후 살아 있는 `BacktestTrade` 를 전수 세기 ·
+20,000행 · `chunk_rows=250` · 160회 표집):
+
+| 청크의 모양 | `gc` 실측 최대 살아있는 행 | `collector.peak_live_rows` | |
+|---|---:|---:|---|
+| **운영 모양**(`apt_dong='101'` · 미등기) | **501** | **500** | 일치(+1은 제너레이터 프레임이 쥔 한 행) |
+| `apt_dong=None` | 250 | 500 | 코드가 **위로** 잡는다 |
+
+두 번째 줄은 결함이 아니다 — `peak_live_rows` 독스트링(`collect.py:331-334`)이 *"정확히 말하면
+**자리 수**이지 서로 다른 객체 수가 아니다 … 위로 잡은 상한"* 이라고 먼저 적어 두었다.
+**운영 모양에서는 그 상한이 곧 실제값**이라는 주장도 위 표대로 참이다.
+
+**다른 사본 생성 경로는 없다.** `BacktestTrade` 를 새로 만드는 자리는 `asof.py:153`
+`replace(...)` **하나뿐**이고(패키지 전체 확인), `collect.py:522` 의 `replace` 는 `AsOfCell`
+이며 행이 아니다. `attach_peer_medians` 는 행을 안 쥔다. 뷰는 `view.clear()`(`:423`)로
+반복마다 끊기므로 뷰 둘이 동시에 살지 않는다 — `gc` 계수가 그것을 확인한다(최대 501).
+
+**바이트 실측도 재현된다.** 문서 §5-1 이 *"3.8MB 라고 쓰려다 실제로 쟀다"* 며 올린 표를
+내가 다시 쟀다(`tracemalloc` · 5,000행 청크 · 뷰 생성 증가분):
+
+| 청크의 모양 | 문서 값 | 내 실측 | |
+|---|---:|---:|---|
+| **운영 모양** | **181 B/행** | **181 B/행** | 정확히 일치 |
+| `apt_dong=None` | 44 B/행 | 57 B/행 | 같은 자리(목록 슬롯 · 과할당 차이) |
+
+→ *"행 수는 2배지만 바이트는 2배가 아니다"* 는 **맞다**. 문서 두 곳(`collect.py:53-70` ·
+`backtest.md §5-1`)과 로그(`run_backtest.py:404-408` — `순간 보유 행 최대 N[청크 C + 뷰]`)와
+검사(`test_backtest.py:1265` `peak_live_rows == 2*CHUNK` **등호**)가 전부 같은 숫자를 말한다.
+픽스처도 고쳤다 — `STREAM_APT_DONG='101'` · `STREAM_REGISTERED_AT=2030-01-01`(`:1219-1223`)에
+`counter.copies > 0` **공허 방지 단언**이 붙었다. CR50-1 **해소**.
+
+## ★ 요청 2 — CR50-3 가드가 **정상 경로를 막지 않는가**
+
+**막지 않는다. 그리고 막아야 하는 것은 다섯 형 전부 막는다.** 직접 실행:
+
+| 넘긴 것 | `build_cells` / `build_outcomes` |
+|---|---|
+| `list` · `tuple` · `dict_values` · `set` | **전부 통과**(cells·outcomes 정상 산출) |
+| `list_iterator` · `generator` · `map` · `chain` · `filter` | **전부 `TypeError`** |
+
+담당자가 밝힌 **약한 참조 한계**(`_CLAIMED` 주석 `:168-172` — `list_iterator`·`map`·`chain` 은
+`WeakSet` 불가)가 공개 API 에서 실제로 `assert_rereadable` 로 막힌다는 것을 이 표가 보인다.
+판정 근거도 표준 규약 하나(`iter(x) is x`)라 형 목록을 늘려 따라잡을 필요가 없다. 잔여 구멍은
+CR51-4 에 적었다(직접 `FoldCollector` 를 쓸 때만 · 문서화돼 있다).
+
+## ★ 요청 3 — 감시 v6 편입: 51건이 서로를 가리지 않는가 · clear 를 행동으로 보는가
+
+**변이 3종을 한 번에 넣고 서버 격리 사본에서 1회 실행** — 죽은 검사가 **정확히 자기 무리만**이다.
+
+| 변이 | 죽은 검사 | 무리 |
+|---|---:|---|
+| ① `_v6_scan` 의 `verdict=$(_f2b_rule_verdict …)` → `harmless`(앞 순서 판정 무력화) | **5** | (순서) 3 · (순서 fail-open) 2 |
+| ② `check_v6ssh` 의 `elif [ -n "$act" ]` → `elif false`(유닛 부재 판정 제거) | **3** | (유닛 삭제) 3 |
+| ③ `_v6_rule_is_drop` 의 `-s` 거부 제거 | **2** | (가짜 DROP) 1 · (v6 규칙 판정표) 1 |
+| 합 | **10 · rc=1** | 서로 겹치지 않는다 |
+
+→ **서로를 가리지 않는다.** 남은 41건은 이 변이들에 무반응이므로 다른 축을 본다는 뜻이고,
+①이 (대조군)·(순서 대조군)을 **안** 죽인 것이 오탐 축이 따로 서 있다는 증거다.
+
+**clear 경로를 행동으로 본다.** 이 저장소가 다섯 번 놓친 계열(CR40·42-3·43-1·44-2·47-2)을
+T6e 가 두 방향으로 본다 — ⓐ 해소: `ALERT-CLEARED` **와** `alerts/*.active` **파일 삭제**를
+둘 다 확인((다) 규칙 해소 · (카) 유닛 해소), ⓑ 거짓 해소 금지: 눈이 먼 상태로 들어가기 전에
+`.active`·`.sent` 를 **미리 심어 두고**(`:2456`·`:2476`·`:2527`) `ALERT-CLEARED` 부재 **와**
+`.active` 생존을 확인((아) ip6tables 없음 · (자) 실행 실패 · (파) systemd 불가).
+빈 상태로 돌리면 `clear_alert` 가 조용히 지나가 아무것도 못 본다는 것을 알고 짠 구조다.
+
+**하네스 관문이 있다.** `V6OK`(`:2323-2334`)가 가짜 `systemctl`·`ip6tables` 가 실측 모양대로
+답하는지(없는 유닛 `is-enabled` = **빈 출력 + rc≠0**, 정상 출력에 **f2b-sshd 점프 포함**)
+먼저 확인하고, 어긋나면 시나리오 전체를 `harn` 으로 돌린다 → 가짜가 관대해져 검사가
+공허해지는 길이 막혔다. 실측 HARN **0**.
+
+**실측 근거 3건 검증**
+
+1. **`oneshot`+`RemainAfterExit` 는 규칙을 지워도 `active`** — 서버 유닛 파일을 읽어 확인:
+   `Type=oneshot` · `RemainAfterExit=yes` · `ExecStart=/bin/sh -c "…ip6tables -C … || …-I INPUT 1 -p tcp --dport 22 -j DROP"`.
+   `ExecStop` 이 없으므로 stop 해도 규칙이 안 걷힌다는 설명도 파일과 일치한다. **맞다.**
+   그래서 ②의 기준을 `is-enabled` 로 둔 판단이 옳고, 요약이 `is-active` 를 *"보호의 증거는
+   아니다"* 로 못박은 것도 옳다(대조군 검사가 그 문구를 직접 본다 · `:2361`).
+2. **유닛 삭제와 systemd 불가가 `is-enabled` 에서 같은 모양** → `is-active` 로 가른 것: 픽스처가
+   그 두 모양을 각각 세우고((타) `FAKE_V6_ENABLED= FAKE_V6_ACTIVE=inactive` / (파) 둘 다 빈 출력),
+   전자는 **경보** · 후자는 **감시불능**으로 갈린다. 변이 ②로 3건이 죽는다 → 공허하지 않다. **맞다.**
+3. **`_f2b_order_scan` 재사용을 버린 판단** — **맞다(직접 확인).** 그 함수는
+   `case "$line" in *" -j $2"|*" -j $2 "*) break ;;`(`monitor.sh:1246`)이라 `$2=DROP` 이면
+   **INPUT 의 첫 DROP 줄**에서 멈춘다. 예: `-A INPUT -p tcp --dport 3306 -j DROP` 이 위에 있으면
+   그 뒤의 `--dport 22 -j ACCEPT` 를 **못 보고 "앞이 깨끗하다"** 고 답한다. 지금 `_v6_scan` 은
+   루프만 따로 쓰고 줄 판정은 `_f2b_rule_verdict` 를 그대로 재사용해 이 함정을 피한다.
+   ⚠️ 다만 **그 판단을 지키는 픽스처가 없다** → CR51-2.
+
+**서버 현재 상태를 읽어 픽스처와 대조**(읽기 전용):
+`ip6tables -S INPUT` = `-P INPUT ACCEPT` / `--dport 22 -j DROP` / `multiport --dports 22 -j f2b-sshd`
+→ `ip6-ok.txt` 와 **한 글자도 다르지 않다**. *"가짜가 현실보다 관대하면 검사가 공허하다"* 는
+주석이 지켜졌다. `/usr/sbin/ip6tables` 는 `/etc/alternatives` 심링크이고 유닛의 `ExecStart` 도
+같은 경로를 쓰므로 legacy/nft 백엔드가 갈릴 여지도 없다(레거시 바이너리는 존재하나 미사용).
+
+## ★ 요청 4 — 자기충족 테스트 점검 (신규 표본)
+
+**백엔드 +10건**(1,616→1,626) — `TestSecondPassTrap` 7 + `test_read_only_guard_checks_its_own_premise…`
++ `test_runner_streams_trades_from_the_database…` + `test_stream_buffer_follows_chunk_rows…`
+
+| 표본 | 판정 |
+|---|---|
+| `test_collector_never_holds_more_than_two_chunks_of_rows` | **건전.** `peak_live_rows == 2*CHUNK` **등호** · `counter.copies > 0` 공허 방지 · 내 `gc` 전수(501)와 일치 |
+| `test_a_list_is_still_accepted_twice` | **건전 · 필수.** 가드가 정상 경로를 막지 않는 것을 직접 단언(내 실측표와 같은 결론) |
+| `TestSecondPassTrap` 나머지 6 | **건전.** 리뷰어가 재현했던 그 코드가 그대로 검사가 됐다. `feed` 두 번 · 제너레이터 공유 · 중복 spec · `feed` 없이 산출 — 넷 다 예외를 단언하고, 두 번째는 `rows_seen`·`samples` 가 **안 늘었음**까지 본다 |
+| `test_read_only_guard_checks_its_own_premise_and_refuses_autocommit` | **건전.** 가짜 연결로 ① 정상 순서 ② AUTOCOMMIT 거부(**가드를 걸어 보지도 않는다**를 `auto.statements == []` 로) ③ `SHOW` 가 `off` 면 정지 — 셋 다 본다. CR50-6 의 *"이름과 달리 린트"* 가 실제로 닫혔다 |
+| `test_runner_streams_trades_from_the_database…` | **건전.** `exec_options == [{"stream_results": True, "max_row_buffer": 250}]` 를 **정확히** 단언 |
+| `test_stream_buffer_follows_chunk_rows…` | 절반은 소스 문자열 검사(`"stream_rows=chunk_rows" in source`)라 약하지만, 기본값 쪽은 실제 객체를 본다 — 허용 |
+| `test_collector_refuses_to_swallow_more_samples_than_the_cap` | **건전해졌다.** `<= 350/400` → **`== 300` / `== 300`**(손계산 근거 주석 포함). CR50-7 해소 |
+| `test_one_pass_over_many_folds_matches_the_per_fold_path` | **여전히 순환**(CR50-4 · 이 라운드 범위 밖) |
+
+**T6e +51건** — 위 변이 3종이 각각 자기 무리만 죽인다(합 10). 대조군 2무리((가)·(마))가
+따로 서서 오탐 축을 지킨다. 함수 단위 판정표(`_v6_rule_is_drop` 12케이스)가 시나리오로 못 덮는
+경계를 메우고, 구조 검사 2건(`--fast`/`--daily` 가 `check_v6ssh` 를 실제로 부르는가)이
+"호출을 통째로 지우는" 변이를 막는다. **공허한 표본 없음.**
+
+## ★ 요청 5 — 담당자가 밝힌 "못 잡는 것" 의 정직성
+
+**정직하다. 과소도 과대도 거의 없다.**
+
+* **CR50-2(드라이버 버퍼)** — `stream_results` 를 **켰고**(`run_backtest.py:236-238`), 그러고도
+  `backtest.md §7-13-B` 를 세워 *"운영 DB 로 확인했는가 → **아니다**"* · *"5,000행이 드라이버 쪽에서
+  몇 바이트인가 → **[미측정]**"* · *"postgres 쪽 커서 비용 → **[미측정]**"* · *"첫 실행 때 할 일"* 까지
+  적었다. 옛 추정치 11MB 도 **"이 값은 [미측정] — 리뷰어 추정이고 나도 재지 않았다"** 로 표시했다.
+  **그 정직성이 유지된다.**
+* **감시 "못 잡는 것" 4줄**(`monitor.sh:1497-1506`) — v6 대입 자체 미계수 · 하위 체인 안 · sshd 가
+  v6 를 정말 듣는지 · 다른 v6 포트. 넷 다 코드와 대조해 **실재**한다. 누락 1건은 CR51-3.
+* **`hexagon-report-data.md`** — 형제 문서와의 비대칭이 해소됐고, 담당자가 리뷰어와 **판단이 갈린
+  곳을 숨기지 않고 "확인 대상"으로** 남겼다(CR51-6 에서 담당자 손을 들어 준다).
+
+---
+
+## 발견
+
+### CR51-1 (M) — 상한에 걸려 **멈춘** 수집기가 그 뒤 **부분 결과를 조용히 내놓는다**
+
+`feed`(`collect.py:379`)가 `self._fed = True` 를 **소비 전에** 세운다. `_feed_chunk` 가
+`SampleLimitExceeded`(`:425`)로 죽어도 그 값은 True 로 남고, `_require_fed`(`:481-484`)는
+"`feed` 를 불렀는가"만 보므로 통과시킨다. 재현(직접 실행 · `test_backtest.py` 픽스처
+`universe_trades()` 75행 · 정상은 5셀 · 셀당 창 안 거래 5건):
+
+```python
+col = FoldCollector([SPEC], min_peer_cells=3, chunk_rows=10, max_samples=40)
+try: col.feed(trades)
+except SampleLimitExceeded: pass          # ← 다음 사람이 여기서 넘어간다
+col.cells(SPEC, households=HOUSEHOLDS)    # → **3셀** · window_trade_count 전부 5 · 예외/경고 없음
+```
+
+| `max_samples` | 나오는 것 | 정상 |
+|---|---|---|
+| 40 | 셀 **3개**(중위 900·1000·1200) · outcomes **3/3 measured** | 셀 5개(800~1200) |
+| 60 | 셀 5개 · outcomes **4/5 measured** | 5/5 |
+
+**겉으로 멀쩡하다** — 유니버스가 작고 커버리지가 낮은 것이 "데이터가 그렇다"로 읽힌다.
+운영 실행기는 예외를 전파해 죽으므로(`run_backtest.py:401` 위로 아무도 안 잡는다) **지금 도는
+경로에는 없다 → M.** 그러나 이 라운드가 CR50-3 에 대해 스스로 세운 기준이 그대로 적용되는
+자리다 — `collect.py:41` *"「운영 경로엔 없다」는 대책이 아니다 — 다음 사람이 그 경로를 만든다"*.
+게다가 `_require_fed` 가 존재하는 이유(*"빈 유니버스를 지어내지 않는다"*)와 **같은 실패 모양**이고,
+`SampleLimitExceeded` 문구가 *"폴드를 나눠 돌리거나 --max-samples 로 상한을 올리세요"* 라
+**폴드별로 감싸 돌리는 코드**를 유도한다.
+
+**고칠 것(저비용)**: `_feed_chunk` 의 raise 직전(또는 `feed` 를 `try/except`로 감싸)
+`self._aborted = True` 를 세우고 `_require_fed` 가 그때도 거부. 검사 1개면 잡힌다.
+
+### CR51-2 (L) — `_f2b_order_scan` 을 버린 판단은 **옳은데**, 그 판단을 지키는 픽스처가 없다
+
+`_v6_scan` 주석(`monitor.sh:1541-1549`)이 재사용을 버린 이유를 정확히 적었고 나는 그것이
+맞다고 확인했다(요청 3-③). 문제는 **그 오답을 드러내는 입력이 T6e 에 없다**는 것이다.
+`ip6-shadow.txt`(`:1911-1917`)는 `lo ACCEPT` → `ESTABLISHED ACCEPT` → `-s … --dport 22 ACCEPT`
+→ 우리 DROP 순서라, **우리 DROP 앞에 다른 DROP 이 하나도 없다.** 그래서 누군가 주석을 무시하고
+`_v6_scan` 을 `_f2b_order_scan "$out" DROP "$V6_PORT"` 재사용으로 "정리"해도 **51건이 전부 초록**이다
+(그 판은 `-A INPUT -p tcp --dport 3306 -j DROP` 한 줄만 위에 있으면 뒤의 22번 ACCEPT 를 못 본다).
+
+**고칠 것(한 줄)**: `ip6-shadow.txt` 맨 앞(정책 다음)에
+`-A INPUT -p tcp -m tcp --dport 3306 -j DROP` 를 넣는다. 지금 코드는 그것을 `harmless` 로 보고
+계속 훑으므로 결과가 안 바뀌고(`(순서)` 3건 그대로 통과), 재사용판은 그 줄에서 멈춰 죽는다.
+
+### CR51-3 (L) — ②(재부팅 복구)는 유닛의 **이름과 enabled 상태만** 본다 · 그 한계가 목록에 없다
+
+`check_v6ssh` 는 `is-enabled`/`is-active` 만 묻는다(`:1584-1585`). 유닛의 `ExecStart` 가 실제로
+`tcp/${V6_PORT}` 를 DROP 하는지는 **안 본다.** 누가 유닛 내용을 바꾸거나 포트를 달리 적으면
+`enabled` 인 채로 초록이고, 재부팅에 v6 22번이 열린다. 머리말은 `is-active` 에 대해서는
+*"보호의 증거가 **아니다**"* 라고 못박아 놓고(`:1467-1473`), `is-enabled` 에 대해서는
+*"재부팅 복구를 **보장**하는 것은 `is-enabled`"* 라고 적었다 — 같은 논법을 한쪽에만 적용했다.
+그리고 *"이 검사가 못 잡는 것"* 4줄(`:1497-1506`)에 이 항목이 **없다**.
+
+서버 실측으로 **지금 유닛은 올바르다**(`ExecStart` 가 `--dport 22 -j DROP`) → 사고가 아니라
+목록의 누락이다. **고칠 것**: "못 잡는 것"에 한 줄 추가(가장 싸다). 굳이 닫으려면
+`systemctl cat "$V6_UNIT"` 에서 `--dport ${V6_PORT}` 와 `DROP` 을 함께 확인하는 한 줄.
+
+### CR51-4 (L) — `_CLAIMED` 의 약한 참조 구멍은 **문서대로 실재**한다(공개 API 는 안전)
+
+직접 실행 — 같은 원천을 수집기 둘에 넘겼을 때:
+
+| 원천 | 두 번째 `feed` |
+|---|---|
+| `generator` | **`StreamAlreadyConsumed`** ✅ |
+| `map` · `chain` · `list_iterator` | **조용히 통과 · `rows_seen=0` · `cells()` 0개** ⚠️ |
+
+`_CLAIMED` 주석(`:168-172`)이 이 한계를 먼저 밝혔고, 공개 API(`build_cells`/`build_outcomes`)는
+`assert_rereadable` 이 다섯 형을 전부 막으며, 운영 원천은 제너레이터라 걸린다 — **그래서 L**이다.
+다만 *"지금은 네 자리가 예외로 죽는다"* 표(`:44-49`)의 세 번째 줄은 괄호로 조건을 달았어도
+표 제목이 단정형이라 조금 세게 읽힌다. **고칠 것(선택)**: 약한 참조가 안 걸리는 원천이면
+`id()` 를 강한 참조와 함께 작은 목록에 남기거나, 최소한 그때 `log`/주석 한 줄.
+
+### CR51-5 (L) — CR50-9 는 **절반만** 닫혔다. `api-spec §4.5` 의 어긋남은 **그대로**다
+
+닫힌 것: `hexagon-report-data.md` 가 §0 구분표(❌낡음 / ✅유효 / ⚠️확인 필요)를 얻었고
+`§1` 표의 해당 칸에도 ❌ 표시가 붙었다(`:53`·`:60`). **형제 문서 비대칭 해소 ✅** — 이게 핵심이었다.
+
+안 닫힌 것:
+* 낡은 `611,518` 이 **표시 없이** 5곳에 남아 있다 — `app/agents/scoring.py:15` ·
+  `app/domain/valuation/timeadjust.py:7` · `deploy/DEPLOY.md:342` ·
+  `docs/01-discovery/enhancement-research.md:33·153·219` · `docs/02-design/api-spec.md:1171`.
+* **CR50-9 가 이름까지 짚은 어긋남이 남았다**: `api-spec.md:679`(§4.5)가 `price_status=="unknown"`
+  규칙의 근거로 **실측 36.1%** 를 낡음 표시 **없이** 인용하는데, `complex-typing.md:31` 은 같은
+  값을 ❌**낡음(재측정 필요) · "거의 확실히 줄어든다"** 로 적었다. 같은 절의 `901개(5.5%)` ·
+  `2,775개(16.9%)` 도 같은 날(08-04) 같은 DB 값이다. §4.5 는 *"아직 응답에 실리지 않는다"* 를
+  머리에 달아 두었으므로 **한 줄만 더**(⚠️ 수치는 백필 전 08-04 실측 · 배선 전 재측정) 붙이면 된다.
+
+### CR51-6 (확인 · 정정) — CR50-9 의 "백필로 오른다"는 **리뷰어(CR-050)가 틀렸다**. 담당자가 맞다
+
+PM 판정을 내가 운영 DB 에서 **직접 세어** 확인했다(읽기 전용 · `SET default_transaction_read_only=on`):
+
+| | 값 |
+|---|---:|
+| `trade` 총계 | **1,076,262** |
+| `contract_date >= 2024-01-01` | **611,518** |
+| 그 이전 | 464,744 |
+| 계약일 범위 | **2021-01-01 ~ 2026-07-25** |
+
+**2024+ 부분합이 백필 전 총계(611,518)와 정확히 일치**한다 → 백필은 2021~2023 만 넣었고
+**2024+ 는 한 건도 안 늘었다**. (적재기가 upsert 전용이라 "같은 수만큼 지우고 다시 넣었다"는
+경우는 실질적으로 배제된다.) `hexagon-report-data.md` 가 정의한 창은 전부 2024-07 이후이므로
+**가격매력 51.7% · 가격추세 50.2% 는 영향 없음** — ⚠️확인 필요 → ✅유효 로 옮길 근거가 섰다.
+**고칠 것**: 그 줄을 ✅ 로 옮기고 근거(`2024+ 부분합 = 611,518 = 백필 전 총계`)를 한 줄 적을 것.
+
+⚠️ **같은 표의 다른 ⚠️ 줄은 아직 열려 있다.** `market_price_index` 를 같이 쟀다 —
+**2,381행 · 2024-01 ~ 2026-07**(문서 값 2,288행). **과거 달이 안 늘었다**(min 이 2024-01 그대로)
+→ 백필 구간으로 **재생성되지 않았다**. 행 수만 +93 늘었다(최근 달 추가로 보인다).
+그 줄은 ⚠️ 로 유지하되 이 실측을 적어 두면 다음 사람이 다시 안 잰다.
+
+### CR51-7 (L · 확인만) — CR50-4·CR50-5 는 이 라운드 범위 밖이라 그대로다
+
+* `test_one_pass_over_many_folds_matches_the_per_fold_path`(`:1345`)는 여전히 **순환**이다
+  (`build_cells`/`build_outcomes` 가 `FoldCollector` 에 위임하므로 같은 구현끼리 비교).
+* 스트리밍 **창 경계**(`collect.py:412` `(start, end]`)와 `_region`/`_complex_ids` 를 T창에서만
+  모으는 규칙(`:419-422`)에 **전용 검사가 없다**(테스트 전체 검색 — 경계 검사는 면적대와 청크 경계뿐).
+
+### 잔가지 (L · 비차단)
+
+* `--max-samples -1` → 첫 청크에서 `누적 표본 1개가 상한 -1개를 넘었습니다` 로 죽는다(검증 없음) ·
+  `--chunk-rows 0` 은 `SystemExit` 이 아니라 `ValueError` 트레이스백 — **CR50 그대로**.
+* `run_backtest(trades: Sequence[BacktestTrade])`(`engine.py:416`) — 한 번만 순회하므로
+  `Iterable` 이 맞다. **CR50 그대로**.
+* `collect.py:76` *"그래도 남는 몫은 §7-13 에 **숫자로** 적었다"* — §7-13-B 의 그 숫자는
+  **[미측정] 추정**이다(본문은 정직하다). 머리주석 쪽 표현만 살짝 세다.
+* `summarize` 의 `verdict==measured` & `quotable_folds==0` 조합 허용 · `analysis.py` 의
+  `LADDER_POPULATION` 값 미고정 — `character/` 미변경이라 예상된 잔존.
+
+---
+
+## CR-050 조치 확인표
+
+| CR50 | 조치 | 확인 |
+|---|---|---|
+| **1** (M) | 순간 보유 상한 2배 정정 + 계수 전수화 | ✅ **해소.** `_TrackedTrade` 하위형이 `replace()` 사본까지 센다 · 픽스처가 마스킹을 지난다(`copies > 0` 단언) · `peak_live_rows`(청크+뷰) 신설 · 상한 `2 × chunk_rows` · 문서 2곳 정정. 내 `gc` 전수(운영 모양 **501** vs `peak_live_rows` 500)와 `tracemalloc`(**181 B/행**)이 모두 일치 |
+| **2** (M) | `stream_results` | ✅ **켰다**(`run_backtest.py:236-238` · `max_row_buffer=chunk_rows` · `stream_rows=chunk_rows` 로 상한 하나). 운영 DB 미확인분은 §7-13-B 에 **[미측정] 3칸 + 첫 실행 때 할 일**로 세워 정직성 유지 |
+| **3** (M) | 두 번째 순회 함정 | ✅ **구조로 닫았다.** `assert_rereadable`(다섯 형 전부 `TypeError` — 직접 확인) · `StreamAlreadyConsumed`(feed 재호출 · 제너레이터 공유) · 중복 `FoldSpec` `ValueError` · `_require_fed`. 리스트·튜플·`dict_values`·`set` 은 통과(직접 확인). 남은 구멍은 CR51-4, 새 구멍은 CR51-1 |
+| **4** (L) | 순환 동치검사 | ⬜ 범위 밖 — 그대로(CR51-7) |
+| **5** (L) | 창 경계·`_region` 전용 검사 | ⬜ 범위 밖 — 그대로(CR51-7) |
+| **6** (L) | 읽기전용을 효과로 | ✅ **해소.** `apply_session_guards` 가 ① AUTOCOMMIT **거부**(가드를 걸어 보지도 않는다) ② `SHOW transaction_read_only` 로 되묻고 `on` 아니면 정지. 검사가 셋 다 본다. §7-14-B 신설 |
+| **7** (L) | 표본 상한 단언 | ✅ `== 300` / `== 300` + 손계산 주석 |
+| **8** (L) | `monitoring.md` 실측 줄 | ✅ `:846` **341 · 0 · 1 · HARN 0 · rc=0**(직전 290) + 변이 3종 사망 수 기록. 내 실측과 일치 |
+| **9** (L) | 낡은 611,518 · 문서 비대칭 | ⚠️ **절반**(CR51-5) — 핵심(형제 문서 비대칭)은 해소, 5곳 표시 없음 + `api-spec §4.5` 36.1% 어긋남 잔존. 판단 갈린 곳은 CR51-6 에서 담당자 손을 들어 준다 |
+| **B** | 감시 v6 편입 | ✅ 변이 3종이 각각 자기 무리만 죽인다(5·3·2) · clear 를 통보+`.active` 삭제로 본다 · fail-open 3종이 `.active` 생존을 본다 · 하네스 관문 있음 · 실측 근거 3건 전부 확인. 남은 것은 CR51-2·CR51-3(둘 다 L) |
+
+---
+
+## 판정 — **pass** (High 0)
+
+| ID | 심각도 | 요지 |
+|---|---|---|
+| CR51-1 | **M** | 상한에 걸려 멈춘 수집기가 그 뒤 **부분 결과를 조용히** 낸다(재현: 5셀 → 3셀 · 예외/경고 0). 운영 경로엔 없으나 CR50-3 이 세운 기준과 `_require_fed` 의 존재 이유에 정면으로 걸린다 |
+| CR51-2 | L | `_f2b_order_scan` 재사용을 버린 판단은 **옳은데**(확인함) 그것을 지키는 픽스처가 없다 — 재사용으로 "정리"해도 51건이 초록. 픽스처 한 줄이면 닫힌다 |
+| CR51-3 | L | ②는 유닛의 **이름과 enabled 만** 본다(내용 미확인). `is-active` 에는 "증거 아님"을 못박고 `is-enabled` 에는 "보장"이라 적었다 · "못 잡는 것" 목록에 누락 |
+| CR51-4 | L | `_CLAIMED` 약한참조 구멍 실재(`map`·`chain`·`list_iterator` 공유 시 조용히 0행) — 문서화돼 있고 공개 API 는 `assert_rereadable` 로 안전 |
+| CR51-5 | L | CR50-9 절반만 — 낡은 `611,518` 5곳 표시 없음 · `api-spec §4.5` 36.1% 와 `complex-typing §0` 어긋남 잔존 |
+| CR51-6 | 확인 | **담당자가 맞다.** 운영 DB 직접 계수: 총 1,076,262 · 2024+ **611,518**(= 백필 전 총계) · 2021-01-01~ → 가격 2축 커버리지 **영향 없음**. ⚠️→✅ 로 옮기고 근거를 적을 것. 덤: `market_price_index` 는 **재생성 안 됐다**(2,381행 · min 2024-01) |
+| CR51-7 | L | CR50-4·5 범위 밖 잔존(순환 동치검사 · 창 경계/`_region` 전용 검사 없음) |
+| — | L | 잔가지 4 |
+
+**pass 근거**
+* **정확성 결함 없음** — 리팩터 값이 안 바뀐 것은 CR-050 이 독립 참조 960회로 확인했고, 이번
+  변경은 **가드·계측·문서**뿐이다(값 경로 무변화). 새 가드가 정상 경로를 막지 않는 것을
+  네 컨테이너 형으로 직접 확인했고, 새 계측(`peak_live_rows`)은 `gc` 전수와 일치한다.
+  CR51-1 은 **지금 도는 경로에 없다**(실행기가 예외를 전파해 죽는다 — 코드 확인).
+* **보안 냄새 없음** — 산출 JSON·로그·요약에 개인 정보 없음(검사가 단언) · SQL 전부 파라미터
+  바인딩 · 세션 읽기 전용을 **효과로** 확인(AUTOCOMMIT 거부 + `SHOW`) · 감시 알림에 v4·v6 주소
+  모두 가림(`<ip>` 존재와 원문 부재를 둘 다 검사). 리뷰 중 서버 방화벽·유닛 변경 0.
+* **핵심 로직 테스트 있음** — 감시 변이 3종이 각각 자기 무리만 죽인다(합 10 · rc=1) ·
+  T6e 하네스 관문으로 가짜가 관대해지는 길이 막혔다 · 백엔드 신규 10건 중 공허한 것 없음.
+* **레이어 위반 없음** — `test_backtest_domain_contains_no_sql_or_engine` 이 `*.py` 글롭이라
+  신규 파일도 자동 포함. 도메인에 SQL·엔진 import 0. `ruff` 통과.
+
+**다음 커밋 전 처리 권고(전부 저비용)**: CR51-1(가드 1줄 + 검사 1개) · CR51-2(픽스처 1줄) ·
+CR51-3("못 잡는 것" 1줄) · CR51-6(문서 2줄 — ⚠️→✅ 와 `market_price_index` 실측).
+**첫 백테스트 실행 때 필수**: `backtest.md §7-13-B` 의 `[미측정]` 3칸을 `docker stats` 와 함께 지울 것.
+**배선 전 필수(CR-049 유지)**: `complex-typing.md §4` 재측정 — 그때 `api-spec §4.5` 의
+36.1%·5.5%·16.9% 도 같이 갱신(CR51-5).

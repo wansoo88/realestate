@@ -85,6 +85,26 @@ AUTH_FRESH_MAX_HOURS="${RE_MON_AUTH_FRESH_MAX_HOURS:-6}"
 #   (1,440버킷 중 30개). 그래서 **창 길이**와 **auth.log 쪽 sshd 줄 수**를 함께 본다.
 JD_MIN_WINDOW="${RE_MON_JD_MIN_WINDOW:-120}"   # 이보다 짧은 창은 판정하지 않는다
 JD_MIN_SSHD="${RE_MON_JD_MIN_SSHD:-2}"         # 경계 ±1 줄을 흡수한다
+# fail2ban (2026-08-04 적용 · docs/05-monitoring/fail2ban.md). 근거는 check_fail2ban 주석에.
+F2B_JAIL="${RE_MON_F2B_JAIL:-sshd}"
+F2B_CHAIN="${RE_MON_F2B_CHAIN:-f2b-sshd}"
+F2B_PORT="${RE_MON_F2B_PORT:-22}"
+F2B_STREAK="${RE_MON_F2B_STREAK:-2}"           # 5분×2 = 10분. 재시작·재적용의 순간을 흡수한다
+# 누적 차단수가 이 시간 동안 **한 번도 안 늘면** 필터가 로그를 못 읽는 상태로 본다.
+#   실측(2026-08-04 · 이 서버): auth.log 를 maxretry=5 / findtime=10m 규칙으로 전수 재생하면
+#   **하루 235~517건**(10일 연속 · 최소 235)이 차단 조건에 닿는다. 실가동 2시간 25분의
+#   실제 차단은 22건(≈9건/시간)이었다. **24시간 0건은 이 서버에 존재하지 않는다.**
+#   반대로 5분 창의 0건은 완전히 정상이다 — 그래서 창을 24시간으로 잡는다.
+F2B_STALE_MAX_HOURS="${RE_MON_F2B_STALE_MAX_HOURS:-24}"
+# IPv6 SSH 차단 (SR-046 · 2026-08-05 적용 · docs/05-monitoring/fail2ban.md §IPv6).
+#   ⛔ fail2ban 은 **v6 를 못 막는다** — `<HOST>` 정규식이 링크로컬 존 접미사
+#      (`fe80::…%enp3s0`)를 못 읽어 탐지가 0 이다(실측 `fail2ban-regex` 0 matched).
+#      그래서 v6 22번은 ip6tables 로 통째로 DROP 하고, **그 규칙과 그것을 재부팅 뒤
+#      다시 거는 유닛**을 여기서 본다. 근거·실측은 check_v6ssh 주석에.
+V6_UNIT="${RE_MON_V6_UNIT:-re-v6-ssh-drop.service}"
+# 지키는 포트는 v4 와 같은 SSH 포트다 — 한 곳만 바꾸면 둘 다 따라오게 묶어 둔다.
+V6_PORT="${RE_MON_V6_PORT:-$F2B_PORT}"
+V6_STREAK="${RE_MON_V6_STREAK:-$F2B_STREAK}"   # 5분×2 = 10분. 재적용 순간에 울지 않는다
 # 시장지수 배치의 job 이름 — 감시가 '이번 달에 배치가 돌았는가'를 여기서 읽는다(CR42-1).
 MARKET_JOB_NAME="${RE_MON_MARKET_JOB:-market-index}"
 
@@ -1071,6 +1091,606 @@ check_sshlogin() {
 }
 
 # ============================================================================
+# 7d) fail2ban 이 **실제로** 막고 있는가 (2026-08-04 적용 · docs/05-monitoring/fail2ban.md)
+#
+#    fail2ban 을 붙였는데 **그 차단을 아무도 감시하지 않았다.** 조용히 죽으면 우리는
+#    다시 무방비인데 아무도 모른다 — 이 저장소가 다섯 라운드(CR-045~048 · SR-041~044)에
+#    걸쳐 고친 실패형(**감시가 자기 자신에 대해 거짓말한다**)이 새 보안 장치에서
+#    그대로 재발한 상태였다.
+#
+#    ⛔ **`is-active` 만 보고 "보호되고 있다"고 말하면 그게 거짓말이다.**
+#       서비스는 `active` 인데 **iptables 규칙만 빠질 수 있다**: 도커가 재시작하며
+#       INPUT 을 다시 쓰거나, 방화벽 스크립트가 `iptables -F INPUT` 을 하거나,
+#       nft/iptables 백엔드가 바뀌면 체인(`f2b-sshd`)은 남고 **점프만** 사라진다.
+#       그 동안에도 fail2ban 은 자기 로그에 "Ban" 을 계속 적는다 — 데몬은 아무 이상이
+#       없기 때문이다. 그래서 **두 가지를 따로** 본다: ① 데몬이 사는가 ② 규칙이 실제로
+#       걸려 있는가. ②가 없으면 ①이 초록이어도 **막는 것은 0** 이다.
+#
+#    ⛔ **차단 건수 자체는 경보로 쓰지 않는다.** 실측 하루 235~517건이 정상이라
+#       그걸로 울면 그날로 늑대소년이 된다. 건수는 요약에 **사실로만** 싣고,
+#       경보는 **"보호가 꺼졌다"(f2b_dead · f2b_rule)** 와
+#       **"필터가 로그를 못 읽는다"(f2b_stale)** 에만 건다.
+#
+#    ⛔ **fail-open 이 기본이다(CR40-2).** `iptables` 를 **못 부른 것**과 "규칙이 없다"는
+#       전혀 다른 사실이다. 못 부른 것을 "규칙 없음"으로 단정하면 오탐이고,
+#       "이상 없음"으로 넘기면 침묵이다. 둘 다 아니라 **`blind_add`(감시불능)** 이고,
+#       그때는 **clear_alert 를 부르지 않는다** — 못 본 것을 해소라고 말하지 않는다.
+#
+#    ⚠️ 알림·요약에 **IP 를 싣지 않는다.** `fail2ban-client status` 는 차단 IP 목록을
+#       통째로 주는데 우리는 건수만 쓴다(check_sshlogin 이 세운 것과 같은 원칙).
+# ---------------------------------------------------------------------------
+# 실측(2026-08-04 · 이 서버 · fail2ban 0.11.2 · iptables 1.8.7 nf_tables) — 자체검사의 가짜는
+# 이 모양을 그대로 흉내낸다. **픽스처가 현실과 다르게 굴면 검사가 공허해진다.**
+#   systemctl is-active fail2ban   → `active`  (없는 유닛이면 `inactive` 를 stdout 에 · rc=3)
+#   iptables -S INPUT              → `-P INPUT ACCEPT`
+#                                    `-A INPUT -p tcp -m multiport --dports 22 -j f2b-sshd`
+#   fail2ban-client status sshd    → `   |- Currently banned:<TAB>7`
+#                                    `   `- Total banned:<TAB>22`
+#   ⛔ **CR49-1 정정(2026-08-05)** — 여기 원래 *"없는 jail 에도 rc=0"* 이라고 적혀 있었는데
+#      **거짓이었다.** 같은 서버·같은 판(0.11.2)에서 재확인:
+#        fail2ban-client status nosuchjail  → stdout "Sorry but the jail ... does not exist" · **rc=255**
+#        fail2ban-client status sshd        → rc=0
+#      즉 rc 는 실제로 갈린다. **그런데도 아래는 rc 를 안 본다** — 이유가 바뀌었을 뿐 결론은 같다:
+#        rc 는 판(version)에 딸린 계약이라 업그레이드로 조용히 바뀔 수 있고, jail 이 살아 있어도
+#        출력 형식이 달라지면 rc 는 0 인 채로 우리가 아무것도 못 읽는다.
+#        → **`Total banned:` 를 실제로 뽑았는가**로 판정한다. 값을 못 얻으면 감시불능이다.
+#      ⚠️ 근거가 틀렸는데 결론이 맞았다고 넘어가지 않는다 — 다음 사람이 그 근거를 믿고 고친다.
+# ============================================================================
+# ⛔ SR45-5 — **절대경로를 먼저 본다.** 예전에는 PATH 가 먼저였고, 그 근거가
+#    *"자체검사가 가짜를 PATH 앞에 두므로"* 였다. 즉 **시험 편의가 root 실행 경로의
+#    탐색 순서를 정하고 있었다.** 이 함수는 root 로 `iptables`·`systemctl`·
+#    `fail2ban-client` 를 실행하는 유일한 관문이다.
+#    오늘 당장은 악용 불가다(실측: 크론에 `PATH=` 줄이 없고, 기본 PATH 의 `/usr/bin`·`/bin`
+#    은 둘 다 root 소유). 그러나 (a) 크론에 `PATH=` 가 들어오거나 (b) 감시를 systemd
+#    timer(`Environment=PATH=`)·sudo 래퍼로 옮기거나 (c) 배포 계정 셸에서 손으로 돌리면
+#    **그 순간 root 코드실행으로 승격**된다. 그때 절대경로 '폴백'은 아무 도움이 안 된다 —
+#    **먼저 보는 쪽이 이기기 때문이다.**
+#    → 순서를 뒤집고, 가짜 주입은 **명시적 환경변수 `RE_MON_BIN_DIR` 로만** 되게 한다.
+#      자체검사도 이제 그 변수를 쓴다(PATH 를 앞에 둬도 가짜가 안 불린다 — 그것을 시험한다).
+# ⚠️ 절대경로 목록이 장식이 아닌 이유는 그대로 유효하다 — **크론(root)의 기본 PATH 는
+#    `/usr/bin:/bin`** 이고 이 서버의 `iptables` 는 **`/usr/sbin` 에만** 있다(실측).
+#    그 목록이 없으면 규칙 검사가 크론에서 매 실행 "감시불능"이 되고, 손으로 돌릴 때만
+#    초록인 검사가 된다.
+# ⚠️ 맨 끝의 PATH 조회는 **남겨 둔다.** 여섯 디렉터리 어디에도 없는 비표준 설치를
+#    그것 없이는 못 찾고, 그러면 우리는 눈이 먼다. 여기까지 왔다는 것은 표준 경로에 그
+#    이름이 **없다**는 뜻이고, 그 상태를 만들 수 있는 사람은 이미 root 다.
+_f2b_bin() {
+  local n="$1" p
+  # ① 명시적 시험 훅. 지정했는데 못 쓰면 **다른 것을 대신 부르지 않는다**(감시불능으로 간다).
+  if [ -n "${RE_MON_BIN_DIR:-}" ]; then
+    [ -x "$RE_MON_BIN_DIR/$n" ] && { printf '%s' "$RE_MON_BIN_DIR/$n"; return 0; }
+    return 1
+  fi
+  # ② 표준 절대경로. sbin 을 앞에 둔다 — 이 서버의 iptables 가 거기 있다.
+  for p in "/usr/sbin/$n" "/sbin/$n" "/usr/bin/$n" "/bin/$n" "/usr/local/sbin/$n" "/usr/local/bin/$n"; do
+    [ -x "$p" ] && { printf '%s' "$p"; return 0; }
+  done
+  # ③ 마지막으로 PATH (비표준 설치 구제용 — 위 주석의 근거)
+  p=$(command -v "$n" 2>/dev/null)
+  [ -n "$p" ] && { printf '%s' "$p"; return 0; }
+  return 1
+}
+
+_f2b_field() {
+  # $1=필드이름  $2=fail2ban-client status 출력 전체 → 숫자 한 칸(없으면 빈 문자열)
+  printf '%s\n' "$2" | sed -n "s/.*$1:[[:space:]]*\([0-9]\{1,\}\).*/\1/p" | head -1
+}
+
+# ⛔ SR45-7 — **점프가 있다**와 **그 점프가 실효가 있다**는 다른 사실이다.
+#    iptables 는 INPUT 을 **위에서부터** 읽고 ACCEPT 를 만나면 거기서 끝낸다. 그러므로
+#    `f2b-sshd` 점프보다 **앞에** tcp/22 를 통과시키는 ACCEPT 가 하나라도 있으면
+#    점프는 걸려 있는 채로 **아무 패킷도 못 본다**. 그런데 예전 검사는 줄의 **존재**만
+#    보고 초록이었다 — "본다"고 적고 안 보던 자리다(이 저장소가 반복해 고친 결함).
+#    실제로 그 모양이 만들어지는 경로가 있다: 도커/방화벽 스크립트가 `-I INPUT 1` 로
+#    자기 ACCEPT 를 맨 앞에 꽂거나(SR45-1 수정안 자체가 `-I INPUT` 을 쓴다),
+#    관리자가 "내 IP 는 무조건 통과" 한 줄을 위에 넣는 경우다.
+#
+#    판정은 **무해한 쪽에 관대하게** 한다(오탐이 결함이라는 이 저장소 기준):
+#      · `-i lo`                          → 무해(루프백. ignoreip 에도 127.0.0.1 이 있다)
+#      · `--ctstate/--state` 에 NEW 없음   → 무해(맺힌 연결만 받는다. 새 연결은 점프로 간다)
+#      · `-p udp/icmp…`                  → 무해(22/tcp 가 아니다)
+#      · `--dport(s)` 가 우리 포트를 안 덮음 → 무해
+#      · `-j DROP/REJECT`                  → 무해(이미 막힌다. 우회가 아니다)
+#      · `-j LOG/MARK…`(비종료 대상)      → 무해(다음 규칙으로 계속 간다)
+#    남는 것(=우리 포트의 **새 연결**을 통과시키는 ACCEPT)만 `shadow` 로 본다.
+#
+#    ⚠️ **못 보는 것을 적어 둔다(SR45-7 잔여 한계).** `-S INPUT` 만으로는
+#      **하위 체인 안**을 못 본다 — `-A INPUT -j ufw-before-input` 이 앞에 있으면 그 안에서
+#      ACCEPT 할 수 있는데 우리는 알 수 없다. `-j RETURN` 도 같다(정책 ACCEPT 로 빠진다).
+#      그런 줄은 "무해"라고 부르지 않고 **`unsure` → blind_add(감시불능)** 으로 남긴다.
+#      오늘 이 서버의 INPUT 은 `-P INPUT ACCEPT` + 우리 점프 **한 줄뿐**이라 사유가 안 생긴다(실측).
+#      ufw 등을 들이면 그날부터 사유가 남는다 — 그때는 그 체인을 사람이 직접 봐야 한다.
+_f2b_redact_addr() {
+  # 규칙 문자열에서 **주소를 지운다.** "알림·요약에 IP 를 싣지 않는다"는 원칙(check_sshlogin ·
+  # check_fail2ban ③)이 iptables 규칙에도 그대로 적용된다 — 규칙에 적힌 출발지도 주소다.
+  printf '%s' "$1" | sed -E \
+    -e 's#[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?#<ip>#g' \
+    -e 's#([0-9A-Fa-f]{0,4}:){2,}[0-9A-Fa-f]{0,4}(/[0-9]{1,3})?#<ip>#g'
+}
+
+_f2b_rule_verdict() {
+  # $1=INPUT 규칙 한 줄  $2=지켜야 할 포트 → `shadow` | `harmless` | `unsure` 를 찍는다
+  local r=" $1 " tgt p
+  tgt=${r##* -j }; tgt=${tgt%% *}
+  case "$tgt" in
+    ACCEPT) ;;
+    DROP|REJECT) printf harmless; return 0 ;;
+    LOG|NFLOG|ULOG|AUDIT|TRACE|MARK|CONNMARK|CONNSECMARK|TOS|TTL|TCPMSS|NOTRACK|CT)
+      printf harmless; return 0 ;;
+    *) printf unsure; return 0 ;;          # 하위 체인 · RETURN · -g goto — 안을 못 본다
+  esac
+  case "$r" in
+    *" -p tcp "*|*" --protocol tcp "*|*" -p 6 "*) ;;
+    *" -p "*|*" --protocol "*) printf harmless; return 0 ;;
+  esac
+  case "$r" in *" -i lo "*) printf harmless; return 0 ;; esac
+  case "$r" in
+    *" --ctstate "*|*" --state "*)
+      case "$r" in *NEW*) ;; *) printf harmless; return 0 ;; esac ;;
+  esac
+  case "$r" in
+    *--dport*)
+      p=$(printf '%s' "$1" | sed -n 's/.*--dports\{0,1\}[[:space:]]\{1,\}\([0-9,:]\{1,\}\).*/\1/p' | head -1)
+      _f2b_port_covered "$p" "$2" || { printf harmless; return 0; } ;;
+  esac
+  printf shadow
+}
+
+_f2b_order_scan() {
+  # $1=`iptables -S INPUT` 출력 전체  $2=체인 이름  $3=지켜야 할 포트
+  # 출력: `shadow <주소 가린 규칙>` · `unsure <주소 가린 규칙>` · (앞이 전부 무해하면 빈 출력)
+  # rc  : 0=무언가 찍었다  1=앞선 규칙이 전부 무해하다
+  local line unsure="" verdict
+  while IFS= read -r line; do
+    case "$line" in "-A INPUT "*) ;; *) continue ;; esac
+    # 우리 점프에 닿으면 거기서 끝이다 — **뒤쪽 규칙은 이 점프를 가릴 수 없다.**
+    case "$line" in *" -j $2"|*" -j $2 "*) break ;; esac
+    verdict=$(_f2b_rule_verdict "$line" "$3")
+    case "$verdict" in
+      shadow) printf 'shadow %s' "$(_f2b_redact_addr "$line")"; return 0 ;;
+      unsure) [ -n "$unsure" ] || unsure="$line" ;;
+    esac
+  done <<F2BORDER
+$1
+F2BORDER
+  [ -n "$unsure" ] || return 1
+  printf 'unsure %s' "$(_f2b_redact_addr "$unsure")"
+  return 0
+}
+
+_f2b_port_covered() {
+  # $1=규칙에서 뽑은 포트 목록(`22` · `22,2222` · `22:23`)  $2=우리가 지켜야 할 포트
+  # 목록이 비었으면 그 규칙은 포트를 안 가린다(전 포트) → 덮는다.
+  local p lo hi IFS=,
+  [ -n "$1" ] || return 0
+  for p in $1; do
+    case "$p" in
+      *:*) lo=${p%%:*}; hi=${p##*:}
+           case "$lo$hi" in ''|*[!0-9]*) continue ;; esac
+           [ "$2" -ge "$lo" ] && [ "$2" -le "$hi" ] && return 0 ;;
+      *)   [ "$p" = "$2" ] && return 0 ;;
+    esac
+  done
+  return 1
+}
+
+check_fail2ban() {
+  local bin out rc svc="" svc_txt="감시불능" streak
+  local rule=unknown rule_txt="판정 못 함" jump="" ports="" scan="" shadow=""
+  local st="" total="" curban="" tfail="" prev prevat now age delta trend="판정 못 함"
+
+  # --- ① 데몬이 살아 있는가 --------------------------------------------------
+  bin=$(_f2b_bin systemctl)
+  if [ -z "$bin" ]; then
+    blind_add "fail2ban 서비스 상태를 못 본다(systemctl 없음) — '꺼졌다'가 아니라 '못 봤다'다"
+  else
+    svc=$("$bin" is-active fail2ban 2>/dev/null | head -1 | tr -d '[:space:]')
+    # ⚠️ rc 로 판정하지 않는다. `is-active` 는 inactive 일 때 **낱말을 stdout 에 주고
+    #    rc=3** 이다(실측) — rc≠0 을 "못 읽음"으로 보면 진짜 정지를 감시불능으로 덮는다.
+    #    반대로 **빈 출력**은 정지가 아니라 못 읽은 것이다(systemd 없음·버스 불가).
+    [ -n "$svc" ] || blind_add "fail2ban 서비스 상태를 못 읽었다(systemctl is-active 가 빈 출력 — systemd/버스 문제일 수 있다)"
+  fi
+  streak=$(kv_get f2b_dead_streak); case "$streak" in ''|*[!0-9]*) streak=0 ;; esac
+  if [ -z "$svc" ]; then
+    :                                   # 못 봤다 → 올리지도 내리지도 않고 clear 도 안 한다
+  elif [ "$svc" = active ]; then
+    svc_txt="active"; kv_set f2b_dead_streak 0
+    clear_alert f2b_dead "fail2ban 서비스가 다시 active"
+  else
+    svc_txt="$svc"
+    streak=$((streak + 1)); kv_set f2b_dead_streak "$streak"
+    if [ "$streak" -ge "$F2B_STREAK" ]; then
+      raise_alert f2b_dead 21600 "fail2ban 서비스가 active 가 아니다(${svc} · ${streak}회 연속) — SSH 무차별 대입이 다시 무제한이다(이 서버는 로그인 실패가 하루 수천 건 쌓인다). 확인: systemctl status fail2ban · journalctl -u fail2ban -n 50"
+    else
+      log "fail2ban 서비스 비정상 1회(${svc}) — 연속 $streak/$F2B_STREAK, 아직 알리지 않는다"
+    fi
+  fi
+
+  # --- ② 규칙이 **실제로** 걸려 있는가 (여기가 이 검사의 핵심이다) ------------
+  bin=$(_f2b_bin iptables)
+  if [ -z "$bin" ]; then
+    blind_add "fail2ban 차단 규칙을 못 본다(iptables 없음) — '규칙이 없다'와 다르다"
+  else
+    out=$("$bin" -S INPUT 2>/dev/null); rc=$?
+    if [ "$rc" != 0 ] || [ -z "$out" ]; then
+      # 권한 부족 · xtables 잠금 경합 · 커널 모듈 부재. **규칙 없음이 아니다.**
+      blind_add "iptables -S INPUT 을 못 읽었다(rc=${rc}) — 규칙 유무를 판정할 수 없다(권한·xtables 잠금·모듈)"
+    else
+      jump=$(printf '%s\n' "$out" | grep -E "^-A INPUT( |$).*-j ${F2B_CHAIN}( |$)" | head -1)
+      if [ -z "$jump" ]; then
+        rule=missing
+      else
+        ports=$(printf '%s\n' "$jump" | sed -n 's/.*--dports\{0,1\}[[:space:]]\{1,\}\([0-9,:]\{1,\}\).*/\1/p' | head -1)
+        if ! _f2b_port_covered "$ports" "$F2B_PORT"; then
+          rule=badport
+        else
+          # ⛔ SR45-7 — **순서까지 본다.** 점프 앞에 포괄 ACCEPT 가 있으면 점프는
+          #    걸려 있어도 아무 패킷을 못 본다. 근거·판정표·한계는 _f2b_order_scan 주석에.
+          scan=$(_f2b_order_scan "$out" "$F2B_CHAIN" "$F2B_PORT")
+          case "$scan" in
+            "shadow "*) rule=shadowed; shadow=${scan#shadow } ;;
+            "unsure "*)
+              # 점프의 **존재**는 확실히 봤다(그것이 f2b_rule 경보의 대상이다) → rule=ok.
+              # 못 본 것은 **그 앞 하위 체인의 안**이고, 그건 fail-open 으로 따로 남긴다.
+              rule=ok; shadow=${scan#unsure }
+              blind_add "INPUT 의 ${F2B_CHAIN} 점프보다 **앞에** 안을 볼 수 없는 규칙이 있다(${shadow}) — 그 체인이 tcp/${F2B_PORT} 를 ACCEPT 하면 점프가 무력한데 iptables -S INPUT 만으로는 판정할 수 없다. 확인: iptables -S <그 체인>"
+              ;;
+            *) rule=ok ;;
+          esac
+        fi
+      fi
+    fi
+  fi
+  streak=$(kv_get f2b_rule_streak); case "$streak" in ''|*[!0-9]*) streak=0 ;; esac
+  case "$rule" in
+    ok)
+      rule_txt="규칙 있음"
+      [ -z "$shadow" ] || rule_txt="규칙 있음(앞 순서 판정 못 함: $shadow)"
+      kv_set f2b_rule_streak 0
+      clear_alert f2b_rule "fail2ban 차단 규칙이 INPUT 에 다시 걸려 있다 (${F2B_CHAIN} · 포트 ${F2B_PORT})"
+      ;;
+    unknown)
+      rule_txt="판정 못 함"       # blind_add 는 위에서 했다. clear 도 raise 도 하지 않는다.
+      ;;
+    *)
+      case "$rule" in
+        missing)
+          rule_txt="**규칙 없음**"
+          out="iptables INPUT 에 ${F2B_CHAIN} 로 가는 점프가 없다" ;;
+        shadowed)
+          # ⛔ SR45-7 — 규칙은 있는데 **닿지 않는다.** 이것을 '규칙 있음'이라 적으면
+          #    감시가 초록인 채로 거짓말을 한다(is-active 만 보던 것과 같은 잘못).
+          rule_txt="**앞선 ACCEPT 로 무력**"
+          out="INPUT 에서 ${F2B_CHAIN} 점프보다 **앞에** tcp/${F2B_PORT} 의 새 연결을 통과시키는 ACCEPT 가 있다(${shadow}) — 점프는 걸려 있지만 패킷이 거기 닿지 않는다. 주소는 일부러 가렸다" ;;
+        *)
+          rule_txt="**포트 ${F2B_PORT} 미포함**(${ports:-?})"
+          out="INPUT 의 ${F2B_CHAIN} 점프가 포트 ${F2B_PORT} 를 안 덮는다(규칙의 포트: ${ports:-?})" ;;
+      esac
+      if [ -n "$svc" ] && [ "$svc" != active ]; then
+        # 데몬이 내려가면 fail2ban 이 자기 규칙을 걷어 간다 — 그건 ①이 이미 말한 사실이다.
+        # 같은 사고로 두 통을 보내지 않는다. 다만 **요약에는 남기고 clear 도 하지 않는다.**
+        rule_txt="$rule_txt (서비스가 active 가 아니라 규칙 경보는 보류)"
+      else
+        streak=$((streak + 1)); kv_set f2b_rule_streak "$streak"
+        if [ "$streak" -ge "$F2B_STREAK" ]; then
+          raise_alert f2b_rule 21600 "fail2ban 이 실제로는 안 막고 있다(서비스=${svc_txt} · ${streak}회 연속) — ${out}. **서비스가 active 라고 보호되는 것이 아니다**: 도커 재시작·방화벽 재적용이 INPUT 을 다시 쓰면 체인은 남고 점프만 사라지거나, 점프보다 **앞에** ACCEPT 가 끼어든다. 그 동안에도 fail2ban 은 계속 'Ban' 을 로그에 적는다. 확인: iptables -S INPUT (← **순서 그대로** 읽는다) · iptables -S ${F2B_CHAIN} · systemctl restart fail2ban"
+        else
+          log "fail2ban 규칙 이상 1회(${rule}) — 연속 $streak/$F2B_STREAK, 아직 알리지 않는다"
+        fi
+      fi
+      ;;
+  esac
+
+  # --- ③ 필터가 로그를 읽고 있는가 (누적 차단수가 한 번도 안 느는가) ----------
+  #     ⚠️ **건수로 울지 않는다.** 여기서 보는 것은 "늘었는가" 하나뿐이다.
+  #     ⚠️ 데몬이 죽어 있으면 물어보지 않는다 — 소켓이 없어 실패할 것이고, 그 실패를
+  #        감시불능으로 또 적으면 한 사고에 사유가 둘 쌓인다(①이 이미 말했다).
+  if [ -n "$svc" ] && [ "$svc" != active ]; then
+    trend="판정 안 함(서비스가 active 가 아니다)"
+  else
+    bin=$(_f2b_bin fail2ban-client)
+    if [ -z "$bin" ]; then
+      blind_add "fail2ban 차단 추이를 못 본다(fail2ban-client 없음) — 필터가 로그를 읽는지 판정할 수 없다"
+    else
+      st=$("$bin" status "$F2B_JAIL" 2>/dev/null)
+      total=$(_f2b_field 'Total banned' "$st")
+      curban=$(_f2b_field 'Currently banned' "$st")
+      tfail=$(_f2b_field 'Total failed' "$st")
+      if [ -z "$total" ]; then
+        # ⛔ CR49-1 정정 — 여기 원래 *"없는 jail 에도 rc=0 이 온다(실측)"* 라고 적혀 있었고
+        #    **그 거짓이 경보 문구로도 나갔다.** 재측정: 없는 jail → **rc=255**(sshd 는 rc=0).
+        #    rc 를 안 보는 이유는 그것이 아니다: rc 는 판(version)에 딸린 계약이라 업그레이드로
+        #    조용히 바뀌고, jail 이 살아 있어도 출력 형식이 달라지면 rc=0 인 채로 아무것도
+        #    못 읽는다. → **값을 실제로 뽑았는가**로만 판정한다.
+        blind_add "fail2ban jail '${F2B_JAIL}' 의 누적 차단수를 못 읽었다 — 필터가 로그를 읽는지 판정할 수 없다(jail 이름 변경·소켓 불가·출력 형식 변경). 종료코드는 안 믿는다 — 'Total banned:' 를 실제로 뽑았는지로 판정한다"
+      else
+        now=$(date +%s)
+        prev=$(kv_get f2b_total);      case "$prev"   in ''|*[!0-9]*) prev="" ;; esac
+        prevat=$(kv_get f2b_total_at); case "$prevat" in ''|*[!0-9]*) prevat="" ;; esac
+        if [ -z "$prev" ] || [ -z "$prevat" ]; then
+          kv_set f2b_total "$total"; kv_set f2b_total_at "$now"
+          trend="기준값 설정"
+        elif [ "$total" -gt "$prev" ]; then
+          delta=$((total - prev))
+          kv_set f2b_total "$total"; kv_set f2b_total_at "$now"
+          trend="+${delta}"
+          clear_alert f2b_stale "fail2ban 차단이 다시 늘었다 (누적 ${total} · 이번 구간 +${delta}) — 필터가 로그를 읽고 있다"
+        elif [ "$total" -lt "$prev" ]; then
+          # 데몬을 재시작하면 누적 카운터가 다시 0 부터 센다 → 감소는 리셋이지 사건이 아니다.
+          # ⚠️ 그래도 **clear 하지 않는다.** 리셋은 "차단이 다시 늘었다"의 증거가 아니다
+          #    (CR40-2 — 못 본 것을 해소라고 말하지 않는다). 진짜 증가가 곧 꺼 준다:
+          #    재시작 뒤 fail2ban 은 남은 차단을 복구하면서 카운터를 곧바로 올린다(실측).
+          kv_set f2b_total "$total"; kv_set f2b_total_at "$now"
+          trend="카운터 리셋(${prev}→${total} · 재시작)"
+        else
+          age=$(((now - prevat) / 3600))
+          trend="증가 없음(${age}시간째 ${total})"
+          if [ "$age" -ge "$F2B_STALE_MAX_HOURS" ]; then
+            raise_alert f2b_stale 86400 "fail2ban 누적 차단수가 ${age}시간째 ${total} 그대로다 — 필터가 로그를 못 읽고 있을 수 있다(logpath 가 실제 로그와 다르다 · logrotate 뒤 재열기 실패 · 필터 정규식이 이 sshd 버전과 안 맞는다). 이 서버는 실측 **하루 235~517건**이 차단 조건에 닿으므로 ${F2B_STALE_MAX_HOURS}시간 0건은 정상이 아니다. ※ 공격이 정말 멎었을 수도 있다 — 그때는 auth.log 도 같이 조용하다. 확인: fail2ban-client status ${F2B_JAIL} · tail /var/log/fail2ban.log · grep -c 'Failed password' ${AUTH_LOG}"
+          fi
+        fi
+      fi
+    fi
+  fi
+
+  add "fail2ban: 서비스=${svc_txt} · INPUT→${F2B_CHAIN}(포트 ${F2B_PORT}) ${rule_txt} · 누적차단 ${total:-?} ${trend} · 현재차단 ${curban:-?} · 필터누적실패 ${tfail:-?} (차단 건수 자체는 경보 대상이 아니다)"
+}
+
+# ============================================================================
+# 7e) IPv6 로 들어오는 SSH — **fail2ban 이 못 막는 자리**를 감시한다 (SR-046)
+#
+#    ⛔ 왜 생겼나 (2026-08-05 · 전부 이 서버 실측)
+#       `sshd` 는 `[::]:22` 도 듣는다. 그런데 fail2ban 의 `<HOST>` 정규식이 링크로컬
+#       주소의 **존 접미사**(`fe80::…%enp3s0`)를 못 읽어 **탐지가 0** 이다
+#       (`fail2ban-regex` 실측: `0 matched, 1 missed`). 즉 v6 경로에는 maxretry 도
+#       bantime 도 걸리지 않는다. 그리고 `ip6tables -S INPUT` 은 `-P INPUT ACCEPT`
+#       뿐이었는데, 위 `check_fail2ban ②` 는 **`iptables`(v4) 만** 보므로 그 동안
+#       **초록이었다**. 글로벌 v6 주소는 없지만 이 호스트는 OpenStack 멀티테넌트 L2 라
+#       같은 세그먼트 이웃(`fa:16:3e:*`)이 실재한다 — 그쪽에서는 무제한 대입이 가능했다.
+#       → 조치: `ip6tables -I INPUT 1 -p tcp --dport 22 -j DROP`
+#         (실측: 전 `ssh -6` = Permission denied → 후 = Connection timed out ·
+#          IPv4 접속 2회 성공 · 메인 200 · 컨테이너 8개 정상)
+#         `ip6tables-persistent` 가 없어 규칙이 **재부팅에 사라진다** → oneshot 유닛
+#         `re-v6-ssh-drop.service` 가 다시 건다.
+#
+#    ⛔ **그 조치를 아무도 안 보고 있었다 — 이 검사가 고치는 것이 그것이다.**
+#       누가 규칙을 지우거나 유닛이 실패하면 v6 는 다시 무방비인데 아무도 모른다.
+#       v4 에서 다섯 라운드에 걸쳐 고친 사각지대(감시가 자기 자신에 대해 거짓말한다)를
+#       **v6 에 그대로 새로 만든 셈**이었다. 그래서 v4 와 같은 규율을 그대로 적용한다:
+#         ① 규칙이 **지금** 걸려 있는가 (존재 + 우리 포트 + **그 앞 순서**)
+#         ② **재부팅 뒤에도** 걸릴 것인가 (유닛이 enabled 인가)
+#         ③ 못 본 것은 "없다"가 아니라 **감시불능**이다(fail-open · clear 금지)
+#
+#    ⚠️ **경보 키를 v4 와 섞지 않는다.** `f2b_rule` 과 `v6ssh_rule` 은 원인도 고칠 곳도
+#       다르다(전자는 fail2ban 재시작, 후자는 ip6tables/유닛). 한 키로 묶으면 한쪽이
+#       켜져 있는 동안 다른 쪽의 해소가 상대를 덮어 끈다.
+#
+#    ⚠️ **`is-active` 를 보호의 증거로 쓰지 않는다 — 실측하고 정한 것이다.**
+#       이 유닛은 `Type=oneshot` + `RemainAfterExit=yes` 라, 부팅 때 한 번 성공하면
+#       그 뒤 **규칙을 손으로 지워도 영원히 `active`(SubState=exited)** 다(실측).
+#       즉 `is-active` 는 "지금 막고 있다"의 증거가 **아니다** — 그 증거는 ①뿐이다.
+#       재부팅 복구를 보장하는 것은 `is-enabled` 이고, 반대로 `inactive` 자체는 경보가
+#       아니다(이 유닛에는 `ExecStop` 이 없어 stop 해도 규칙을 걷지 않는다 ·
+#       enabled 이면 다음 부팅에 다시 건다). 그래서 ②의 기준은 **is-enabled** 다.
+#
+#    ⚠️ 실측(2026-08-05 · 이 서버 · systemd 249 · ip6tables 1.8.7 nf_tables) —
+#       자체검사의 가짜는 이 모양 그대로다. **가짜가 현실보다 관대하면 검사가 공허하다.**
+#         ip6tables -S INPUT →  `-P INPUT ACCEPT`
+#                               `-A INPUT -p tcp -m tcp --dport 22 -j DROP`
+#                               `-A INPUT -p tcp -m multiport --dports 22 -j f2b-sshd`
+#           ⛔ **마지막 줄을 보라.** fail2ban 이 만든 v6 점프는 **이미 있다** — 그런데
+#              위 실측대로 v6 를 한 건도 안 잡는다. "점프가 있으니 보호된다"고 읽으면
+#              그것이 이 사고 전체다. 그래서 이 검사는 점프가 아니라 **DROP** 을 본다.
+#         systemctl is-enabled re-v6-ssh-drop.service → `enabled`   rc=0
+#         systemctl is-active  re-v6-ssh-drop.service → `active`    rc=0 (oneshot/exited)
+#         systemctl is-enabled <없는 유닛>            → **stdout 빈 문자열** · rc=1
+#                                                       (stderr: Failed to get unit file state…)
+#         systemctl is-active  <없는 유닛>            → `inactive`  rc=3
+#       ⛔ 마지막 두 줄이 이 검사의 함정이다: **`is-enabled` 의 빈 출력은 두 가지**다 —
+#          (a) 유닛 파일이 사라졌다(=재부팅 뒤 복구 안 됨 · **경보**)
+#          (b) systemd/버스를 못 읽었다(**감시불능**)
+#          → `is-active` 가 낱말을 주면 버스는 살아 있다는 뜻이다(없는 유닛에도
+#            `inactive` 를 준다) → 그때의 빈 출력은 **(a)** 로 판정한다. 이 구분을
+#            안 하면 **유닛 삭제가 조용한 감시불능으로 덮인다** — 삭제는 사람이 하는
+#            일이고, 우리가 가장 알아야 하는 쪽이다.
+# ---------------------------------------------------------------------------
+# ⚠️ **이 검사가 못 잡는 것**(없는 척하지 않는다 — 문서 fail2ban.md §IPv6 에 더 자세히)
+#    · **v6 무차별 대입 자체를 세지 않는다.** 우리는 포트를 통째로 닫았을 뿐이고,
+#      fail2ban 쪽 v6 탐지는 여전히 0 이다. 규칙이 빠진 동안 무슨 일이 있었는지는
+#      `auth.log` 로만 알 수 있다(그쪽은 check_sshlogin 이 본다).
+#    · **DROP 앞 하위 체인의 안**은 못 본다(`-j ufw6-before-input` · `-j RETURN`).
+#      그런 줄은 무해라고 부르지 않고 `blind_add`(감시불능)로 남긴다 — v4 와 같다.
+#    · **sshd 가 v6 를 정말 듣는지**는 안 본다. `ListenAddress` 를 v4 로 좁히면 규칙
+#      없이도 안전한데 우리는 "규칙 없음"이라 운다(오탐). 지금 이 서버는 `[::]:22` 를
+#      듣고 있고(실측), 그 설정을 바꾸는 것은 사용자 결정이라 여기서 가정하지 않는다.
+#    · **다른 v6 포트**는 안 본다(이 검사는 SSH 한 칸이다).
+# ============================================================================
+_v6_rule_is_drop() {
+  # $1=`ip6tables -S INPUT` 한 줄  $2=지켜야 할 포트 → rc 0 이면 "우리가 건 v6 SSH 차단"
+  # ⚠️ **이름만 맞는 규칙에 속지 않는다**(v4 의 포트 판정과 같은 규율). 아래 중 하나라도
+  #    어긋나면 그것은 우리가 건 보호가 아니므로 **못 본 것으로 친다**:
+  #      · 종료 대상이 DROP/REJECT 가 아니다        → 안 막는다
+  #      · 출발지가 붙어 있다(`-s`)                 → **그 한 주소만** 막는다(나머지는 무방비)
+  #      · `-i lo`                                   → 바깥에서 오는 패킷을 안 막는다
+  #      · tcp 가 아니다 · 새 연결을 안 막는다 · 우리 포트를 안 덮는다
+  #    ⚠️ `-p` 나 `--dport` 가 **아예 없는** 규칙은 더 넓게 막는 것이므로 인정한다.
+  local r=" $1 " tgt p
+  case "$r" in *" -j "*) ;; *) return 1 ;; esac
+  tgt=${r##* -j }; tgt=${tgt%% *}
+  case "$tgt" in DROP|REJECT) ;; *) return 1 ;; esac
+  case "$r" in *" -s "*|*" --source "*|*" --src "*) return 1 ;; esac
+  case "$r" in *" -i lo "*) return 1 ;; esac
+  case "$r" in
+    *" -p tcp "*|*" --protocol tcp "*|*" -p 6 "*) ;;
+    *" -p "*|*" --protocol "*) return 1 ;;
+  esac
+  case "$r" in
+    *" --ctstate "*|*" --state "*) case "$r" in *NEW*) ;; *) return 1 ;; esac ;;
+  esac
+  p=$(printf '%s' "$1" | sed -n 's/.*--dports\{0,1\}[[:space:]]\{1,\}\([0-9,:]\{1,\}\).*/\1/p' | head -1)
+  _f2b_port_covered "$p" "$2"
+}
+
+_v6_scan() {
+  # $1=`ip6tables -S INPUT` 출력 전체  $2=지켜야 할 포트
+  # 출력: `ok` | `missing` | `policy` | `shadow <주소 가린 규칙>` | `unsure <주소 가린 규칙>`
+  #
+  # ⛔ **v4 의 `_f2b_order_scan` 을 그대로 못 쓴다 — 재사용을 시도하고 버린 이유를 적는다.**
+  #    그 함수는 *"`-j <이름>` 인 줄을 만나면 멈춘다"* 로 되어 있다. 여기서 이름 자리에
+  #    `DROP` 을 넣으면 **INPUT 의 첫 DROP 줄**에서 멈추는데, 그 줄이 우리 규칙이라는
+  #    보장이 없다(다른 포트를 막는 DROP 이 위에 있으면 거기서 멈춘다). 그러면 그 뒤
+  #    ~ 우리 규칙 앞 구간의 ACCEPT 를 **못 보고 "앞이 깨끗하다"고 말한다** — 조용한
+  #    오답이고, 이 저장소가 반복해 고쳐 온 형태(**본다고 적고 안 본다**) 그 자체다.
+  #    → 루프만 따로 쓰고, **줄 하나가 우리 규칙을 가리는가**의 판정은 v4 와 **같은**
+  #      `_f2b_rule_verdict` 를 그대로 재사용한다. 판정표(무해 목록)·하위 체인 한계는
+  #      그 함수 주석에 있고 v6 에도 그대로 적용된다(`-p ipv6-icmp` 는 "다른 프로토콜"로
+  #      무해에 걸린다 — 실측 픽스처에 그 줄이 있다).
+  local line unsure="" verdict pol=""
+  while IFS= read -r line; do
+    case "$line" in
+      "-P INPUT "*) pol=${line#-P INPUT }; pol=${pol%% *}; continue ;;
+      "-A INPUT "*) ;;
+      *) continue ;;
+    esac
+    if _v6_rule_is_drop "$line" "$2"; then
+      # 우리 규칙에 닿았다 — **뒤쪽 줄은 이 DROP 을 가릴 수 없다**(DROP 이 거기서 끝낸다).
+      [ -z "$unsure" ] || { printf 'unsure %s' "$(_f2b_redact_addr "$unsure")"; return 0; }
+      printf ok; return 0
+    fi
+    verdict=$(_f2b_rule_verdict "$line" "$2")
+    case "$verdict" in
+      shadow) printf 'shadow %s' "$(_f2b_redact_addr "$line")"; return 0 ;;
+      unsure) [ -n "$unsure" ] || unsure="$line" ;;
+    esac
+  done <<V6SCAN
+$1
+V6SCAN
+  # ⚠️ 규칙이 없어도 **정책이 DROP 이면 닫혀 있다.** 그것을 "무방비"라 부르면 오탐이다.
+  #    (오늘 이 서버는 `-P INPUT ACCEPT` 라 이 가지로 안 온다 — 실측)
+  case "$pol" in DROP|REJECT) printf policy; return 0 ;; esac
+  printf missing
+}
+
+check_v6ssh() {
+  local bin out rc scan="" streak
+  local rule=unknown rule_txt="판정 못 함(ip6tables)" shadow=""
+  local en="" act="" unit=unknown unit_txt="판정 못 함(systemctl)" why=""
+
+  # --- ① 재부팅 뒤에도 다시 걸리는가 (유닛이 enabled 인가) --------------------
+  bin=$(_f2b_bin systemctl)
+  if [ -z "$bin" ]; then
+    blind_add "IPv6 SSH 차단 유닛(${V6_UNIT}) 상태를 못 본다(systemctl 없음) — '꺼졌다'가 아니라 '못 봤다'다"
+  else
+    en=$("$bin" is-enabled "$V6_UNIT" 2>/dev/null | head -1 | tr -d '[:space:]')
+    act=$("$bin" is-active  "$V6_UNIT" 2>/dev/null | head -1 | tr -d '[:space:]')
+    if [ -n "$en" ]; then
+      if [ "$en" = enabled ]; then
+        if [ "$act" = failed ]; then
+          # enabled 인데 마지막 실행이 실패했다 → 다음 부팅에도 같은 이유로 실패한다.
+          unit=failed
+          why="유닛은 enabled 인데 **마지막 실행이 실패**했다(is-active=failed) — 재부팅해도 규칙이 안 걸린다"
+        else
+          unit=ok
+        fi
+      else
+        # `enabled-runtime` 도 여기로 온다 — **재부팅에 사라지는** 상태라 통과시키면 안 된다.
+        unit=notenabled
+        why="유닛이 enabled 가 아니다(현재 ${en}) — 지금 규칙이 살아 있어도 **재부팅하면 사라진다**"
+      fi
+    elif [ -n "$act" ]; then
+      # 위 머리말의 함정. is-active 가 답했다 = 버스는 산다 → 빈 is-enabled 는 **유닛 부재**다.
+      unit=gone
+      why="유닛 파일이 없다(${V6_UNIT} · is-enabled 가 빈 출력 · is-active=${act}) — 재부팅하면 IPv6 ${V6_PORT}번이 다시 열린다"
+    else
+      blind_add "IPv6 SSH 차단 유닛(${V6_UNIT}) 상태를 못 읽었다(is-enabled·is-active 가 **둘 다** 빈 출력 — systemd/버스 문제일 수 있다)"
+    fi
+  fi
+  streak=$(kv_get v6_unit_streak); case "$streak" in ''|*[!0-9]*) streak=0 ;; esac
+  case "$unit" in
+    ok)
+      # ⚠️ 괄호 안 is-active 는 **사실로만** 싣는다 — 보호의 증거가 아니다(머리말).
+      unit_txt="enabled(is-active=${act:-?} · 보호의 증거는 아니다)"
+      kv_set v6_unit_streak 0
+      clear_alert v6ssh_unit "IPv6 SSH 차단 유닛이 다시 정상 (${V6_UNIT} · enabled)"
+      ;;
+    unknown) : ;;                 # blind_add 는 위에서 했다. clear 도 raise 도 안 한다.
+    *)
+      unit_txt="**${en:-없음}${act:+/$act}**"
+      streak=$((streak + 1)); kv_set v6_unit_streak "$streak"
+      if [ "$streak" -ge "$V6_STREAK" ]; then
+        raise_alert v6ssh_unit 21600 "IPv6 SSH 차단이 재부팅을 못 넘긴다(${streak}회 연속) — ${why}. 이 서버의 ip6tables 규칙은 재부팅에 사라지고(persistent 패키지 없음) 다시 거는 것이 이 유닛 하나뿐이다. **fail2ban 은 이 자리를 대신 못 막는다**(<HOST> 정규식이 fe80::…%iface 를 못 읽어 v6 탐지 0). 확인: systemctl status ${V6_UNIT} · systemctl enable --now ${V6_UNIT} · ip6tables -S INPUT"
+      else
+        log "IPv6 차단 유닛 이상 1회(${unit}) — 연속 $streak/$V6_STREAK, 아직 알리지 않는다"
+      fi
+      ;;
+  esac
+
+  # --- ② 규칙이 **지금** 걸려 있는가 (보호의 유일한 증거가 여기다) ------------
+  bin=$(_f2b_bin ip6tables)
+  if [ -z "$bin" ]; then
+    # ⚠️ v6 를 아예 안 쓰는 호스트도 있다. **"규칙 없음"이 아니라 감시불능**이다(fail-open).
+    blind_add "IPv6 SSH 차단 규칙을 못 본다(ip6tables 없음) — v6 를 안 쓰는 호스트일 수 있다. '규칙이 없다'와는 다른 사실이다"
+  else
+    out=$("$bin" -S INPUT 2>/dev/null); rc=$?
+    if [ "$rc" != 0 ] || [ -z "$out" ]; then
+      blind_add "ip6tables -S INPUT 을 못 읽었다(rc=${rc}) — 규칙 유무를 판정할 수 없다(권한·ip6_tables 모듈 미적재·xtables 잠금)"
+    else
+      scan=$(_v6_scan "$out" "$V6_PORT")
+      case "$scan" in
+        ok)         rule=ok ;;
+        policy)     rule=policy ;;
+        missing)    rule=missing ;;
+        "shadow "*) rule=shadowed; shadow=${scan#shadow } ;;
+        "unsure "*)
+          # DROP 의 **존재**는 확실히 봤다 → rule=ok. 못 본 것은 그 앞 하위 체인의 안이다.
+          rule=ok; shadow=${scan#unsure }
+          blind_add "IPv6 ${V6_PORT}번 DROP 보다 **앞에** 안을 볼 수 없는 규칙이 있다(${shadow}) — 그 체인이 tcp/${V6_PORT} 를 ACCEPT 하면 DROP 이 무력한데 ip6tables -S INPUT 만으로는 판정할 수 없다. 확인: ip6tables -S <그 체인>"
+          ;;
+        *) rule=unknown ;;
+      esac
+    fi
+  fi
+  streak=$(kv_get v6_rule_streak); case "$streak" in ''|*[!0-9]*) streak=0 ;; esac
+  case "$rule" in
+    ok|policy)
+      if [ "$rule" = policy ]; then
+        rule_txt="INPUT 정책이 DROP 이라 닫혀 있다(우리 규칙은 없다)"
+      else
+        rule_txt="${V6_PORT}번 DROP 걸려 있음"
+        [ -z "$shadow" ] || rule_txt="${rule_txt}(앞 순서 판정 못 함: $shadow)"
+      fi
+      kv_set v6_rule_streak 0
+      clear_alert v6ssh_rule "IPv6 tcp/${V6_PORT} 가 다시 닫혀 있다 (${rule_txt})"
+      ;;
+    unknown) : ;;                 # blind_add 는 위에서 했다. clear 도 raise 도 안 한다.
+    *)
+      case "$rule" in
+        missing)
+          rule_txt="**${V6_PORT}번 DROP 없음**"
+          out="ip6tables INPUT 에 tcp/${V6_PORT} 를 막는 DROP 이 없다 — 출발지가 붙은 DROP(-s 가 붙은 줄)·lo 전용·다른 포트는 우리 보호로 세지 않는다. fail2ban 의 v6 f2b-sshd 점프가 있어도 그것은 이 자리를 대신하지 못한다" ;;
+        *)
+          rule_txt="**앞선 ACCEPT 가 v6 ${V6_PORT}번을 통과시킨다**"
+          out="ip6tables INPUT 에서 ${V6_PORT}번 DROP 보다 **앞에** tcp/${V6_PORT} 의 새 연결을 통과시키는 ACCEPT 가 있다(${shadow}) — DROP 은 걸려 있지만 패킷이 거기 닿지 않는다. 주소는 일부러 가렸다" ;;
+      esac
+      if [ "$unit" = failed ]; then
+        # 유닛이 실패해서 규칙이 안 걸린 것이면 그건 ①이 이미 말한 **한 사고**다.
+        # 같은 사고로 두 통을 보내지 않는다. 다만 **요약에는 남기고 clear 도 하지 않는다.**
+        rule_txt="$rule_txt (유닛 실패가 원인이라 규칙 경보는 보류)"
+      else
+        streak=$((streak + 1)); kv_set v6_rule_streak "$streak"
+        if [ "$streak" -ge "$V6_STREAK" ]; then
+          raise_alert v6ssh_rule 21600 "IPv6 SSH 가 다시 열려 있다(${streak}회 연속) — ${out}. **fail2ban 은 이 자리를 못 막는다**: <HOST> 정규식이 링크로컬 존 접미사(fe80::…%iface)를 못 읽어 v6 탐지가 0 이고(실측 0 matched), v4 의 f2b_rule 검사는 iptables 만 보므로 이 상태에서도 초록이다. 확인: ip6tables -S INPUT (**순서 그대로** 읽는다) · systemctl start ${V6_UNIT} · ss -ltn 'sport = :${V6_PORT}'"
+        else
+          log "IPv6 차단 규칙 이상 1회(${rule}) — 연속 $streak/$V6_STREAK, 아직 알리지 않는다"
+        fi
+      fi
+      ;;
+  esac
+
+  add "IPv6SSH : tcp/${V6_PORT} ${rule_txt} · 유닛 ${V6_UNIT} ${unit_txt} (fail2ban 은 v6 를 못 막는다 — 이 두 칸이 v6 방어의 전부다)"
+}
+
+# ============================================================================
 # 7c) 위 로그 검사들이 **아무것도 못 본 상태**를 한 통으로 알린다
 #     3개 검사가 각각 울면 3통이 간다 → 사유를 모아 한 통으로 보낸다.
 #     이 경보가 켜져 있는 동안 로그권한·로그유출·5xx·SSH 는 "이상 없음"이 아니라
@@ -1467,6 +2087,8 @@ case "$MODE" in
     check_logfresh
     check_api5xx
     check_sshlogin
+    check_fail2ban
+    check_v6ssh           # ← v4 와 별개다. fail2ban 은 v6 를 못 막는다(SR-046)
     check_logblind        # ← 위 로그 검사들이 남긴 "검사 못 함"을 한 통으로
     check_peer_alive
     kv_set last_fast_run "$(date +%s)"        # ← 모든 검사를 통과한 뒤에만 찍는다
@@ -1485,6 +2107,8 @@ case "$MODE" in
     check_logfresh
     check_api5xx
     check_sshlogin
+    check_fail2ban
+    check_v6ssh           # ← v4 와 별개다. fail2ban 은 v6 를 못 막는다(SR-046)
     # ⚠️ check_cert 도 blind_add 를 한다(CR42-3). 그러므로 **check_logblind 보다 앞**이어야
     #    한다 — 뒤에 두면 "인증서 대상 0개" 사유가 아무 데도 안 실려 조용히 사라진다.
     #    (fast 경로에는 check_cert 가 없으므로 그쪽 순서는 그대로다)

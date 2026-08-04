@@ -12144,3 +12144,1022 @@ kv/fast_runs_today = 275 (감시는 정상 가동 중)
 | F | 운영본 취약 정규식 잔존 | **미해소** | SR44-4 · 배포로만 닫힘 |
 
 > `fail2ban` 은 사용자 지시에 따라 이번 결론에 포함하지 않았다.
+
+---
+
+## SR-045 · 2026-08-04 · **fail2ban 감시 편입(monitor.sh check_fail2ban) · 백테스트 골격 · 단지 유형 — 판정 `failed`** (security-reviewer)
+
+> **결론: fail — High 2건 (SR45-1 · SR45-2).**
+> 새 코드(A/B/C)의 품질은 좋다. 인젝션 0 · 비밀 하드코딩 0 · 민감정보 로그노출 0 이다.
+> **문제는 오늘 적용한 fail2ban 설정 자체다**: `ignoreip` 이 사설대역을 통째로 면제해
+> **도커 컨테이너 8개와 멀티테넌트 사설 세그먼트 `10.2.0.0/16` 에 대해 보호가 꺼져 있고**,
+> 새로 붙인 `check_fail2ban` 은 그 상태를 **원리적으로 못 본다**(누적 차단수는 계속 늘기 때문).
+>
+> ⚠️ **`PasswordAuthentication yes` · `PermitRootLogin yes` 는 사용자가 결정한 사안이라 다시 권고하지 않는다.**
+> 아래 판정은 **그 결정을 전제로 남는 위험**만 다룬다. SR45-1·SR45-2 의 수정안은 `sshd_config` 가
+> 아니라 **`jail.local` 한 줄과 iptables 두 줄**이며, 사용자 결정과 충돌하지 않는다.
+
+### 동결 해시 확인
+| 파일 | 시작 | 종료 | 판정 |
+|---|---|---|---|
+| `deploy/monitor.sh` | `43169225…a29d4` | `43169225…a29d4` | 일치 |
+| `deploy/monitor-selftest.sh` | `ccc8590b…07a052` | `ccc8590b…07a052` | 일치 |
+
+리뷰 중 트리 변경 0. `monitor-selftest.sh` 는 **실행하지 않았다**(윈도우 금지 지시). 판정은 코드 정독 + 서버 실측.
+서버는 읽기 전용으로만 접촉했고 `/root/sec45/` 는 만들지 않았다(격리 불필요). `/opt/realestate/scripts/**` 무접촉.
+
+---
+
+## SR45-1 · **High** · 도커 컨테이너 전부가 fail2ban 을 완전히 우회한다 (`ignoreip` 에 `172.16.0.0/12`)
+**위치**: `/etc/fail2ban/jail.local` `[DEFAULT] ignoreip` · 근거문서 `docs/05-monitoring/fail2ban.md` "적용 범위 — 동거 서비스에 영향 없음"
+**CWE**: CWE-693 (Protection Mechanism Failure) · CWE-290 (Authentication Bypass by Spoofing) · **OWASP A07 (Identification & Authentication Failures)**
+
+**재현 (2026-08-04 · 서버 실측)**
+
+```
+$ fail2ban-client get sshd ignoreip
+|- 127.0.0.0/8   |- 172.16.0.0/12   |- 10.0.0.0/8   |- ::1   `- 211.54.122.240
+
+$ docker exec realestate-api python -c "socket connect (gw,22)"
+172.20.0.1  OPEN  b'SSH-2.0-OpenSSH_8.9p'  src= 172.20.0.3
+172.19.0.1  OPEN  b'SSH-2.0-OpenSSH_8.9p'  src= 172.20.0.3
+172.17.0.1  OPEN  b'SSH-2.0-OpenSSH_8.9p'  src= 172.20.0.3
+10.2.3.163  OPEN  b'SSH-2.0-OpenSSH_8.9p'  src= 172.20.0.3   <- 호스트 NIC 도 열림
+
+$ iptables -S INPUT
+-P INPUT ACCEPT
+-A INPUT -p tcp -m multiport --dports 22 -j f2b-sshd          <- 정책 ACCEPT, 컨테이너 차단 없음
+```
+
+컨테이너의 소스 IP `172.20.0.3` 은 `172.16.0.0/12` 안이다 → **fail2ban 이 영구히 무시한다.**
+호스트 브리지 4개(`docker0` 172.17 · `br-*` 172.18/19/20)가 전부 172.16/12 안이고,
+컨테이너 8개(`realestate-api`·`realestate-db`·`autobtc`·`itsmine-worker/engine/admin/postgres/redis`)가 여기 붙어 있다.
+`autobtc` 는 **`0.0.0.0:8080` 로 외부에 직접 공개**돼 있다.
+
+**영향**: 컨테이너 하나만 뚫리면(웹 RCE·의존성 취약점·이미지 공급망) 거기서 호스트 22번으로
+**속도 제한도 차단도 없는 무한 비밀번호 대입**이 가능하다. 사용자가 수용한
+`PermitRootLogin yes` + `PasswordAuthentication yes` 와 결합하면, **fail2ban 이 막아 주기로 한 바로 그 공격이
+가장 유력한 침투 경로(컨테이너)에서만 정확히 면제된다.** 방어의 목적이 그 지점에서 뒤집힌다.
+
+**왜 이 대역이 들어갔나**: `jail.local` 주석은 `211.54.122.240`(작업 IP) 만 설명하고,
+`172.16.0.0/12`·`10.0.0.0/8` 에 대한 근거는 **한 줄도 없다**. `fail2ban.md` 도 마찬가지다.
+근거 없이 들어온 면제이고, 우리 접속은 전부 공인 IP 이므로 **잠김 방지에 기여하지 않는다.**
+
+**수정안 (사용자 결정과 무관)**
+
+1. `jail.local` 에서 `172.16.0.0/12` 제거. (한 줄)
+2. 겹으로 컨테이너→호스트 22 를 끊는다:
+   `iptables -I INPUT -i docker0 -p tcp --dport 22 -j DROP` · `iptables -I INPUT -i br+ -p tcp --dport 22 -j DROP`
+   (영속화는 `iptables-persistent`. **f2b 점프보다 앞**에 넣어야 한다)
+3. 감시가 이 상태를 보게 한다 — `check_fail2ban` 에 `ignoreip` 이 사설대역을 포함하는지 확인하는
+   4번째 검사를 붙인다(`fail2ban-client get <jail> ignoreip` 출력에서 `10.0.0.0/8`·`172.16.0.0/12` 를 찾으면 경보).
+
+---
+
+## SR45-2 · **High** · `ignoreip` 의 `10.0.0.0/8` 이 **이 호스트의 운영 NIC 대역을 통째로 덮는다** — 멀티테넌트 세그먼트에서 무제한 대입 가능
+**위치**: `/etc/fail2ban/jail.local` `[DEFAULT] ignoreip` · `docs/05-monitoring/fail2ban.md` "못 잡는 것" 목록의 마지막 줄
+**CWE**: CWE-693 · CWE-1188 (Insecure Default Initialization) · **OWASP A05 (Security Misconfiguration)**
+
+**재현 (2026-08-04 · 서버 실측)**
+
+```
+$ ip -4 -o addr show
+enp3s0  10.2.3.163/16          <- 운영 NIC 가 10/8 안에 있다
+
+$ ip neigh show dev enp3s0
+10.2.0.1 lladdr fa:16:3e:54:43:06 REACHABLE
+10.2.0.3 lladdr fa:16:3e:a9:d1:d8 STALE
+10.2.0.2 lladdr fa:16:3e:fe:03:0c STALE      <- fa:16:3e:* = OpenStack. 이웃이 실재한다
+
+$ ss -lntp | grep :22
+LISTEN 0 128 0.0.0.0:22   (sshd)             <- 사설 세그먼트에도 열려 있다
+
+$ iptables -S INPUT                          <- -P ACCEPT. 사설대역 제한 규칙 0개
+```
+
+iwinv VPS 의 사설 세그먼트 `10.2.0.0/16` 은 **다른 테넌트와 공유**하는 L2 다(OpenStack MAC).
+그 대역 전체가 `ignoreip` 이므로, **그 대역의 어떤 호스트든 SSH 를 무한히 두들겨도 절대 차단되지 않는다.**
+`auth.log` 상 사설 소스 시도는 현재 **0건**(`grep -cE "from (10\.|172\.(1[6-9]|2[0-9]|3[01])\.)" = 0`) —
+아직 악용된 흔적은 없다. 그러나 **방어는 이미 꺼져 있다.**
+
+**그리고 새 감시는 이 구멍을 원리적으로 못 본다.**
+`fail2ban.md` "못 잡는 것" 마지막 줄은 이렇게 적었다:
+
+> *"`ignoreip` 오설정으로 아무도 안 막히는 경우는 차단수 정체로 나타나므로 ③이 24시간 뒤 잡는다."*
+
+**이 문장은 이 사고에 대해 사실이 아니다.** 공인 IP 공격은 정상적으로 계속 차단되므로
+`Total banned` 는 계속 늘고 → `f2b_stale` 은 **영원히 안 뜬다.** 즉 감시는 **초록인 채로**
+"사설대역 전체가 무방비"인 상태를 통과시킨다. 이 저장소가 SR-041·SR-042 에서 두 번 고친
+**"문서가 감시의 사정거리를 실제보다 넓게 서술한다"** 가 새 장치에서 재발했다.
+
+**수정안**
+
+1. `jail.local` 에서 `10.0.0.0/8` 제거. 필요하면 자기 주소 `10.2.3.163/32` 만 남긴다.
+2. 사설 세그먼트에서 22 를 닫는다 — 우리는 공인 IP 로만 들어오므로 잃는 것이 없다:
+   `iptables -I INPUT -i enp3s0 -s 10.2.0.0/16 -p tcp --dport 22 -j DROP` (검증 후 영속화)
+3. `fail2ban.md` "못 잡는 것" 의 해당 줄을 **사실대로** 고친다 —
+   *"ignoreip 오설정은 ③이 못 잡는다. 공인 IP 차단이 계속되면 카운터가 계속 늘기 때문이다."*
+
+---
+
+## SR45-3 · **Medium** · 문서가 **배포되지 않은 방어를 "가동 중"이라고 단언한다**
+**위치**: `docs/05-monitoring/fail2ban.md` "## 감시에 들어갔다 (2026-08-04 · `deploy/monitor.sh` `check_fail2ban`) — 5분마다(`--fast`)와 매일(`--daily`) 돈다" · `docs/05-monitoring/monitoring.md` §3 7d 행
+**CWE**: 실질은 **운영 오판 유발**(방어 상태에 대한 허위 보증)
+
+**재현 (2026-08-04 · 서버 실측)**
+
+```
+$ sha256sum /opt/realestate/scripts/monitor.sh
+83bda3dd324b8509af840d58358d93166d15fc195ed4edd3a27a8e7f049ffad6   <- CR-048 판본
+저장소 deploy/monitor.sh                     43169225702438ab…      <- check_fail2ban 있음
+
+$ crontab -l | grep monitor
+*/5 * * * * /opt/realestate/scripts/monitor.sh --fast
+5 9  * * *  /opt/realestate/scripts/monitor.sh --daily
+```
+
+크론이 도는 것은 `83bda3dd…` 판본이고, 거기에는 `check_fail2ban` 이 **없다.**
+즉 **지금 이 순간 fail2ban 을 감시하는 것은 아무것도 없다.** 그런데 문서는 현재형으로 "돈다"고 적었다.
+이 저장소가 SR-041·SR-042 에서 차단 사유로 삼았던 것과 **같은 종류의 과장**이다.
+
+**수정안**: 커밋·배포 전까지 두 문서를 "적용 예정 — 미배포"로 낮춘다. 배포 후에는 배포본 sha256 을
+문서에 함께 적어(다른 항목들이 이미 그렇게 하듯) "문서가 말하는 판"과 "도는 판"을 대조 가능하게 한다.
+
+---
+
+## SR45-4 · **Low** · 차단 IP 유출에 대한 **회귀 가드가 없다** (그리고 `scrub()` 도 IP 를 못 막는다)
+**위치**: `deploy/monitor-selftest.sh` T6d 구획(`:1795` 픽스처) · `deploy/monitor-lib.sh:148` `scrub()`
+**CWE**: CWE-532 (Insertion of Sensitive Information into Log File) — 예방적
+
+**현재 코드는 옳다.** `check_fail2ban` 은 `_f2b_field()` 로 `[0-9]\{1,\}` 만 뽑고(`monitor.sh:1140`),
+요약에 싣는 것은 `total`·`curban`·`tfail`·`ports` 뿐이다. `ports` 도 `[0-9,:]` 로 제한된다.
+`$st`(전체 status 출력)와 `$out`(전체 `iptables -S INPUT`)은 **어느 알림 경로에도 안 실린다.** 확인함.
+
+**그런데 그것을 지키는 시험이 없다.** 픽스처는 실측대로 `Banned IP list:<TAB>9.9.9.9 8.8.8.8` 을
+**실제로 내놓는데**, T6d 전체(`:1740`~`:2046`)에 그 IP 가 요약·로그·알림에 없음을 확인하는 단언이 **0건**이다.
+누가 진단 편의로 `add "... $st"` 로 바꾸면 차단 IP 목록이 통째로 텔레그램에 실리고, **아무도 못 잡는다.**
+겹으로 `scrub()` 에는 **IP 규칙이 없다** — 세탁으로도 안 걸린다.
+이 저장소는 SR32-1 에서 금액이 URL→로그로 샌 전력이 있고, 그때도 "코드는 옳았는데 가드가 없었다".
+
+**수정안**: T6d (가) 대조군에 두 줄 추가 —
+`avoid "$TMPROOT/rf2b1.log" '9\.9\.9\.9' "(IP) 차단 IP 가 로그에 안 실린다" "차단 IP 목록이 샜다"` 와
+요약 문자열 `$F2BO` 에 대한 동일 단언.
+
+---
+
+## SR45-5 · **Low** · `_f2b_bin` 이 PATH 를 먼저 본다 — **시험 편의가 root 실행 경로의 탐색 순서를 정했다**
+**위치**: `deploy/monitor.sh:1124-1136` `_f2b_bin()` · 주석 *"PATH 를 **먼저** 본다(자체검사가 가짜를 PATH 앞에 두므로 이 순서여야 한다)"*
+**CWE**: CWE-426 (Untrusted Search Path) · CWE-427
+
+**오늘 실측상 악용 불가**:
+
+```
+$ crontab -l | grep -n "^PATH"      -> 없음 (cron 기본 PATH=/usr/bin:/bin)
+$ ls -l /usr/sbin/iptables -> root:root · /usr/bin/systemctl -> root:root
+```
+
+크론 PATH 의 두 디렉터리 모두 root 소유이므로 지금 주입 경로는 없다. **그래서 Low 다.**
+
+**그러나 설계가 거꾸로다.** 이 함수는 root 로 `iptables`·`systemctl`·`fail2ban-client` 를 실행하는
+유일한 관문인데, 그 탐색 순서를 정한 이유가 **"자체검사가 가짜를 앞에 두므로"** 다.
+운영 안전성이 시험 훅에 종속돼 있어서, 앞으로 (a) 누가 크론에 `PATH=` 를 넣거나 (b) 감시를
+sudo 래퍼·systemd timer(`Environment=PATH=`)로 옮기거나 (c) 배포 계정에서 손으로 돌리면
+**그 순간 root 코드실행으로 승격**된다. 절대경로 폴백은 그 상황에서 아무 도움이 안 된다 — PATH 가 먼저이기 때문이다.
+
+**수정안**: 시험 훅을 **명시적으로** 분리한다.
+
+```sh
+_f2b_bin() {                      # 운영: 절대경로 우선. 시험: RE_MON_BIN_DIR 로만 가로챈다
+  local n="$1" p
+  [ -n "${RE_MON_BIN_DIR:-}" ] && [ -x "$RE_MON_BIN_DIR/$n" ] && { printf '%s' "$RE_MON_BIN_DIR/$n"; return 0; }
+  for p in "/usr/sbin/$n" "/sbin/$n" "/usr/bin/$n" "/bin/$n"; do
+    [ -x "$p" ] && { printf '%s' "$p"; return 0; }
+  done
+  p=$(command -v "$n" 2>/dev/null); [ -n "$p" ] && { printf '%s' "$p"; return 0; }
+  return 1
+}
+```
+
+셀프테스트는 `PATH="$F2B:$PATH"` 대신 `RE_MON_BIN_DIR="$F2B"` 를 넘기면 된다(`f2brun` 한 줄).
+겹으로 `monitor.sh` 머리에 `PATH=/usr/sbin:/usr/bin:/sbin:/bin` 고정도 권한다.
+
+---
+
+## SR45-6 · **Low** · 백테스트의 "읽기 전용" 은 **정적 토큰 검사**일 뿐 — 런타임 강제가 없다 (SQLi 는 없음, 확인)
+**위치**: `backend/scripts/run_backtest.py:100`(`SESSION_GUARDS`)·`:126`(`PostgresBacktestRepository`) · `backend/tests/test_backtest.py:945`(`WRITE_SQL_TOKENS`)·`:1026`
+**CWE**: CWE-250 (Execution with Unnecessary Privileges) · CWE-863
+
+**인젝션은 없다 — 확인함.** `_TRADES_SQL`·`_SIGUNGU_SQL`·`_HOUSEHOLDS_SQL` 은 전부 **모듈 상수**이고
+문자열 조립이 0건, 사용자·CLI 값은 전부 바인드 파라미터(`:start`·`:end`·`:region`·`:plen`·`:sidos`)로 들어간다.
+`region`/`plen` 은 DB 에서 읽은 `left(region_code,5)` 라 외부 입력도 아니다. f-string·`%`·`+` 로 SQL 을 만드는 곳 없음.
+DSN 은 `safe_dsn()` 으로 마스킹해 찍는다(`:283`).
+
+**차단이 유효한 범위는 좁다.** 쓰기 금지를 강제하는 것은 `test_backtest.py:1026` 의 AST 검사뿐이고,
+그것은 **문자열 리터럴에 `INSERT `/`UPDATE `/`DELETE `/`TRUNCATE`/`DROP `/`ALTER ` 토큰이 있는가**만 본다.
+다음은 전부 통과한다: 문자열 분할(`"INS"+"ERT ..."`) · f-string 조립 · `conn.exec_driver_sql()` ·
+ORM 세션 · `COPY ... TO PROGRAM` · 함수 호출(`SELECT pg_terminate_backend(...)`, `SELECT lo_export(...)`).
+그리고 **런타임에는 아무 제약이 없다**: `SESSION_GUARDS` 는 `statement_timeout`·`work_mem` 뿐이고,
+운영 `DATABASE_URL`(쓰기 권한 role)을 그대로 쓴다. 백테스트는 운영 DB 를 읽는다.
+
+**수정안 (한 줄)**
+
+```python
+SESSION_GUARDS = ("SET default_transaction_read_only = on",
+                  "SET statement_timeout = '120s'", "SET work_mem = '4MB'")
+```
+
+이러면 우회 시도가 **DB 쪽에서** `ERROR: cannot execute INSERT in a read-only transaction` 으로 죽는다.
+가능하면 읽기 전용 role(`re_ro`) 을 별도로 만들어 `RE_BACKTEST_DATABASE_URL` 로 주는 쪽이 정본이다.
+※ `--json <path>` 는 `open(path,"w")` 로 임의 경로를 쓰지만 **운영자 CLI 인자**라 신뢰 경계 안이다 — 위험 아님.
+
+---
+
+## SR45-7 · **Low** · 규칙 검사가 **순서를 안 본다** (못 잡는 시나리오)
+**위치**: `deploy/monitor.sh:1196` `grep -E "^-A INPUT( |$).*-j ${F2B_CHAIN}( |$)"`
+
+점프의 **존재**만 보고 **위치**를 안 본다. f2b 점프 **앞에** 포괄 ACCEPT 가 들어가면
+(`ufw` 재적용 · 남의 방화벽 스크립트 · `iptables -I INPUT 1 -j ACCEPT`) 패킷이 f2b 체인에 **도달하지 않는데**
+검사는 "규칙 있음" 으로 초록이다 — 이 검사가 잡겠다고 선언한 실패형(*"체인은 남고 점프만 사라진다"*)의 쌍둥이다.
+오늘 실측 INPUT 은 정책 + 점프 **2줄뿐**이라 현재는 안전하다.
+겹으로 `.*` 가 greedy 라 `-m comment --comment "-j f2b-sshd"` 같은 주석에도 매치한다(root 만 만들 수 있어 실질 위험 없음).
+
+**수정안**: 점프 앞에 무조건 ACCEPT(`-A INPUT -j ACCEPT` · `-A INPUT -p tcp --dport 22 -j ACCEPT`)가 있으면
+`rule=shadowed` 로 갈라 경보. 또는 `iptables -S INPUT` 대신 `iptables -L INPUT --line-numbers` 로 순위를 본다.
+
+---
+
+## SR45-8 · **정보** · B/C 도메인에 민감정보 경로 없음 (확인 결과)
+- `backend/app/domain/backtest/**` · `backend/app/domain/character/**` — **로깅 호출 0건**(`logging`/`log.`/`print(`/`logger` grep 전무). 순수 함수.
+- **API 미배선**: `backend/app/api/routes.py` 에 `backtest`/`character` 참조 **0건**. `api-spec.md §4.5` 도 "아직 응답에 실리지 않는다"로 정직하게 적었다 — **문서가 구현보다 앞서 나가지 않았다**(SR45-3 과 대조적으로 이쪽은 옳다).
+- 사용자 자산·소득·예산이 섞이는 경로 **없음**. `character/analysis.py:397` 의 "같은 예산으로 면적을 더 갑니다" 는 `gap` **백분율**만 쓰는 문구이고 금액이 아니다.
+- `run_backtest.py` 가 찍는 것은 건수·%·판정 문자열뿐. DSN 은 `safe_dsn()` 통과.
+- 배선 시점(§4.5 가 실제로 응답에 실릴 때) **다시 볼 것**: `character` 는 사용자 가중치와 무관해야 한다고 계약에 적혀 있으므로, 그 불변식이 깨지면 사용자 선호가 공개 필드로 역추론되는 경로가 생긴다.
+
+---
+
+## 못 잡는 시나리오 (갱신 — [신규] 는 이번에 추가)
+
+| # | 시나리오 | 현재 상태 | 근거 |
+|---|---|---|---|
+| 1 [신규] | **컨테이너에서 호스트 22 무한 대입** | **못 잡는다 + 못 막는다** | SR45-1 · `ignoreip 172.16/12` · 실측 4개 게이트웨이 전부 OPEN |
+| 2 [신규] | **사설 세그먼트 `10.2.0.0/16` 이웃의 무한 대입** | **못 잡는다 + 못 막는다** | SR45-2 · `ignoreip 10/8` · `-P INPUT ACCEPT` |
+| 3 [신규] | `ignoreip` 오설정 일반 | **`f2b_stale` 이 원리적으로 못 잡는다** | 공인 IP 차단이 카운터를 계속 올린다. `fail2ban.md` 서술은 사실과 다름(SR45-2) |
+| 4 [신규] | f2b 점프 **앞**의 포괄 ACCEPT (규칙 그림자) | 못 잡는다 | SR45-7 |
+| 5 [신규] | 차단 IP 목록이 알림에 실리는 회귀 | 시험이 없다 (`scrub` 에도 IP 규칙 없음) | SR45-4 |
+| 6 [신규] | 백테스트 실행기의 쓰기 SQL 우회 | 정적 토큰 검사만 — 런타임 강제 0 | SR45-6 |
+| 7 | 필터가 "틀린 로그"를 읽는 경우 | 못 잡는다 (기존 · 문서에 명시됨) | `fail2ban.md` |
+| 8 | `sshd` 외 jail 추가 | 감시 밖 (기존 · 문서에 명시됨) | `RE_MON_F2B_JAIL` |
+| 9 | 필터 정지 탐지가 최대 24시간 늦음 | 설계상 수용 (실측 근거 있음) | `F2B_STALE_MAX_HOURS=24` |
+| 10 | REJECT 가 실제로 패킷을 떨어뜨리는지 | 못 잡는다 (기존 · 문서에 명시됨) | 규칙 존재까지가 사정거리 |
+| 11 [신규] | 감시 자체가 배포 안 된 상태 | **못 잡는다** — 문서만 보면 돈다고 믿는다 | SR45-3 · 배포본 sha 불일치 |
+
+## 잘 된 것 (기록)
+- `check_fail2ban` 의 **①데몬 / ②규칙 / ③추이 3분할**은 옳다. 특히 *"`is-active` 만 보면 거짓말"* 판단과,
+  `fail2ban-client` 가 **없는 jail 에도 rc=0** 을 준다는 실측을 근거로 rc 대신 `Total banned:` 추출 성공 여부로
+  판정한 것은 정확하다. 이 두 가지가 이 검사를 실질적으로 만든다.
+- **차단 건수로 울지 않는다**(하루 235~517건 실측 근거)는 늑대소년 방지로 옳다.
+- fail-open 처리(`blind_add` · 못 본 상태에서 `clear_alert` 안 부름)가 CR40-2 원칙대로 일관된다.
+- `TMPROOT=$(mktemp -d …XXXXXX)` — 셀프테스트 가짜 바이너리 디렉터리가 예측 가능한 경로가 아니다. **로컬 권한상승 없음**(확인).
+- 백테스트 SQL 은 전 구간 바인드 파라미터. **SQLi 0건.**
+- `api-spec.md §4.5` 가 미구현을 붉은 표시로 명시했다 — SR45-3 과 정반대로, 문서가 구현을 앞지르지 않았다.
+
+## 판정
+
+| 심각도 | 건수 | 항목 |
+|---|---|---|
+| Critical | 0 | — |
+| **High** | **2** | SR45-1 · SR45-2 |
+| Medium | 1 | SR45-3 |
+| Low | 4 | SR45-4 · SR45-5 · SR45-6 · SR45-7 |
+| 정보 | 1 | SR45-8 |
+
+**High 2건 → `failed`.**
+차단 해소 조건: **SR45-1 · SR45-2** (`jail.local` 의 `172.16.0.0/12`·`10.0.0.0/8` 제거 + 컨테이너/사설대역 22번 차단,
+그리고 `fail2ban.md` "못 잡는 것" 의 사실과 다른 줄 정정). SR45-3 은 커밋 전 문서 표현만 낮추면 되므로 함께 처리 권장.
+SR45-4~7 은 비차단이나, **SR45-5 는 감시를 systemd timer/sudo 로 옮기기 전에 반드시 선결**해야 한다.
+
+---
+
+## SR-046 · 2026-08-05 · **SR-045 차단 2건(`ignoreip` 사설대역)의 조치 재검증 — v4 는 실제로 닫혔다(컨테이너에서 실차단까지 확인). 그런데 같은 sshd 가 IPv6 링크로컬로는 여전히 무한이고, fail2ban 이 그 줄을 아예 못 읽는다 · 판정 `failed`** (security-reviewer)
+
+> **결론: fail — High 1건 (SR46-1).**
+> **SR45-1 · SR45-2 는 닫혔다.** 말이 아니라 실측이다 — 컨테이너 네트워크 네임스페이스에서
+> 호스트 22번에 실패 로그인 6회를 실제로 넣었더니 `172.20.0.3` 이 **차단됐다**(아래 재현).
+> SR45-4 · SR45-5 · SR45-7 조치도 전부 유효하다(자체검사 T6d **59/59 PASS** + 독립 실측 25/25).
+> **그런데 SR45-2 가 막으려던 위협 — "사설 세그먼트 이웃의 무제한 대입" — 이 IPv6 로 그대로 살아 있다.**
+> `sshd` 는 `[::]:22` 로도 듣고 있고, fail2ban 은 링크로컬 주소가 들어간 줄을 **한 건도 못 읽는다**
+> (`fail2ban-regex` 실측: `0 matched, 1 missed`). 그 경로에는 속도 제한도 차단도 감시도 없다.
+>
+> ⚠️ `PasswordAuthentication yes` · `PermitRootLogin yes` 는 사용자가 결정한 사안이라 **다시 권고하지 않는다.**
+> SR46-1 의 수정안은 `sshd_config` 의 그 두 줄과 무관하다(`ip6tables` 한 줄).
+
+### 동결 해시 확인
+| 파일 | 시작 | 서버 사본 | 종료 | 판정 |
+|---|---|---|---|---|
+| `deploy/monitor.sh` | `ea9c7f8e…72ff1` | `ea9c7f8e…72ff1` | `ea9c7f8e…72ff1` | 일치 |
+| `deploy/monitor-selftest.sh` | `b9164bfb…8c29d` | `b9164bfb…8c29d` | `b9164bfb…8c29d` | 일치 |
+
+리뷰 중 트리 변경 0. `backend/**` · `frontend/**` 무접촉. `/opt/realestate/scripts/**` 무접촉(읽기만).
+격리 작업은 전부 `/root/sec46/` 안에서 했다. 자체검사는 **서버에서 2회**(윈도우 실행 금지 준수).
+
+---
+
+## SR46-1 · **High** · IPv6 로 열린 SSH 가 fail2ban 사정거리 **밖**이다 — SR45-2 가 막으려던 위협이 v6 로 그대로 살아 있다
+**위치**: `sshd` 가 `[::]:22` LISTEN · `ip6tables` 필터 · `deploy/monitor.sh:1301` (`_f2b_bin iptables` — v4 만 본다)
+**CWE**: CWE-693 (Protection Mechanism Failure) · CWE-1220 (Insufficient Granularity of Access Control) · **OWASP A07**
+
+**재현 (2026-08-05 · 서버 실측)**
+
+```
+$ ss -lntp | grep :22
+LISTEN 0 128 0.0.0.0:22 ...    LISTEN 0 128 [::]:22 ...      <- v6 로도 듣는다
+
+$ ssh -6 sec46v6@fe80::f816:3eff:fe31:8b01%enp3s0
+sec46v6@fe80::...%enp3s0: Permission denied (publickey,password)   <- sshd 가 응답한다
+
+$ grep sec46v6 /var/log/auth.log
+Invalid user sec46v6 from fe80::f816:3eff:fe31:8b01%enp3s0 port 43828
+
+$ fail2ban-regex <위 한 줄> /etc/fail2ban/filter.d/sshd.conf
+Lines: 1 lines, 0 ignored, 0 matched, 1 missed     <- **필터가 이 줄을 못 읽는다**
+
+$ grep -ai fe80 /var/log/fail2ban.log
+(0건)                                              <- 실제로 Found 도 못 했다
+
+$ ip6tables -S INPUT      (시험 전)
+-P INPUT ACCEPT                                    <- f2b 체인도 점프도 0개
+```
+
+**무엇이 문제인가.** `<HOST>` 정규식이 링크로컬의 **존 접미사 `%enp3s0`** 를 못 받는다.
+그래서 링크로컬 IPv6 에서 오는 SSH 시도는 **탐지 자체가 안 되고**, 탐지가 안 되므로 차단도 없다.
+`maxretry`·`findtime`·`bantime` 이 전부 무의미하다 — **횟수 제한이 0이다.**
+이것은 SR45-2 가 High 로 지적한 바로 그 구조다: *"그 대역의 어떤 호스트든 SSH 를 무한히 두들겨도
+절대 차단되지 않는다."* 사정거리 안에 있던 v4 는 이번에 닫혔는데, **같은 sshd 의 v6 문은 그대로다.**
+
+**사정거리와 전제(과장하지 않는다).**
+- 글로벌 IPv6 주소는 **없다**(`ip -6 addr show scope global` → 0건). 인터넷에서는 이 문으로 못 온다.
+- 링크로컬은 **같은 L2 에 있어야** 닿는다. 그 L2 가 iwinv 의 `10.2.0.0/16` 이고,
+  이웃(`10.2.0.1/.2/.3`, MAC `fa:16:3e:*` = OpenStack)이 **실재한다**(SR45-2 실측).
+  즉 전제가 SR45-2 와 **완전히 같다.** 그래서 심각도도 같게 매긴다.
+- 이웃 테넌트 쪽에서 실제로 쏴 보는 것은 **불가능해서 확인하지 못했다**(남의 VM 이다).
+  확인한 것은 **우리 쪽 방어가 0 이라는 사실**이다 — 탐지 0 · 차단 0 · 감시 0.
+- 글로벌 v6 공격자라면 fail2ban 이 **잡을 수 있다** — 확인함: `fail2ban-client set sshd banip 2001:db8::1`
+  이 `ip6tables` 에 체인·점프·REJECT 를 **on-demand 로 만들어 냈다.** 못 하는 것은 **링크로컬**뿐이다.
+
+**그리고 감시도 이 상태를 원리적으로 못 본다.**
+`check_fail2ban` ②는 `_f2b_bin iptables`(v4) 로 `-S INPUT` 만 읽는다(`monitor.sh:1301`).
+`ip6tables` 는 한 번도 안 부른다. v6 쪽 점프가 없어도, 있다가 사라져도 요약은 **"규칙 있음" 초록**이다.
+`fail2ban.md` "못 잡는 것" 목록에도 IPv6 는 **한 줄도 없다** — SR-041·SR-042·SR45-2 에서 세 번 고친
+*"문서가 감시 사정거리를 실제보다 넓게 서술한다"* 가 여기서 네 번째로 반복된다.
+
+**수정안 (사용자 결정과 무관 · `sshd_config` 안 건드림)**
+
+1. **한 줄로 닫는다** — 우리는 v6 로 안 들어온다(실측: 우리 접속은 전부 공인 v4):
+   `ip6tables -I INPUT -p tcp --dport 22 -j DROP` → 검증 후 `ip6tables-persistent` 로 영속화.
+   (`fe80::/10` 만 좁혀 막아도 된다: `ip6tables -I INPUT -s fe80::/10 -p tcp --dport 22 -j DROP`)
+2. 겹으로 `check_fail2ban` ②가 **v6 도 보게** 한다 — `_f2b_bin ip6tables` 로 `-S INPUT` 을 한 번 더 읽고
+   같은 `_f2b_order_scan` 을 태운다. 못 부르면 `blind_add`(있는 그대로).
+   ⚠️ 단, 1번을 안 하면 **v6 점프가 없는 것이 정상**이므로 `f2b_rule` 경보를 그대로 걸면 오탐이다 —
+   1번을 먼저 하고 "22가 v6 에서 DROP 이거나 f2b 점프가 있거나"를 조건으로 잡아야 한다.
+3. `fail2ban.md` "못 잡는 것" 에 **사실대로** 적는다 —
+   *"링크로컬 IPv6(`fe80::…%iface`) 는 필터가 줄을 못 읽어 탐지·차단이 모두 없다. 감시도 v4 만 본다."*
+
+---
+
+## SR46-2 · **Medium** · SR45-3 미조치 — 배포본에는 `check_fail2ban` 이 **없는데** 문서 2개가 현재형으로 "돈다"고 적었고, 이번에 그 거짓 서술이 **더 늘었다**
+**위치**: `docs/05-monitoring/fail2ban.md:43-52` · `:80-88` · `docs/05-monitoring/monitoring.md:212-215` (7d-①~④)
+**CWE**: 실질은 **운영 오판 유발**(방어 상태에 대한 허위 보증)
+
+**재현 (2026-08-05 · 서버 실측)**
+
+```
+$ sha256sum /opt/realestate/scripts/monitor.sh
+83bda3dd324b8509af840d58358d93166d15fc195ed4edd3a27a8e7f049ffad6   <- CR-048 판. check_fail2ban 없음
+저장소 deploy/monitor.sh                     ea9c7f8e4266dc56…      <- check_fail2ban + SR45-7 있음
+
+$ crontab -l | grep monitor
+*/5 * * * * /opt/realestate/scripts/monitor.sh --fast     <- 도는 것은 83bda3dd 판이다
+5 9  * * *  /opt/realestate/scripts/monitor.sh --daily
+
+$ grep -c "미배포\|배포 예정\|배포본" docs/05-monitoring/monitoring.md docs/05-monitoring/fail2ban.md
+0  0                                                      <- 어디에도 안 적혀 있다
+```
+
+SR-045 가 이미 Medium 으로 지적하고 수정안까지 줬는데 **그대로다.** 그리고 이번 라운드에
+`fail2ban.md` 6번 항목(*"이제 점프의 위치까지 본다"*), `:88`(*"알림에는 규칙의 주소를 `<ip>` 로 가려서 싣는다"*),
+`monitoring.md:213`(7d-② 의 SR45-7 문단)이 **더 붙었다** — 전부 **지금 안 도는 코드**의 이야기다.
+거짓 서술의 분량이 줄지 않고 늘었다.
+
+**실질 위험은 문서 표현이 아니다.** 지금 이 순간 **fail2ban 을 감시하는 것은 아무것도 없다.**
+오늘 고친 High 2건(`ignoreip`)이 되돌아가도, 데몬이 죽어도, INPUT 점프가 빠져도 아무도 모른다.
+방금 사고를 낸 영역의 **회귀 탐지 장치가 0** 이라는 뜻이다.
+
+**수정안**: 커밋·배포 전까지 두 문서를 "적용 예정 — **미배포**"로 낮춘다. 배포 후에는 배포본 sha256 을
+문서에 함께 적어(다른 항목들이 이미 그렇게 하듯) "문서가 말하는 판"과 "도는 판"을 대조 가능하게 한다.
+
+---
+
+## SR46-3 · **Low** · 방금 사고를 낸 `ignoreip` 한 줄이 **여전히 무감시**다 (SR45-1 수정안 ③ 미채택)
+**위치**: `deploy/monitor.sh` `check_fail2ban`(검사 3개뿐) · `docs/05-monitoring/fail2ban.md:109-114`
+
+문서는 **정직하게** 적었다 — *"`ignoreip` 오설정은 감시가 못 잡는다(SR45-2 정정)"*.
+사정거리를 과장하지 않은 것은 옳다(그래서 High 가 아니라 Low 다). 그러나 **바로 그 줄이 이번 사고의 원인**이었고,
+검사 비용은 한 줄이다:
+
+```sh
+ig=$("$(_f2b_bin fail2ban-client)" get "$F2B_JAIL" ignoreip 2>/dev/null)
+case "$ig" in *10.0.0.0/8*|*172.16.0.0/12*|*192.168.*) raise_alert f2b_ignore ... ;; esac
+```
+
+**수정안**: SR46-2 를 해소해 새 판을 배포할 때 이 4번째 검사를 함께 넣는다. 넣지 않기로 한다면
+`fail2ban.md` 에 *"근거 없는 면제 대역이 다시 들어오는 것은 사람이 설정 파일을 봐야만 안다"* 를
+**점검 주기와 함께**(예: 월 1회) 적어 둔다 — 지금은 누가 언제 보는지가 없다.
+
+---
+
+## SR46-4 · **Low** · `monitor.sh` 머리의 `PATH=` 고정 미조치 — **담당자의 근거는 사실이지만 결론이 SR45-5 와 같은 형태다**
+**위치**: `deploy/monitor.sh` 머리(고정 없음) · `deploy/monitor-selftest.sh:601,681,701,733`(가짜 openssl) · `:1147,1164,1311`(가짜 journalctl)
+**CWE**: CWE-426 (Untrusted Search Path)
+
+**근거 검증 — 담당자 말은 맞다.** 확인함: 인증서(T5) 픽스처는 `PATH="$FAKEBIN:$PATH"` 로 가짜 `openssl` 을,
+journald 교차(T6c) 픽스처는 같은 방식으로 가짜 `journalctl` 을 주입한다. `monitor.sh` 머리에서 PATH 를
+고정하면 그 가짜들이 **안 불리고**, 두 구획의 검사가 **진짜 바이너리를 시험하게 되어 공허해진다.**
+사실 확인 자체는 정확하다.
+
+**그러나 결론이 SR45-5 가 지적한 바로 그 형태다.** SR45-5 의 요지는 "PATH 를 먼저 보지 마라"가 아니라
+**"시험 편의가 root 실행 경로를 정하게 두지 마라"** 였다. 지금 상태는 그 종속이 **3개에서 나머지 전부로 옮겨간 것**이다.
+실측 호출 수(`monitor.sh` + `monitor-lib.sh` · 이름만 쓰는 호출):
+
+| 명령 | 호출 | 뚫렸을 때 |
+|---|---|---|
+| `curl` | 4 | **경보 발송 경로**(`monitor-lib.sh:291`) — 경보를 삼키거나 위조할 수 있다 |
+| `docker` | 4 | `docker exec` 로 컨테이너 안에서 실행 |
+| `journalctl` | 3 | SSH 2차 출처를 통째로 위조 |
+| `openssl` | 1 | 인증서 만료 판정 위조 |
+| `stat`·`date`·`sed`·`grep` 등 | 80+ | 판정 전반 |
+
+즉 SR45-5 로 딱딱해진 것은 `iptables`·`systemctl`·`fail2ban-client` **3개뿐**이고, 나머지는 그대로다.
+**오늘 악용 불가다**(실측): 크론에 `PATH=` 줄 0개 · `/etc/environment` `-rw-r--r-- root:root` ·
+PATH 6개 디렉터리 전부 root 소유 · `/opt/realestate/scripts/monitor.sh` `0750 root:root`. **그래서 Low 다.**
+
+**수정안 — 예외를 3개만 두는 비대칭을 없앤다.** 픽스처를 **명시 훅으로 옮기고 나서** PATH 를 고정한다:
+`_f2b_bin` 을 `_mon_bin` 으로 일반화해 `openssl`·`journalctl`·`curl`·`docker` 도 같은 길로 찾게 하고,
+자체검사는 `RE_MON_BIN_DIR` 하나로 주입한다. 그러면 `PATH=/usr/sbin:/usr/bin:/sbin:/bin` 고정이
+**어떤 검사도 공허하게 만들지 않는다.** ("고정하면 시험이 깨진다"가 아니라 "시험을 먼저 옮기고 고정한다"가 순서다.)
+
+---
+
+## SR46-5 · **정보** · `RE_MON_BIN_DIR` 훅은 **새 공격면이 아니다** (실측 근거) — 다만 문서 한 줄이 필요하다
+**위치**: `deploy/monitor.sh:1148-1163`
+
+사용자 질문에 대한 답: **아니다. 예전(PATH 우선)보다 좁다.**
+
+```
+$ crontab -l | grep -E '^[A-Za-z_]+='        -> 0건 (크론에 env 줄 없음)
+$ ls -l /etc/environment                     -> -rw-r--r-- root root
+$ grep pam_env /etc/pam.d/cron               -> session required pam_env.so   <- 전파 통로는 **맞다**
+$ ls -l /var/spool/cron/crontabs/root        -> -rw------- root crontab
+$ ls -l /opt/realestate/scripts/monitor.sh   -> -rwxr-x--- root root
+$ ls -ld /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin -> 전부 root 소유
+```
+
+- `/etc/environment` 는 `pam_env` 를 통해 **실제로 크론에 전파된다** — 그 통로는 진짜다. 그러나 쓰려면 이미 root 다.
+- `sudo` 는 `env_reset` 으로 화이트리스트 밖 변수를 지운다 → **`RE_MON_BIN_DIR` 은 sudo 래퍼를 못 넘는다.**
+  반면 `PATH` 는 어디에나 이미 존재하고 `secure_path` 로 대체될 뿐이다. **새 훅이 예전보다 좁다.**
+- 훅을 켠 채 파일이 없으면 **다른 것을 대신 부르지 않고 실패**를 돌려준다(`:1151-1154`) — 옳다.
+  자체검사가 그것을 시험한다(`:2140-2142` PASS).
+- ⚠️ 다만 `monitor.sh` 는 이미 `RE_MON_*` 30여 개를 신뢰하고(`RE_MON_APP_ENV` 는 임의 파일을 읽게 한다),
+  `RE_MON_BIN_DIR` 은 그 중 **처음으로 실행 파일 경로를 정하는** 변수다.
+  → `monitoring.md` 에 *"시험 전용. 운영 환경(크론·systemd·`/etc/environment`)에 절대 두지 않는다"* 한 줄을 남길 것.
+
+---
+
+## SR46-6 · **정보** · SR45-7 순서 판정 — **오탐 0 · 미탐 0** (독립 실측 25/25). 잔여는 경보 문구 한 문장뿐
+**위치**: `deploy/monitor.sh:1170-1266`
+
+사용자가 "제일 위험하다"고 지목한 지점이라 자체검사와 **따로** 검증했다. 함수 4개를 `monitor.sh` 에서 뽑아
+**현재 서버의 진짜 INPUT 체인**과 현실적인 방화벽 구성에 직접 먹였다(`/root/sec46/orderscan.sh`).
+
+| 묶음 | 입력 | 기대 | 결과 |
+|---|---|---|---|
+| 실서버 | `-P INPUT ACCEPT` + 우리 점프 (실측) | clean | **clean** |
+| 무해 9종 | `-i lo` · `--ctstate RELATED,ESTABLISHED` · 구문법 `-m state` · `NEW`+80 · `multiport 80,443` · 범위 `8000:9000` · `LOG` · `DROP 22` · 점프 **뒤** ACCEPT · OUTPUT/FORWARD 혼입 | clean | **9/9 clean (오탐 0)** |
+| 진짜 그림자 6종 | 포괄 ACCEPT · `--dport 22` ACCEPT · `-s <ip> --dport 22` · `ctstate NEW` 포괄 · `-i enp3s0` 포괄 · `-i br-…` 포괄 | shadow | **6/6 shadow (미탐 0)** |
+| 못 보는 것 4종 | `ufw-before-input` · `RETURN` · `-g goto` · 타깃 없는 규칙 | unsure | **4/4 unsure → 감시불능(단정 안 함)** |
+| 주소 가림 5종 | v4 2개 동반 · 주석 안의 v4 · v6 `/64` · MAC `00:11:…` · 포트범위 동반 | 전부 `<ip>` | **5/5 가려짐** |
+
+**사용자 우려("무해한 앞줄을 shadowed 로 잡아 매 5분 경보")는 실현되지 않는다.** 현재 서버 체인은 `clean` 이고,
+흔한 구성 9종도 전부 `clean` 이다.
+
+**잔여 1 (Low 미만 · 기록용).** 출발지 지정 ACCEPT(`-s <ip> -p tcp --dport 22 -j ACCEPT`)도 `shadowed` 로 잡는데,
+경보 본문(`monitor.sh:1355`)은 *"점프는 걸려 있지만 패킷이 거기 닿지 않는다"* 라고 **무조건**으로 적는다.
+그 **한 출발지**에만 참이다. 규칙 모양(`-s <ip>`)이 함께 실려 사람이 구별할 수 있으므로 실무 피해는 작지만,
+이 저장소가 이번 라운드에 *"거짓을 경보 본문에 싣지 않는다"* 를 기준으로 세웠으므로 한 문장 조건부화가 맞다
+(예: *"…통과시키는 ACCEPT 가 있다. 그 규칙이 출발지·인터페이스를 좁히고 있으면 그 범위에서만 무력이다"*).
+
+**잔여 2 (기록용).** 타깃 없는 카운터 규칙(`-A INPUT -p tcp --dport 22`)은 `unsure` → `blind_add` → `logblind` 다.
+단정하지 않으니 옳고, `raise_alert` 재발송 간격이 6시간이라 늑대소년이 되지는 않는다.
+
+---
+
+## SR46-7 · **정보** · SR45-4 차단 IP 유출 가드 — **공허하지 않다** (하네스 관문까지 확인)
+**위치**: `deploy/monitor-selftest.sh:1857-1866`(`noip`) · `:1879`(픽스처 관문) · `:1900,1998,2060`
+
+- 픽스처가 **실제로** `Banned IP list:<TAB>9.9.9.9 8.8.8.8` 을 뱉는지를 하네스 관문이 확인한다(`:1879`).
+  안 뱉으면 `harn` 으로 갈라져 **"통과"가 아니라 "검사 결과가 아님"** 이 된다 — 지적한 그대로 고쳐졌다.
+- `noip()` 가 **감시 로그와 요약 문자열 둘 다** 본다. 3시나리오에 붙었다:
+  대조군(정상) · **`f2b_stale` 경보가 실제로 나가는 순간** · 차단 500건 급증.
+- 자체검사 실측: 6개 단언 전부 PASS.
+- 추가 독립 실측: `_f2b_redact_addr` 이 규칙 한 줄에 주소가 **여럿**이어도 전부 가린다(5/5 · SR46-6 표).
+- ⚠️ `scrub()` 에 IP 규칙이 없는 것은 그대로다 — 이 가드가 **유일한 방어선**이라는 뜻이다. 지우지 말 것.
+
+---
+
+## SR46-8 · **정보** · `ignoreip` 축소가 **새 잠김 위험을 만들지 않았다** (사용자 질문 ①)
+
+```
+$ fail2ban-client get sshd ignoreip
+127.0.0.0/8  ::1  211.54.122.240                    <- 우리 작업 IP(공인) 는 그대로 남았다
+$ fail2ban-client get sshd ignoreself
+True
+```
+
+`ignoreself=True` 라 **호스트 자기 주소는 전부 자동 면제**다 — fail2ban 라이브러리로 직접 확인한 목록:
+`10.2.3.163` · `172.17.0.1` · `172.18.0.1` · `172.19.0.1` · `172.20.0.1` · `127.0.0.1` · `::1` · `fe80::*`.
+즉 호스트가 자기 자신이나 자기 브리지 주소로 붙는 배치·백업이 있어도 **잠기지 않는다.**
+반대로 **컨테이너 IP(`172.20.0.3` 등)는 자기 주소가 아니므로 차단 대상**이다 — 의도한 그대로다.
+크론·스크립트에 사설 IP 로 `ssh` 하는 것 0건(grep). `auth.log` 의 사설 출발지 시도 누적 0건.
+남는 잠김 경로는 "작업 IP 가 바뀌는 것" 하나인데, 우리는 공개키만 쓰고 공개키 **성공**은 실패로 안 세어진다.
+
+---
+
+## SR-045 지적 7건 — 조치 재검증 표
+
+| # | 심각도 | 조치 | 이번 판정 | 근거 |
+|---|---|---|---|---|
+| SR45-1 | High | `ignoreip` 에서 `172.16.0.0/12` 제거 | **닫힘 (실측 확인)** | 컨테이너 netns 에서 호스트 22번 실패 6회 → `Ban 172.20.0.3` · `f2b-sshd` 에 REJECT 생성 · 원복 완료 |
+| SR45-2 | High | `ignoreip` 에서 `10.0.0.0/8` 제거 | **v4 닫힘 / v6 열림** | `10.2.0.1`·`10.2.0.2` 가 차단 대상으로 전환(fail2ban 라이브러리 판정). **그러나 SR46-1** |
+| SR45-3 | Medium | 문서를 "미배포"로 낮추기 | **미조치** | SR46-2 — 배포본 `83bda3dd…` 그대로, 거짓 서술은 오히려 증가 |
+| SR45-4 | Low | 유출 회귀 가드 | **조치됨 · 유효** | SR46-7 |
+| SR45-5 | Low | `_f2b_bin` 절대경로 우선 | **부분 조치** | 3개는 딱딱해짐(T6d PASS). 나머지 PATH 의존은 그대로 → SR46-4 |
+| SR45-6 | Low | 백테스트 런타임 읽기전용 | (이번 라운드 변경 없음 — 이월) | `run_backtest.py` 미변경 확인 |
+| SR45-7 | Low | 순서 판정 | **조치됨 · 오탐 0 실측** | SR46-6 (25/25) |
+
+## 못 잡는 시나리오 (갱신 — [신규] 는 이번에 추가)
+
+| # | 시나리오 | 현재 상태 | 근거 |
+|---|---|---|---|
+| 1 [신규] | **링크로컬 IPv6 로 오는 SSH 대입** | **탐지 0 · 차단 0 · 감시 0** | SR46-1 · `fail2ban-regex` 0 matched |
+| 2 [신규] | `ip6tables` 쪽 f2b 규칙 유무 | 감시가 v4 만 본다 | `monitor.sh:1301` |
+| 3 [신규] | 감시 자체가 **아직 배포 안 됨** | **못 잡는다** — 문서만 보면 돈다고 믿는다 | SR46-2 · 배포본 sha 불일치 |
+| 4 | `ignoreip` 오설정 재발 | 못 잡는다 (문서에 명시됨 — 사람이 봐야 함) | SR46-3 · `fail2ban.md:109` |
+| 5 | 컨테이너 → 호스트 22 (v4) | **이제 잡는다 + 유한하게 만든다** | SR45-1 조치 · 실차단 확인 |
+| 6 | f2b 점프 앞의 포괄 ACCEPT | **이제 잡는다**(오탐 0) | SR46-6 |
+| 7 | 하위 체인 안(`-j ufw-…`·`RETURN`) | 못 본다 → **감시불능으로 명시** | `_f2b_order_scan` |
+| 8 | 필터가 "틀린 로그"를 읽는 경우 | 못 잡는다 (기존 · 문서 명시) | `fail2ban.md` |
+| 9 | `sshd` 외 jail 추가 | 감시 밖 (기존 · 문서 명시) | `RE_MON_F2B_JAIL` |
+| 10 | 필터 정지 탐지가 최대 24시간 늦음 | 설계상 수용(실측 근거 있음) | `F2B_STALE_MAX_HOURS=24` |
+| 11 | 백테스트 실행기의 쓰기 SQL 우회 | 정적 토큰 검사만 (SR45-6 이월) | `run_backtest.py` |
+
+## 잘 된 것 (기록)
+- **말이 아니라 실측으로 닫았다.** `ignoreip` 를 고친 것으로 끝내지 않고, 컨테이너 네임스페이스에서
+  실제 실패 로그인을 넣어 **차단까지 확인**했다(이 리뷰가 했다). 결과가 설계 의도와 정확히 일치한다.
+- **순서 판정이 오탐 0 이다.** 무해 판정을 관대하게 잡은 설계(`-i lo`·NEW 없음·다른 포트·`DROP`·`LOG`)가
+  현실 구성 9종에서 전부 조용했다. 오탐이 결함이라는 이 저장소 기준을 실제로 지켰다.
+- **못 보는 것을 "무해"라고 부르지 않는다.** 하위 체인·`RETURN`·`-g goto`·타깃 없는 규칙을 전부
+  `unsure → blind_add` 로 보냈다. fail-open 원칙(CR40-2)이 새 코드에서도 일관된다.
+- **픽스처를 현실에 맞췄고, 그 픽스처가 현실대로 구는지를 하네스가 관문에서 확인한다**(`:1879`).
+  *"가짜가 우리 가정대로 굴어서 관문이 초록"* 을 구조적으로 막았다.
+- **가짜 주입이 PATH 에서 명시 변수로 옮겨졌고, 그것을 시험이 반대로 요구한다**
+  (*"PATH 앞의 가짜가 안 불려야 통과"* · `:2127-2135` PASS).
+- `fail2ban.md` 가 **자기 사고를 사고로 기록**했다(§"실제로 낸 사고"). `ignoreip` 감시 사정거리도
+  과장 없이 *"못 잡는다"* 로 정정했다. SR46-2 와 정반대로 이쪽은 옳다.
+
+## ⚠️ 이 리뷰가 서버에 남긴 변경 1건 (숨기지 않는다)
+`ip6tables` 에 **f2b 체인과 INPUT 점프가 생겼다.** SR46-1 의 "fail2ban 이 v6 를 차단할 수 있는가"를
+확인하려고 `fail2ban-client set sshd banip 2001:db8::1`(RFC3849 문서용 주소)을 넣었더니
+fail2ban 이 on-demand 로 만들었다. 차단 IP 는 `unbanip` 으로 **지웠고**, 남은 것은 빈 체인이다:
+
+```
+ip6tables:  -N f2b-sshd
+            -A INPUT -p tcp -m multiport --dports 22 -j f2b-sshd
+            -A f2b-sshd -j RETURN        <- 전부 RETURN. 통과만 시킨다(동작 변화 0)
+```
+
+기능상 **무해**하고(모든 패킷이 RETURN 으로 돌아나온다) fail2ban 이 v6 를 처음 차단할 때 어차피 만드는 것이다.
+지우려면 `ip6tables -D INPUT -p tcp -m multiport --dports 22 -j f2b-sshd && ip6tables -F f2b-sshd && ip6tables -X f2b-sshd`.
+⚠️ 지우면 SR46-1 수정안 2번(감시가 v6 도 보게 하기)의 기준선이 사라지니, **1번(v6 22 DROP)을 먼저 정한 뒤** 결정할 것.
+그 밖에 서버 변경은 없다. 컨테이너 차단(`172.20.0.3`)·v6 차단(`2001:db8::1`)은 둘 다 원복 확인했다.
+`/opt/realestate/scripts/**` 무접촉 · 텔레그램 발화 0 · 격리 `/root/sec46/` 삭제.
+
+## 자체검사 (서버 · 2회 · 트리 구조 유지)
+| 회차 | 조건 | 결과 |
+|---|---|---|
+| 1 | `deploy/` 3개만 복사 | 통과 269 · 실패 14 · 건너뜀 1 · **HARN 5** — 원인은 **내 복사 누락**(`job-run.sh`·`market-index.sh`), 코드 결함 아님 |
+| 2 | 누락분까지 복사 + `docs/05-monitoring/` 동반 | **통과 290 · 실패 0 · 건너뜀 1 · HARN 0 · rc=0** |
+
+**T6d(fail2ban) 구획은 두 회차 모두 59 PASS · 0 FAIL · 0 HARN.**
+SR45-4(유출 가드 6단언) · SR45-5(탐색 4단언) · SR45-7(순서 10단언)이 전부 초록이고,
+PM 이 지적한 *"T6d 40여 건이 통째로 HARN"* 은 **재현되지 않는다** — 관문이 `rc≠0` 을 요구하도록 고쳐졌다
+(`:1878` `[ "$F2BNORC" != 0 ]`). PM 실수 2건(픽스처 rc / `blind_add` 경보 문구)도 코드·문서 양쪽에서 정정 확인.
+
+## 판정
+
+| 심각도 | 건수 | 항목 |
+|---|---|---|
+| Critical | 0 | — |
+| **High** | **1** | SR46-1 (IPv6 링크로컬 SSH 가 탐지·차단·감시 밖) |
+| Medium | 1 | SR46-2 (SR45-3 미조치 · 미배포인데 "돈다") |
+| Low | 2 | SR46-3 · SR46-4 |
+| 정보 | 4 | SR46-5 · SR46-6 · SR46-7 · SR46-8 |
+
+**High 1건 → `failed`.**
+차단 해소 조건: **SR46-1** — `ip6tables` 에서 22번을 닫거나(한 줄) v6 를 감시 사정거리에 넣고,
+`fail2ban.md` "못 잡는 것" 에 IPv6 를 사실대로 적을 것.
+**SR46-2 는 함께 처리 권장** — 지금은 오늘 고친 High 2건의 회귀를 잡을 장치가 0이다.
+SR46-3 · SR46-4 는 비차단이나, **SR46-4 는 감시를 systemd timer/sudo 로 옮기기 전에 반드시 선결**해야 한다.
+SR46-1 은 사용자가 결정한 `PasswordAuthentication`·`PermitRootLogin` 과 **무관**하다 — 수정은 `ip6tables` 한 줄이다.
+
+---
+
+## SR-047 · 2026-08-05 · **SR46-1(IPv6 SSH) 조치 재검증 + 신설 `check_v6ssh` 감시 검증 — v6 22번은 실제로 닫혔다(타임아웃 대조군까지 실측). 새 검사는 현재 서버에서 오탐 0. 다만 "완전 차단"으로 인정하는 규칙 범위가 문서보다 넓고, fail2ban 이 재시작하면 감시불능 한 줄이 상시 켜진다 · 판정 `passed`** (security-reviewer)
+
+> **결론: pass — Critical 0 · High 0 · Medium 2 · Low 2 · Info 1.**
+> **SR46-1 은 닫혔다.** 말이 아니라 **대조군을 둔 실측**이다 — 같은 링크로컬 주소로
+> v6 22번은 `-w 6` 을 **꽉 채우고 6008ms 만에 실패**(=DROP), 같은 스택의 미개방 포트 9999 는
+> **1ms 만에 거부**(=RST 가 돌아온다), IPv4 22번은 **7ms 에 연결 성공**. 세 값이 함께여야
+> "타임아웃이 났다"가 "패킷이 버려졌다"의 증거가 된다.
+> **SR46-2 도 닫혔다** — 두 문서가 배포 상태를 사실대로(미배포) 적고 실측 근거까지 실었다.
+> 담당자가 실측으로 바꾼 설계 2건(`is-enabled` 기준 · 빈 출력 두 갈래 가르기)은 **옳다**.
+> **점프가 아니라 DROP 을 본 판단도 옳다** — 이 서버의 v6 `f2b-sshd` 체인은
+> `-A f2b-sshd -j RETURN` **한 줄뿐**이라 실제 차단력이 0 인 것을 확인했다.
+>
+> ⚠️ `PasswordAuthentication yes` · `PermitRootLogin yes` 는 사용자 결정이라 **다시 권고하지 않는다.**
+> ⚠️ 서버 방화벽·유닛은 **하나도 바꾸지 않았다**(읽기 전용 실측만). 재부팅도 하지 않았다.
+
+### 동결 해시 확인
+| 파일 | 시작 | 서버 격리 사본 | 종료 | 판정 |
+|---|---|---|---|---|
+| `deploy/monitor.sh` | `27d75fae…4c7c5` | `27d75fae…4c7c5` | `27d75fae…4c7c5` | 일치 |
+| `deploy/monitor-selftest.sh` | `a9e66170…5e8b2` | `a9e66170…5e8b2` | `a9e66170…5e8b2` | 일치 |
+
+리뷰 중 트리 변경 0 · `backend/**` · `frontend/**` 무접촉 · `/opt/realestate/scripts/**` 무접촉(sha256 읽기만) ·
+텔레그램 발화 **0통** · 격리 `/root/sec47/` 사용 후 삭제 · `git checkout --` 미사용 · 커밋 없음.
+
+### 기준값 재현
+| 항목 | PM 기준값 | 이번 실측 | 판정 |
+|---|---|---|---|
+| 서버 자체검사(문서 포함 트리) | 341 · 0 · 1 · HARN 0 · rc=0 | **통과 341 · 실패 0 · 건너뜀 1 · 하네스오류 0 · rc=0** | 일치 |
+| `grep -rn "MUT-" deploy/` | 0건 | **0건** | 일치 |
+| 백엔드 `pytest` | 1,626 passed · 103 skipped | **1,626 passed · 103 skipped** | 일치 |
+
+자체검사는 **서버에서 2회**(윈도우 실행 금지 준수). 1회차는 `job-run.sh`·`market-index.sh` 를 내가
+안 복사해 실패 14 / HARN 5 — **코드 결함이 아니다**. 2회차(누락분 복사 후)가 위 값이다.
+T6e(IPv6) 구획은 2 PASS · 0 FAIL — *"가짜가 실측 모양대로 동작한다"* 와 *"대조군 오탐 0"* 이 실제로 돈다.
+
+---
+
+# 1. SR46-1 이 실제로 닫혔는가 — **닫혔다**
+
+**서버 실측 (2026-08-05 · 읽기 전용)**
+
+```
+$ ip6tables -S INPUT
+-P INPUT ACCEPT
+-A INPUT -p tcp -m tcp --dport 22 -j DROP              <- 1번 자리. 우리 규칙
+-A INPUT -p tcp -m multiport --dports 22 -j f2b-sshd   <- fail2ban 이 만든 점프(실차단 0)
+
+$ ip6tables -S f2b-sshd
+-N f2b-sshd
+-A f2b-sshd -j RETURN                                  <- **비어 있다.** 점프를 보호로 세면 안 되는 이유
+
+$ systemctl is-enabled re-v6-ssh-drop.service   -> enabled  rc=0
+$ ls -l /etc/systemd/system/multi-user.target.wants/re-v6-ssh-drop.service
+  -> /etc/systemd/system/re-v6-ssh-drop.service          <- enable 심볼릭 링크 실재
+$ grep -c fe80 /var/log/fail2ban.log             -> 0     <- v6 탐지는 여전히 0(예상대로)
+$ ip -6 addr show scope global                   -> 0건   <- 인터넷 경유 유입은 여전히 불가
+$ ss -lntp | grep :22   -> 0.0.0.0:22  +  [::]:22        <- sshd 는 아직 v6 를 듣는다
+```
+
+**차단이 "정말 DROP 인가"를 대조군으로 갈랐다** (같은 호스트·같은 링크로컬 주소·`nc -w 6`):
+
+| 대상 | 결과 | 소요 | 읽는 법 |
+|---|---|---|---|
+| v6 `[fe80::…%enp3s0]:22` | 실패 | **6008 ms** | `-w` 를 꽉 채웠다 = **패킷이 버려진다(DROP)** |
+| v6 `[fe80::…%enp3s0]:9999` | 실패 | **1 ms** | 즉시 거부 = 스택은 살아 있고 RST 를 준다 |
+| v4 `127.0.0.1:22` | **성공** | 7 ms | **IPv4 는 무사하다** |
+
+세 줄이 함께라야 증거다. 1ms 대조군이 없으면 "타임아웃"은 v6 스택이 죽은 것과 구분되지 않는다.
+
+**네이티브 `nft` 로 더 앞에서 열어 두는 규칙은 없다** — `nft list tables` → `ip nat · ip filter ·
+ip6 nat · ip6 filter · ip raw` 뿐이고 전부 iptables 호환 테이블이다. 즉 문서가 적은
+*"네이티브 nft 는 `ip6tables -S` 에 안 보인다 … 오늘 이 서버에 그런 규칙은 없다"* 는 **사실이다**.
+
+## 재부팅 복구 — **유닛 정의는 타당하다. 다만 "부팅 순간의 틈"이 남는다 (SR47-3)**
+
+유닛 정의를 그대로 읽었다:
+
+```
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c "/usr/sbin/ip6tables -C INPUT -p tcp --dport 22 -j DROP 2>/dev/null \
+                      || /usr/sbin/ip6tables -I INPUT 1 -p tcp --dport 22 -j DROP"
+[Install]
+WantedBy=multi-user.target        (심볼릭 링크 실재 · is-enabled=enabled)
+```
+
+- 절대경로 · 멱등(`-C || -I`) · `WantedBy` 실링크 — **부팅에 실행될 조건은 갖췄다.**
+- `Wants=network-online.target` 은 **필수 의존이 아니다**(순서만). 그 타깃이 실패해도 유닛은 돈다.
+  이 서버에서 `network-online.target` 은 `active` 이고 `systemd-networkd-wait-online` 은 **81ms**다.
+- **그러나 재부팅을 실제로 해 보지 않았다** — 마지막 부팅은 2026-04-23, 유닛의 첫 실행은
+  2026-08-05 01:54:49 **수동 기동**이다. 즉 부팅 경로는 **한 번도 밟히지 않았다.**
+  담당자가 문서에 그렇게 적었고(`fail2ban.md` "재부팅을 실제로 해 보지는 않았다"), **정직하다.**
+  나도 재부팅하지 않았으므로 **"정의상 돌 것으로 보인다"까지가 내가 말할 수 있는 전부다.**
+
+---
+
+# 2. 새 검사가 오탐을 만드는가 — **현재 서버에서 오탐 0**
+
+`monitor.sh` 에서 `_f2b_redact_addr`·`_f2b_rule_verdict`·`_f2b_port_covered`·`_v6_rule_is_drop`·
+`_v6_scan` 만 **함수째 뽑아** 자체검사와 무관하게 독립 실행했다(17 케이스).
+
+| 입력 | `_v6_scan` | 경보 | 판정 |
+|---|---|---|---|
+| **이 서버 현재 출력(위 실측 그대로)** | `ok` | 없음 | ✅ **오탐 0** |
+| `-P INPUT DROP` · 규칙 0개 | `policy` | 없음 | ✅ 정책만으로 닫힌 호스트에서 조용하다 |
+| `-P INPUT ACCEPT` · 규칙 0개 | `missing` | 경보 | ⚠️ v6 미사용 호스트면 오탐 → **SR47-4**(문서에 이미 있음) |
+| DROP 앞 포괄 ACCEPT | `shadow …` | 경보 | ✅ 우회를 잡는다 |
+| DROP 앞 `-j ufw6-before-input` | `unsure …` | 감시불능 | ✅ 무해라 부르지 않는다 |
+| `-s fe80::/10` 붙은 DROP 만 | `missing` | 경보 | ✅ 좁은 규칙을 보호로 안 센다 |
+| `-i lo` 전용 DROP 만 | `missing` | 경보 | ✅ |
+| **f2b 점프만(SR-046 사고 모양)** | `missing` | 경보 | ✅ **점프를 보호로 안 센다 — 설계 의도대로다** |
+| `-p ipv6-icmp -j ACCEPT` 가 앞 | `ok` | 없음 | ✅ 무해 판정 |
+| `--ctstate ESTABLISHED` ACCEPT 가 앞 | `ok` | 없음 | ✅ 무해 판정 |
+| `-j REJECT --reject-with …` | `ok` | 없음 | ✅ |
+| `--dports 20:30` 범위 DROP | `ok` | 없음 | ✅ |
+| 다른 포트(2222) DROP 만 | `missing` | 경보 | ✅ |
+
+**`ip6tables` 자체가 없거나 실행 실패**면 `blind_add`(감시불능)로 가고 `clear_alert` 를 안 부른다 —
+v6 를 안 쓰는 호스트를 "규칙 없음"으로 몰지 않는다. fail-open 규율이 v4 와 **동일**하다. ✅
+
+---
+
+# 3. `check_v6ssh` 가 새 공격면인가 — **아니다**
+
+5분마다 root 로 `ip6tables -S INPUT` · `systemctl is-enabled/is-active` 를 부른다. 점검 결과:
+
+- **명령 주입 없음.** `eval` 0회 · 모든 확장이 따옴표 안 · 파싱은 `case`/`sed`/`printf '%s'` 뿐이다.
+  `printf 'shadow %s' "$(…)"` 처럼 **형식 문자열이 상수**이고 규칙 문자열은 인자로만 들어간다.
+- **경로 고정.** `_f2b_bin` 이 `/usr/sbin → /sbin → /usr/bin → /bin → …` 절대경로를 먼저 고르고
+  `PATH`(`command -v`)는 마지막이다. `RE_MON_BIN_DIR` 훅은 root 크론 환경에서만 설정 가능하다.
+- **주소 유출 없음.** 알림·요약에 실리는 규칙은 전부 `_f2b_redact_addr` 를 통과한다. 독립 실측:
+
+  ```
+  -s fe80::f816:3eff:fe31:8b01/128 -> -s <ip>      2001:db8::1 -> <ip>
+  -s 115.68.230.40/32              -> -s <ip>      fa:16:3e:… (MAC) -> <ip>
+  ```
+  그 위에 전송 직전 `scrub()` 이 한 번 더 돈다. 토큰은 `curl -K -` 로 stdin 에 넣어
+  `ps` 에 안 보이고, 본문은 `--data-urlencode "text=${text}"` 로 따옴표 안이다. ✅
+- **공격자 통제 문자열을 신뢰하지 않는가**: 규칙에 박히는 주소는 fail2ban 이 차단한 IP —
+  즉 **공격자가 고를 수 있는 값**이다. 그러나 우리가 읽는 것은 `INPUT` 뿐이고(차단 IP 는
+  `f2b-sshd` 체인 안에 있다), 설령 들어와도 위 두 겹(redact + scrub)을 지난다. 실행 경로 없음. ✅
+- **`raise_alert`/`clear_alert` 키 분리** — `v6ssh_rule` · `v6ssh_unit` 이 `f2b_rule` 과 별개다.
+  한쪽 해소가 다른 쪽을 덮어 끄지 않는다. ✅
+
+---
+
+# 4. "못 잡는 것" 8가지가 정직한가 — **7개는 정직하다. 1개가 과대(SR47-1)**
+
+| 담당자 서술 | 내 검증 | 판정 |
+|---|---|---|
+| v6 무차별 대입을 세지 못한다 | `grep -c fe80 /var/log/fail2ban.log` = **0** | ✅ 사실 |
+| fail2ban 의 v6 필터를 고친 것이 아니다 | 필터 원문 그대로 | ✅ 사실 |
+| DROP 앞 하위 체인의 안은 못 본다 | `ufw6-before-input` 케이스 → `unsure` | ✅ 사실 |
+| **`sshd` 가 v6 를 듣는지는 안 본다** | `ss -lntp` → `[::]:22` 실재. 코드에 `ss` 호출 0 | ✅ **사실이고, 지금은 오탐이 안 난다** |
+| 재부팅을 실제로 해 보지 않았다 | 부팅 2026-04-23 · 유닛 첫 실행 2026-08-05 01:54:49 | ✅ **정직하다** |
+| 다른 v6 포트는 안 본다 | 코드가 `V6_PORT` 한 칸 | ✅ 사실 |
+| **네이티브 `nft` 는 `ip6tables -S` 에 안 보인다** | `nft list tables` = 호환 테이블 5개뿐 | ✅ **사실이고 "오늘 없다"도 사실** |
+| DROP 앞에 f2b 점프가 오면 `blind_add` 가 남는다 | 재현됨 — **다만 결과를 과소 서술** | ⚠️ **SR47-2** |
+| *(빠진 것)* 좁혀진 DROP 도 "완전 차단"으로 센다 | 재현됨 | ❌ **SR47-1 — 목록에 없다** |
+
+---
+
+## SR47-1 · **Medium** · `-m recent`/`-m limit`/`-m iprange`/`-m set`/`-m mac` 으로 **좁혀진 DROP** 을 "22번 완전 차단"으로 인정한다 — 문서는 *"이름만 맞는 규칙에 안 속는다"* 고 적었다
+**위치**: `deploy/monitor.sh:1508-1532` (`_v6_rule_is_drop`) · `docs/05-monitoring/fail2ban.md:207-208` · `monitoring.md:224`
+**CWE**: CWE-693 (Protection Mechanism Failure) · CWE-1284 (Improper Validation of Specified Quantity) · **OWASP A09**
+
+**재현 (독립 실행 · 함수 원본 그대로)**
+
+```
+고전 SSH rate-limit(분당 3회는 통과):
+  -A INPUT -p tcp -m tcp --dport 22 -m state --state NEW \
+           -m recent --update --seconds 60 --hitcount 4 -j DROP
+  _v6_scan -> ok        -> 요약 "22번 DROP 걸려 있음" · 경보 0
+
+-m hashlimit --hashlimit-above 3/min -j DROP        -> ok
+-m iprange --src-range 2001:db8::1-2001:db8::9      -> ok   (사실상 -s 와 같은데 통과)
+-m set --match-set foo src                          -> ok
+-m mac --mac-source fa:16:3e:…                      -> ok   (MAC 한 대만 막는데 통과)
+-m limit --limit 1/sec                              -> ok
+```
+
+`_v6_rule_is_drop` 이 거르는 것은 `-s`/`--source`/`--src`(뒤에 **공백**이 붙은 형태) · `-i lo` ·
+프로토콜 · `--ctstate`(NEW 유무) · 포트 **다섯 가지뿐**이다. 매치 모듈로 좁히는 형태는 하나도 안 본다.
+`--src-range` 는 `*" --src "*` 패턴이 **공백을 요구**해 걸리지 않는다(`--src-range` ≠ `--src `).
+
+**왜 문제인가.** `-m recent`(hitcount 4/60초)는 **가장 흔한 SSH 방어 관용구**다. 누군가
+*"완전 차단은 과하니 속도 제한으로 바꾸자"* 며 우리 DROP 을 이 줄로 교체하면, v6 22번은
+**분당 3회 · 하루 4,300회**가 통과하는데 감시는 *"22번 DROP 걸려 있음"* 초록을 유지한다.
+이것이 SR-046 이 High 로 지적한 구조와 **정확히 같은 형태**다 — 보호가 있다고 적고 실제로는 없다.
+`-m mac` 은 더 나쁘다: **MAC 한 대만** 막는데 우리는 전면 차단으로 읽는다.
+
+**심각도 근거(과장하지 않는다).** 공격자가 스스로 만들 수 있는 상태가 아니다 — root 권한자가
+규칙을 바꿔야 한다. 그래서 High 가 아니라 **Medium**이다. 다만 *바꾸는 사람*(=우리)이 바로
+이 감시를 근거로 삼을 것이므로, 조용한 오답의 대가는 크다.
+
+**수정안** — `_v6_rule_is_drop` 에 "조건부로 만드는 매치"를 거절 목록으로 추가한다(v4 판정과 같은 규율):
+```sh
+case "$r" in
+  *" -m recent "*|*" -m limit "*|*" -m hashlimit "*|*" -m iprange "*|\
+  *" -m set "*|*" -m mac "*|*" -m connlimit "*|*" -m quota "*|*" -m time "*) return 1 ;;
+esac
+```
+그리고 `fail2ban.md` 의 *"이름만 맞는 규칙에 안 속는다"* 줄에 **매치 모듈로 좁힌 DROP** 을 명시한다.
+(자체검사 T6e 에 `-m recent` 픽스처 1개를 추가하면 회귀가 잡힌다.)
+
+---
+
+## SR47-2 · **Medium** · fail2ban 이 **재시작만 하면** 자기 점프를 DROP 위로 올린다 → `blind_add` 가 상시 켜지고 `logblind` 경보가 **영원히 안 꺼진다**(다른 모든 감시불능 사유를 덮는다)
+**위치**: `deploy/monitor.sh:1534-1572`(`_v6_scan` → `unsure`) · `:1647`(`blind_add`) · `:1712-1714`(`check_logblind`) · `docs/05-monitoring/fail2ban.md:241-243`
+**CWE**: CWE-778 (Insufficient Logging) · CWE-390 (Detection of Error Condition Without Action) · **OWASP A09**
+
+**재현 (서버 실측 + 독립 실행)**
+
+```
+$ grep -A3 "^actionstart" /etc/fail2ban/action.d/iptables-multiport.conf
+actionstart = <iptables> -N f2b-<name>
+              <iptables> -A f2b-<name> -j <returntype>
+              <iptables> -I <chain> -p <protocol> -m multiport --dports <port> -j f2b-<name>
+                         ^^ -I INPUT = **1번 자리에 꽂는다**
+```
+
+지금 점프가 DROP **아래**에 있는 것은 우연이다 — PM 이 나중에 `-I INPUT 1` 을 했기 때문이다
+(실측 시각: fail2ban 시작 08-04 20:44:34 · v6 유닛 08-05 01:54:49). **fail2ban 을 한 번만
+재시작하면 순서가 뒤집힌다.** 그리고 `f2b_dead` 경보 본문이 지시하는 조치가 바로
+`systemctl restart fail2ban` 이다. 재부팅 때도 두 유닛의 기동 순서에 따라 뒤집힐 수 있다.
+
+뒤집힌 뒤의 감시 동작(함수 독립 실행):
+```
+-P INPUT ACCEPT
+-A INPUT -p tcp -m multiport --dports 22 -j f2b-sshd
+-A INPUT -p tcp -m tcp --dport 22 -j DROP
+   _v6_scan -> unsure -A INPUT -p tcp -m multiport --dports 22 -j f2b-sshd
+   -> check_v6ssh: rule=ok (맞다) + blind_add(…)      ← **5분마다 영구히**
+   -> check_logblind: BLIND 가 비지 않는다 -> raise_alert logblind 21600
+                      clear_alert logblind 은 **다시는 안 불린다**
+```
+
+**차단 자체는 안 뚫린다** — 확인했다. v6 `f2b-sshd` 체인은 `-A f2b-sshd -j RETURN` 한 줄뿐이라
+패킷이 되돌아와 2번 자리의 DROP 에 걸린다. **문제는 감시의 신호가 죽는 것이다.**
+
+`logblind` 는 **단일 키**로 로그권한·로그유출·5xx·SSH·인증서·DB·`ip6tables` 사유를 **전부 모아**
+한 통으로 보낸다(`monitor.sh:1712-1714`). 이 키가 상시 ON 이 되면:
+- 6시간마다 같은 경보가 영구 발송 → 사람이 **읽지 않게 된다**(경보 피로).
+- 진짜 감시불능(예: `auth.log` 를 못 읽어 SSH 감시가 죽는다)이 생겨도 **문면이 같아 구분이 안 된다.**
+- `clear_alert logblind` 가 영원히 안 불려 **"해소" 신호 자체가 사라진다.**
+
+문서는 *"감시불능 한 줄이 상시 켜진다"* 까지만 적었다. **경보 채널 하나가 통째로 죽는다**는
+결과는 안 적혀 있고, 이 저장소가 반복해 고쳐 온 *"감시가 자기 자신에 대해 거짓말한다"* 의 변형이다.
+
+**수정안 (택1, 위가 낫다)**
+1. `_v6_scan` 에서 **우리 DROP 을 이미 찾은 뒤라면** 앞의 `unsure` 중 `-j <F2B_CHAIN>` 은
+   `unsure` 로 세지 않는다(그 체인은 우리가 내용을 아는 fail2ban 소유이고 `RETURN` 으로 끝난다).
+   대신 그 체인을 `ip6tables -S "$F2B_CHAIN"` 로 **한 번 더 읽어** ACCEPT 유무를 확인하면
+   추측이 아니라 실측이 된다.
+2. 감시가 아니라 순서를 고친다 — 유닛 `ExecStart` 를 `-C … || -I INPUT 1` 대신
+   **항상 1번 자리를 보장**하도록 바꾸고(`-D` 후 `-I INPUT 1`), 유닛에 `After=fail2ban.service` 를 준다.
+   ※ 이건 **서버 유닛 변경**이라 이번 리뷰에서는 하지 않았다. PM 판단이 필요하다.
+3. 최소 조치: `blind_add` 대신 `v6ssh` 전용 키로 분리해 **`logblind` 를 오염시키지 않게** 한다.
+
+---
+
+## SR47-3 · **Low** · 유닛이 `After=network-online.target` 이라 **부팅 직후 sshd 가 먼저 열린다** — ip6tables 규칙은 네트워크를 기다릴 이유가 없다
+**위치**: `/etc/systemd/system/re-v6-ssh-drop.service` (`After=/Wants=network-online.target`) · `docs/05-monitoring/fail2ban.md:186-187`
+**CWE**: CWE-696 (Incorrect Behavior Order) · **OWASP A05**
+
+**재현 (서버 실측 · 재부팅 없이 정의만으로)**
+```
+$ systemctl show ssh.service -p After | tr ' ' '\n' | grep -E "network|basic"
+network.target
+basic.target                       <- sshd 는 network.target 뒤에 곧바로 뜬다
+
+re-v6-ssh-drop.service : After=network-online.target
+   network-online.target 은 network.target **뒤**이고 wait-online 을 기다린다
+$ systemd-analyze blame | grep wait-online
+  81ms systemd-networkd-wait-online.service
+```
+
+즉 매 재부팅마다 **sshd 가 `[::]:22` 를 연 뒤 우리 DROP 이 걸린다.** 이 서버에서 그 틈은
+`wait-online` 81ms + 유닛 기동 = **수백 ms 수준으로 짧다**(그래서 Low 다). 그러나
+`systemd-networkd-wait-online` 이 어떤 이유로 타임아웃하면(기본 120초) 그만큼 **v6 22번이 열린 채**다.
+방화벽 규칙에 네트워크 준비는 **필요 없다** — 걸어 두면 트래픽이 올 때부터 적용된다.
+
+**수정안** (유닛 파일 한 곳):
+```
+[Unit]
+DefaultDependencies=no
+After=local-fs.target
+Before=network-pre.target sysinit.target ssh.service
+Wants=network-pre.target
+[Install]
+WantedBy=sysinit.target
+```
+최소한 `Before=ssh.service` 한 줄만 넣어도 순서가 보장된다.
+※ **서버 유닛 변경이라 이번 리뷰에서는 하지 않았다**(지시: 방화벽·유닛 무변경).
+
+---
+
+## SR47-4 · **Low** · v6 를 **안 듣는** 호스트에서는 `missing` 경보가 오탐이다 — 코드·문서 모두 인정하고 있으나 조치가 없다
+**위치**: `deploy/monitor.sh:1503-1505` 주석 · `_v6_scan` `missing` 가지
+**CWE**: CWE-1126 (Declaration of Variable with Unnecessarily Wide Scope) 성격 아님 — 실질은 **오탐에 의한 경보 피로**
+
+`-P INPUT ACCEPT` + 규칙 0개 → `missing` → 6시간마다 경보. `sshd` 가 `ListenAddress` 로 v4 만
+듣도록 좁히면 규칙 없이도 안전한데 우리는 운다. **지금 이 서버에서는 오탐이 아니다**(실측:
+`[::]:22` 를 듣는다). 문서도 이 한계를 정확히 적었다. **비차단**으로 남긴다.
+
+**수정안(선택)**: `ss -H -ltn 'sport = :22'` 로 `[::]` 리스너 유무를 한 번 읽고, 안 듣는 호스트면
+`missing` 을 경보가 아닌 요약 문구로 낮춘다. 못 읽으면 지금처럼 경보(보수적)를 유지한다.
+
+---
+
+## SR47-5 · **Info** · `_f2b_redact_addr` 가 IPv4-매핑 v6 주소를 **두 번** 치환한다(`::ffff:1.2.3.4` → `<ip><ip>`)
+**위치**: `deploy/monitor.sh:1206-1208`
+
+```
+-s ::ffff:1.2.3.4  ->  -s <ip><ip>
+```
+v6 규칙과 v4 규칙이 각각 걸려 **주소는 완전히 가려진다 — 유출 없음.** 표기만 어색하다.
+고치려면 v6 치환을 먼저 돌리거나 `s/<ip><ip>/<ip>/g` 를 한 번 더 태운다. **조치 불요.**
+
+---
+
+# 5. SR46-2 정정 확인 — **정정됐다** ✅
+
+**실측 (2026-08-05)**
+```
+$ sha256sum /opt/realestate/scripts/monitor.sh
+83bda3dd324b8509af840d58358d93166d15fc195ed4edd3a27a8e7f049ffad6    <- 여전히 CR-048 판
+저장소 deploy/monitor.sh  27d75faed4b8a08f…                          <- check_fail2ban + check_v6ssh
+$ crontab -l | grep monitor.sh
+*/5 * * * * /opt/realestate/scripts/monitor.sh --fast
+5 9  * * *  /opt/realestate/scripts/monitor.sh --daily                <- 도는 것은 83bda3dd 판
+```
+
+두 문서가 이제 **사실대로** 적는다:
+- `monitoring.md:193-200` — *"7d(fail2ban) · 7e(IPv6) 는 저장소에만 있고 **아직 서버에서 돌지 않는다**"* +
+  실측 명령·기대값 + *"그 전까지 v6 방어는 ip6tables 규칙과 systemd 유닛 자체뿐이고,
+  그것이 사라져도 **알려 주는 것은 없다**"*.
+- `fail2ban.md:45-59` — 같은 취지 + 예전 서술이 **거짓이었다**고 명시 + 배포 후 현재형 전환 조건.
+
+SR-041 · SR-042 · SR45-2 · SR46-2 로 네 번 반복된 *"문서가 감시 사정거리를 과장한다"* 가
+이번에는 **반대 방향(사정거리를 과소가 아니라 정확히)으로** 적혔다. 재발 없음.
+
+⚠️ **다만 상태는 그대로다** — `check_v6ssh` 는 **아직 안 돈다.** 지금 v6 DROP 이 사라져도
+알려 주는 것은 없다. 이것은 **문서 결함이 아니라 배포(G5) 미완**이고, 이번 판정의 차단 사유가 아니다.
+
+---
+
+# SR-046 지적 조치 재검증 표
+
+| ID | 심각도 | 내용 | 이번 판정 | 근거 |
+|---|---|---|---|---|
+| SR46-1 | High | IPv6 SSH 가 fail2ban 사정거리 밖 | ✅ **해소** | v6:22 = 6008ms 타임아웃 / v6:9999 = 1ms 거부 / v4:22 = 7ms 성공. 유닛 enabled + 심링크 실재 |
+| SR46-2 | Medium | 문서가 미배포를 "돈다"고 서술 | ✅ **해소** | `monitoring.md:193` · `fail2ban.md:45-59` 가 실측 근거와 함께 미배포 명시 |
+| SR46-3 | — | (SR-046 원장 참조 · 비차단) | — | 이번 범위 밖 |
+| SR46-4 | — | (SR-046 원장 참조 · 비차단) | — | 이번 범위 밖 · **감시를 timer/sudo 로 옮기기 전 선결 조건은 유효** |
+
+# 담당자가 실측으로 바꾼 설계 2건 — **둘 다 옳다** ✅
+
+1. **`is-enabled` 를 기준으로 삼은 것** — `Type=oneshot`+`RemainAfterExit=yes` 는 규칙을 지워도
+   영원히 `active` 다. `is-active` 를 근거로 썼으면 **방화벽이 뚫린 채 초록**이었다.
+   `enabled-runtime` 도 `notenabled` 로 떨어뜨린 것(`monitor.sh:1595-1599`)까지 맞다 —
+   그건 재부팅에 사라지는 상태다.
+2. **빈 `is-enabled` 를 `is-active` 로 가른 것** — 유닛 파일 삭제(경보)와 systemd 불가(감시불능)를
+   구분한다. 이 구분이 없으면 **사람이 유닛을 지운 사고**가 `logblind` 한 통에 묻힌다.
+   유닛 삭제는 우리가 가장 알아야 하는 쪽이므로 방향이 맞다.
+3. **점프가 아니라 DROP 을 본 것** — `ip6tables -S f2b-sshd` 가 `RETURN` 한 줄뿐인 것을
+   실측했다. 점프로 판정했으면 **활짝 열린 채 초록**이었다는 담당자 서술이 사실이다.
+
+# 판정
+
+**pass** — Critical 0 · **High 0** · Medium 2(SR47-1 · SR47-2) · Low 2(SR47-3 · SR47-4) · Info 1(SR47-5).
+SR-046 의 차단 사유(High 1건)는 **실측으로 닫혔고**, 동반 권장이던 SR46-2 도 함께 닫혔다.
+남은 2건은 **감시의 정확도** 문제이지 접근 통제의 구멍이 아니다 —
+SR47-1 은 root 권한자가 규칙을 좁게 바꿔야 성립하고, SR47-2 는 차단력이 아니라 경보 채널을 죽인다.
+**다음 라운드에서 SR47-1 · SR47-2 를 함께 처리할 것을 권고한다.** 특히 SR47-2 는
+**fail2ban 을 한 번만 재시작하면 발생**하므로 배포(G5) 전에 정리하는 편이 낫다.
+
+⚠️ **배포 승인은 아니다.** 지금 서버에서 도는 판은 여전히 `83bda3dd`(check_fail2ban·check_v6ssh 없음)이고,
+v6 방어를 지켜보는 것은 **아직 아무것도 없다**. 그 사실은 문서에 정확히 적혀 있다.
+⚠️ **재부팅 복구는 정의로만 판단했다** — 실제로 부팅해 본 적이 없다. 담당자 서술과 같다.
